@@ -156,6 +156,9 @@ class ModelInspection:
             "recommended_backend": self.compatibility.get("recommended_backend"),
             "recommended_profile": self.compatibility.get("recommended_profile"),
             "runtime_compatibility": self.compatibility.get("runtime_compatibility"),
+            "architecture_recognized": self.compatibility.get("recognized", False),
+            "support_level": self.compatibility.get("support_level"),
+            "support_notes": self.compatibility.get("support_notes"),
             "unverified_model": self.compatibility.get("unverified_model", False),
         }
 
@@ -429,7 +432,9 @@ def _inspect_hf_model(repo_id: str) -> ModelInspection:
         mtp_num_hidden_layers=int(
             tcfg.get("mtp_num_hidden_layers")
             or tcfg.get("num_nextn_predict_layers")
+            or tcfg.get("num_mtp_modules")
             or config.get("num_nextn_predict_layers")
+            or config.get("num_mtp_modules")
             or 0
         ),
         hidden_size=tcfg.get("hidden_size"),
@@ -500,7 +505,9 @@ def inspect_model(model_dir: Path | str) -> ModelInspection:
         mtp_num_hidden_layers=int(
             tcfg.get("mtp_num_hidden_layers")
             or tcfg.get("num_nextn_predict_layers")
+            or tcfg.get("num_mtp_modules")
             or config.get("num_nextn_predict_layers")
+            or config.get("num_mtp_modules")
             or 0
         ),
         hidden_size=tcfg.get("hidden_size"),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -73,15 +74,20 @@ class MTPLXRuntime:
         if not self.mtp_enabled:
             raise RuntimeError("MTP is not enabled for this runtime")
         with mtp_adapter_depth(self.model, mtp_depth):
-            return self.model.mtp_forward(
-                hidden_states,
-                next_token_ids,
-                mtp_cache=mtp_cache,
-                concat_order=concat_order,
-                return_hidden=return_hidden,
-                mtp_hidden_variant=mtp_hidden_variant,
-                position_offset=position_offset,
-            )
+            kwargs = {
+                "mtp_cache": mtp_cache,
+                "concat_order": concat_order,
+                "return_hidden": return_hidden,
+                "mtp_hidden_variant": mtp_hidden_variant,
+                "position_offset": position_offset,
+            }
+            try:
+                params = inspect.signature(self.model.mtp_forward).parameters
+            except Exception:
+                params = {}
+            if "mtp_depth" in params:
+                kwargs["mtp_depth"] = mtp_depth
+            return self.model.mtp_forward(hidden_states, next_token_ids, **kwargs)
 
     def update_mtp_cache(
         self,
@@ -95,13 +101,18 @@ class MTPLXRuntime:
             raise RuntimeError("MTP is not enabled for this runtime")
         update = getattr(self.model, "mtp_update_cache", None)
         if update is not None:
-            return update(
-                hidden_states,
-                next_token_ids,
-                mtp_cache=mtp_cache,
-                concat_order=concat_order,
-                position_offset=position_offset,
-            )
+            kwargs = {
+                "mtp_cache": mtp_cache,
+                "concat_order": concat_order,
+                "position_offset": position_offset,
+            }
+            try:
+                params = inspect.signature(update).parameters
+            except Exception:
+                params = {}
+            if "mtp_depth" in params:
+                kwargs["mtp_depth"] = None
+            return update(hidden_states, next_token_ids, **kwargs)
         _logits, hidden = self.model.mtp_forward(
             hidden_states,
             next_token_ids,
@@ -151,7 +162,18 @@ def load(
     contract = (contract or MTPContract()).with_config_defaults(config)
     mtp_enabled = False
     if mtp:
-        mtp_enabled = inject_mtp_support(model, path, config, contract)
+        from .deepseek_mtp_patch import inject_deepseek_mtp_support, is_deepseek_mtp_config
+        from .glm_mtp_patch import inject_glm_mtp_support, is_glm_mtp_config
+        from .mimo_mtp_patch import inject_mimo_mtp_support, is_mimo_mtp_config
+
+        if is_mimo_mtp_config(config):
+            mtp_enabled = inject_mimo_mtp_support(model, path, config, contract)
+        elif is_glm_mtp_config(config):
+            mtp_enabled = inject_glm_mtp_support(model, path, config, contract)
+        elif is_deepseek_mtp_config(config):
+            mtp_enabled = inject_deepseek_mtp_support(model, path, config, contract)
+        else:
+            mtp_enabled = inject_mtp_support(model, path, config, contract)
         if not mtp_enabled or not validate_mtp_support(model):
             raise RuntimeError(f"MTP injection failed for {path}")
     from .attention_split import configure_split_full_attention

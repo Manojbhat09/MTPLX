@@ -3,9 +3,15 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 from safetensors.numpy import save_file
 
 from mtplx.artifacts import expected_mtp_file, inspect_model
+from mtplx.backends.registry import (
+    UnverifiedArchitectureError,
+    architecture_catalog,
+    require_verified_or_raise,
+)
 from mtplx.constants import EXPECTED_MTP_KEYS, EXPECTED_PREQUANTIZED_MTP_KEYS
 
 
@@ -189,7 +195,16 @@ def test_qwen3_next_architecture_without_mtp_sidecar_is_unverified(tmp_path):
     assert result.compatibility["runtime_compatibility"] == "needs-grafting"
 
 
-def test_deepseek_mtp_is_incompatible_architecture(tmp_path):
+def test_architecture_catalog_tracks_main_mtp_families():
+    ids = {row["arch_id"] for row in architecture_catalog()}
+    assert "qwen3-next-mtp" in ids
+    assert "deepseek-v3-mtp" in ids
+    assert "glm4-moe-mtp" in ids
+    assert "minimax-m2-mtp" in ids
+    assert "gemma-mtp" in ids
+
+
+def test_deepseek_mtp_without_runtime_contract_needs_contract(tmp_path):
     (tmp_path / "config.json").write_text(
         json.dumps(
             {
@@ -203,8 +218,329 @@ def test_deepseek_mtp_is_incompatible_architecture(tmp_path):
 
     result = inspect_model(tmp_path)
 
-    assert result.compatibility["tier"] == "incompatible-architecture"
-    assert result.compatibility["exit_code"] == 4
+    assert result.compatibility["tier"] == "architecture-compatible-but-unverified"
+    assert result.compatibility["exit_code"] == 3
+    assert result.compatibility["arch_id"] == "deepseek-v3-mtp"
+    assert result.compatibility["recognized"] is True
+    assert result.compatibility["can_run"] is False
+    assert result.compatibility["unsafe_force_required"] is False
+    assert result.compatibility["runtime_compatibility"] == "needs-contract"
+    assert result.compatibility["mtp_supported"] == "recognized"
+
+    with pytest.raises(UnverifiedArchitectureError):
+        require_verified_or_raise(result, unsafe_force_unverified=True, yes=True)
+
+
+def test_deepseek_mtp_with_runtime_contract_and_model_file_is_verified(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["DeepseekV3ForCausalLM"],
+                "model_type": "deepseek_v3",
+                "num_nextn_predict_layers": 2,
+                "num_hidden_layers": 61,
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_file({"model.layers.61.enorm.weight": np.ones((1,), dtype=np.float32)}, tmp_path / "model.safetensors")
+    _write_runtime_contract(tmp_path, arch_id="deepseek-v3-mtp")
+
+    result = inspect_model(tmp_path)
+
+    assert result.compatibility["tier"] == "verified"
+    assert result.compatibility["can_run"] is True
+    assert result.compatibility["recommended_backend"] == "deepseek_mtp"
+    assert result.compatibility["runtime_compatibility"] == "native-contract-gated"
+
+
+def test_glm4_moe_mtp_without_runtime_contract_needs_contract(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Glm4MoeForCausalLM"],
+                "model_type": "glm4_moe",
+                "num_nextn_predict_layers": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = inspect_model(tmp_path)
+
+    assert result.compatibility["arch_id"] == "glm4-moe-mtp"
+    assert result.compatibility["runtime_compatibility"] == "needs-contract"
+    assert result.compatibility["recognized"] is True
+    assert result.compatibility["recommended_backend"] == "glm_mtp"
+    assert result.compatibility["can_run"] is False
+
+
+def test_glm4_moe_mtp_with_runtime_contract_and_model_file_is_verified(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Glm4MoeForCausalLM"],
+                "model_type": "glm4_moe",
+                "num_nextn_predict_layers": 1,
+                "num_hidden_layers": 47,
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_file({"model.layers.47.enorm.weight": np.ones((1,), dtype=np.float32)}, tmp_path / "model.safetensors")
+    _write_runtime_contract(tmp_path, arch_id="glm4-moe-mtp")
+
+    result = inspect_model(tmp_path)
+
+    assert result.compatibility["tier"] == "verified"
+    assert result.compatibility["can_run"] is True
+    assert result.compatibility["recommended_backend"] == "glm_mtp"
+    assert result.compatibility["runtime_compatibility"] == "native-contract-gated"
+
+
+def test_glm4_moe_lite_mtp_with_runtime_contract_and_model_file_is_verified(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Glm4MoeLiteForCausalLM"],
+                "model_type": "glm4_moe_lite",
+                "num_nextn_predict_layers": 1,
+                "num_hidden_layers": 47,
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_file({"model.layers.47.enorm.weight": np.ones((1,), dtype=np.float32)}, tmp_path / "model.safetensors")
+    _write_runtime_contract(tmp_path, arch_id="glm4-moe-lite-mtp")
+
+    result = inspect_model(tmp_path)
+
+    assert result.compatibility["tier"] == "verified"
+    assert result.compatibility["can_run"] is True
+    assert result.compatibility["recommended_backend"] == "glm_mtp"
+    assert result.compatibility["runtime_compatibility"] == "native-contract-gated"
+
+
+def test_glm_moe_dsa_mtp_without_runtime_contract_needs_contract(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["GlmMoeDsaForCausalLM"],
+                "model_type": "glm_moe_dsa",
+                "num_nextn_predict_layers": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = inspect_model(tmp_path)
+
+    assert result.compatibility["tier"] == "architecture-compatible-but-unverified"
+    assert result.compatibility["arch_id"] == "glm-moe-dsa-mtp"
+    assert result.compatibility["recommended_backend"] == "deepseek_mtp"
+    assert result.compatibility["runtime_compatibility"] == "needs-contract"
+    assert result.compatibility["mtp_supported"] == "recognized"
+    assert result.compatibility["can_run"] is False
+
+
+def test_glm_moe_dsa_mtp_with_runtime_contract_and_model_file_is_verified(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["GlmMoeDsaForCausalLM"],
+                "model_type": "glm_moe_dsa",
+                "num_nextn_predict_layers": 2,
+                "num_hidden_layers": 61,
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_file({"model.layers.61.enorm.weight": np.ones((1,), dtype=np.float32)}, tmp_path / "model.safetensors")
+    _write_runtime_contract(tmp_path, arch_id="glm-moe-dsa-mtp")
+
+    result = inspect_model(tmp_path)
+
+    assert result.compatibility["tier"] == "verified"
+    assert result.compatibility["can_run"] is True
+    assert result.compatibility["recommended_backend"] == "deepseek_mtp"
+    assert result.compatibility["runtime_compatibility"] == "native-contract-gated"
+
+
+def test_mimo_mtp_with_runtime_contract_and_model_file_is_verified(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["MiMoForCausalLM"],
+                "model_type": "mimo",
+                "num_nextn_predict_layers": 2,
+                "num_hidden_layers": 46,
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_file({"model.mtp_layers.0.token_layernorm.weight": np.ones((1,), dtype=np.float32)}, tmp_path / "model.safetensors")
+    _write_runtime_contract(tmp_path, arch_id="mimo-mtp")
+
+    result = inspect_model(tmp_path)
+
+    assert result.compatibility["tier"] == "verified"
+    assert result.compatibility["can_run"] is True
+    assert result.compatibility["recommended_backend"] == "mimo_mtp"
+    assert result.compatibility["runtime_compatibility"] == "native-contract-gated"
+
+
+def test_minimax_m2_with_nextn_marker_is_recognized_backend_pending(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["MiniMaxM2ForCausalLM"],
+                "model_type": "minimax_m2",
+                "num_nextn_predict_layers": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = inspect_model(tmp_path)
+
+    assert result.compatibility["arch_id"] == "minimax-m2-mtp"
+    assert result.compatibility["runtime_compatibility"] == "recognized-backend-pending"
+    assert result.compatibility["can_run"] is False
+
+
+def test_minimax_m2_with_num_mtp_modules_marker_is_recognized_backend_pending(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["MiniMaxM2ForCausalLM"],
+                "model_type": "minimax_m2",
+                "num_mtp_modules": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = inspect_model(tmp_path)
+
+    assert result.mtp_num_hidden_layers == 2
+    assert result.compatibility["arch_id"] == "minimax-m2-mtp"
+    assert result.compatibility["runtime_compatibility"] == "recognized-backend-pending"
+    assert result.compatibility["can_run"] is False
+
+
+def test_gemma4_without_mtp_marker_stays_no_mtp(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps({"architectures": ["Gemma4ForCausalLM"], "model_type": "gemma4"}),
+        encoding="utf-8",
+    )
+
+    result = inspect_model(tmp_path)
+
+    assert result.compatibility["tier"] == "no-MTP"
+    assert result.compatibility["arch_id"] is None
+    assert result.compatibility["recognized"] is False
+
+
+def test_gemma4_with_mtp_marker_is_recognized_backend_pending(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Gemma4ForCausalLM"],
+                "model_type": "gemma4",
+                "num_nextn_predict_layers": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = inspect_model(tmp_path)
+
+    assert result.compatibility["arch_id"] == "gemma-mtp"
+    assert result.compatibility["runtime_compatibility"] == "recognized-backend-pending"
+    assert result.compatibility["mtp_supported"] == "recognized"
+
+
+@pytest.mark.parametrize(
+    ("architecture", "model_type", "expected_arch_id"),
+    [
+        ("DeepseekV32ForCausalLM", "deepseek_v32", "deepseek-v3-mtp"),
+        ("GlmMoeDsaForCausalLM", "glm_moe_dsa", "glm-moe-dsa-mtp"),
+        ("DeepseekV4ForCausalLM", "deepseek_v4", "deepseek-v4-mtp"),
+        ("Glm4MoeLiteForCausalLM", "glm4_moe_lite", "glm4-moe-lite-mtp"),
+        ("GlmOcrForCausalLM", "glm_ocr", "glm-ocr-mtp"),
+        ("MiniMaxM2ForCausalLM", "minimax_m2", "minimax-m2-mtp"),
+        ("MiMoForCausalLM", "mimo", "mimo-mtp"),
+        ("Ernie45MoeForCausalLM", "ernie4_5_moe", "ernie-mtp"),
+        ("NemotronHForCausalLM", "nemotron_h", "nemotron-h-mtp"),
+        ("ExaoneMoeForCausalLM", "exaone_moe", "exaone-moe-mtp"),
+        ("Exaone45ForCausalLM", "exaone4_5", "exaone4-5-mtp"),
+        ("LongCatFlashForCausalLM", "longcat_flash", "longcat-flash-mtp"),
+        ("OpenPanguForCausalLM", "openpangu", "pangu-ultra-moe-mtp"),
+        ("Step3P5ForCausalLM", "step3p5", "step3p5-mtp"),
+        ("HyV3ForCausalLM", "hy_v3", "hy-v3-mtp"),
+    ],
+)
+def test_big_mtp_architecture_markers_are_recognized_backend_pending(
+    tmp_path,
+    architecture,
+    model_type,
+    expected_arch_id,
+):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": [architecture],
+                "model_type": model_type,
+                "num_nextn_predict_layers": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = inspect_model(tmp_path)
+
+    assert result.compatibility["arch_id"] == expected_arch_id
+    assert result.compatibility["tier"] == "architecture-compatible-but-unverified"
+    assert result.compatibility["recognized"] is True
+    assert result.compatibility["can_run"] is False
+    assert result.compatibility["unsafe_force_required"] is False
+    expected_runtime = (
+        "needs-contract"
+        if expected_arch_id
+        in {
+            "deepseek-v3-mtp",
+            "glm-moe-dsa-mtp",
+            "glm4-moe-mtp",
+            "glm4-moe-lite-mtp",
+            "mimo-mtp",
+        }
+        else "recognized-backend-pending"
+    )
+    assert result.compatibility["runtime_compatibility"] == expected_runtime
+    assert result.compatibility["mtp_supported"] == "recognized"
+
+
+def test_recognized_non_qwen_runtime_contract_stays_backend_pending(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["DeepseekV3ForCausalLM"],
+                "model_type": "deepseek_v3",
+                "num_nextn_predict_layers": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_runtime_contract(tmp_path, arch_id="deepseek-v3-mtp")
+
+    result = inspect_model(tmp_path)
+
+    assert result.compatibility["arch_id"] == "deepseek-v3-mtp"
+    assert result.compatibility["tier"] == "architecture-compatible-but-unverified"
+    assert result.compatibility["recognized"] is True
+    assert result.compatibility["can_run"] is False
+    assert result.compatibility["runtime_contract"]["arch_id"] == "deepseek-v3-mtp"
+    assert result.compatibility["runtime_compatibility"] == "needs-grafting"
 
 
 def test_llama_without_mtp_is_no_mtp(tmp_path):
@@ -340,7 +676,7 @@ def test_hf_llama_without_mtp_is_no_mtp(monkeypatch):
 
     monkeypatch.setattr(artifacts, "_hf_download_json", fake_json)
 
-    result = inspect_model("https://huggingface.co/HuggingFaceTB/SmolLM2-135M")
+    result = inspect_model("https://huggingface.co/meta-llama/Llama-3.2-1B")
 
     assert result.source == "hf"
     assert result.compatibility["tier"] == "no-MTP"
