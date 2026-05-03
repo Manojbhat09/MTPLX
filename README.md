@@ -56,7 +56,7 @@ That's it. The wizard handles the default speed model (`Youssofal/Qwen3.6-27B-MT
 - **Idle-aware Max mode.** Server tracks request activity; after 15 minutes of no chat, fans drop to auto, then ramp back up on the next message.
 - **Four-tier model compatibility contract.** `mtplx inspect <model>` reports: verified / arch-compatible-unverified / incompatible-architecture / no-MTP. No silent garbage runs.
 - **Lazy imports.** `mtplx --help`, `doctor`, `inspect`, `init`, `setup` work on a fresh venv *without MLX installed*. Generation and serving pull in MLX only when needed.
-- **Preview status: 350-test suite green**, including end-to-end onboarding, fan-control crash safety, OpenAI server fake-state, lazy-import survival, exactness gates.
+- **Preview status: 354-test suite green**, including end-to-end onboarding, fan-control crash safety, OpenAI server fake-state, lazy-import survival, exactness gates.
 
 > **Preview honesty.** The cold path is verified at 60+ tok/s. *Sustained* no-fan long-context throughput is currently ~37 tok/s on Flappy 10k versus a ≥50 tok/s target — the v0.1 release ships with this gap explicit. Closing it is the v0.2 deliverable; see [Roadmap](#roadmap).
 
@@ -236,7 +236,7 @@ flowchart TB
 
 ## Roadmap
 
-**v0.1.0-preview.1 (today).** Verified Qwen3-Next-MTP cold path, OpenAI/Anthropic-compatible serving, in-browser chat, interactive `mtplx start` wizard, four-tier compatibility, crash-safe Max mode, lazy-import CLI surface, 350-test suite green.
+**v0.1.0-preview.1 (today).** Verified Qwen3-Next-MTP cold path, OpenAI/Anthropic-compatible serving, in-browser chat, interactive `mtplx start` wizard, four-tier compatibility, crash-safe Max mode, lazy-import CLI surface, 354-test suite green.
 
 **v0.2 — sustained throughput.** Diagnostic-gated kernel ladder targeting `last64/first64 ≥ 0.90` no-fan on 10k generations while preserving the 60 tok/s class. Mechanism-driven: lazy-graph severance + output narrowing if graph history is the bottleneck; MLX-primitive-registered cache-update + `mx.compile` if dispatch tax dominates; an owned GDN+MLP verify-cycle kernel via `mx.fast.metal_kernel` only if the cheaper paths don't close the gap.
 

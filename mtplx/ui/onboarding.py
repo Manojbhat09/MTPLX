@@ -13,6 +13,8 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,33 @@ from mtplx.profiles import DEFAULT_HF_MODEL_ID
 
 DEFAULT_HF_MODEL = DEFAULT_HF_MODEL_ID
 STATE_PATH = Path("~/.mtplx/quickstart.json").expanduser()
+LOCAL_SCAN_TIMEOUT_S = 3.0
+LOCAL_SCAN_CLASSIFY_TIMEOUT_S = 4.0
+_TIER_RANK: dict[str, int] = {
+    "verified": 0,
+    "arch-compatible": 1,
+    "unknown": 2,
+    "no-mtp": 3,
+    "incompatible": 4,
+}
+
+
+def _pretty_path(value: str | Path | None) -> str:
+    """Render a filesystem path with the user's home directory collapsed."""
+
+    if value is None:
+        return ""
+    text = str(value)
+    if not text:
+        return ""
+    if "://" in text:
+        return text
+    try:
+        path = Path(text).expanduser()
+        home = Path.home()
+        return "~/" + str(path.relative_to(home)) if path.is_absolute() else text
+    except Exception:
+        return text
 
 
 # ---------- state file ------------------------------------------------------
@@ -54,6 +83,200 @@ def save_state(state: dict) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
         handle.write("\n")
+
+
+# ---------- local-folder scanning ------------------------------------------
+@dataclass(frozen=True)
+class ScannedModel:
+    path: Path
+    tier: str
+    arch_id: str | None
+    architecture: str | None
+    error: str | None = None
+
+
+def _is_model_dir(path: Path) -> bool:
+    return (path / "config.json").is_file()
+
+
+_SKIP_DIRS: frozenset[str] = frozenset(
+    {
+        ".git",
+        ".cache",
+        "__pycache__",
+        "node_modules",
+        "blobs",
+        "refs",
+        "DerivedData",
+    }
+)
+
+
+def _scan_for_models(
+    root: Path,
+    *,
+    max_depth: int = 4,
+    cap: int = 200,
+    timeout_s: float = LOCAL_SCAN_TIMEOUT_S,
+) -> list[Path]:
+    if _is_model_dir(root):
+        return [root]
+
+    results: list[Path] = []
+    deadline = time.monotonic() + max(0.1, float(timeout_s)) if timeout_s else None
+
+    def _expired() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
+    def _walk(p: Path, depth: int) -> None:
+        if depth > max_depth or len(results) >= cap or _expired():
+            return
+        try:
+            entries = sorted(p.iterdir(), key=lambda x: x.name.lower())
+        except (PermissionError, OSError):
+            return
+        for child in entries:
+            if len(results) >= cap or _expired():
+                return
+            if not child.is_dir():
+                continue
+            name = child.name
+            if name in _SKIP_DIRS:
+                continue
+            if name.startswith(".") and depth >= 0:
+                continue
+            if _is_model_dir(child):
+                results.append(child)
+                continue
+            _walk(child, depth + 1)
+
+    _walk(root, 0)
+    return results
+
+
+def _classify_scanned_model(model_dir: Path) -> ScannedModel:
+    config_path = model_dir / "config.json"
+    if not config_path.is_file():
+        return ScannedModel(model_dir, "incompatible", None, None, "missing config.json")
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return ScannedModel(model_dir, "unknown", None, None, str(exc)[:80])
+
+    tcfg = config.get("text_config", config) if isinstance(config, dict) else {}
+    archs = (
+        (config.get("architectures") if isinstance(config, dict) else None)
+        or tcfg.get("architectures")
+        or []
+    )
+    architecture = archs[0] if archs else None
+    model_type = tcfg.get("model_type") or (
+        config.get("model_type") if isinstance(config, dict) else None
+    )
+
+    def _maybe_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    mtp_num_hidden_layers = max(
+        _maybe_int(tcfg.get("mtp_num_hidden_layers")),
+        _maybe_int(tcfg.get("num_nextn_predict_layers")),
+        _maybe_int(tcfg.get("num_mtp_modules")),
+        _maybe_int(config.get("num_nextn_predict_layers")) if isinstance(config, dict) else 0,
+        _maybe_int(config.get("num_mtp_modules")) if isinstance(config, dict) else 0,
+    )
+
+    contract_path = model_dir / "mtplx_runtime.json"
+    runtime_contract_data: dict | None = None
+    runtime_contract_error: str | None = None
+    if contract_path.is_file():
+        try:
+            runtime_contract_data = json.loads(contract_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            runtime_contract_error = str(exc)[:80]
+
+    try:
+        model_files = tuple(sorted(p.name for p in model_dir.glob("model*.safetensors")))
+    except OSError:
+        model_files = ()
+
+    class _StubMTP:
+        exists = mtp_num_hidden_layers > 0
+        passes_tensor_gate = False
+
+    class _StubInspection:
+        pass
+
+    stub = _StubInspection()
+    stub.model_dir = str(model_dir)
+    stub.architecture = architecture
+    stub.model_type = model_type
+    stub.mtp_num_hidden_layers = mtp_num_hidden_layers
+    stub.mtp = _StubMTP()
+    stub.model_files = model_files
+    stub.runtime_contract_data = runtime_contract_data
+    stub.runtime_contract_error = runtime_contract_error
+    stub.runtime_contract_path = str(contract_path) if contract_path.is_file() else None
+
+    try:
+        from mtplx.backends.registry import SUPPORTED_ARCH_IDS, compatibility_for_inspection
+
+        verdict = compatibility_for_inspection(stub)
+    except Exception as exc:
+        return ScannedModel(model_dir, "unknown", None, architecture, str(exc)[:80])
+
+    raw_tier = verdict.tier
+    if raw_tier == "verified":
+        tier = "verified"
+    elif raw_tier == "architecture-compatible-but-unverified":
+        if (
+            verdict.runtime_contract is not None
+            and verdict.arch_id is not None
+            and verdict.arch_id in SUPPORTED_ARCH_IDS
+            and runtime_contract_error is None
+        ):
+            tier = "verified"
+        else:
+            tier = "arch-compatible"
+    elif raw_tier == "no-MTP":
+        tier = "no-mtp"
+    elif raw_tier == "incompatible-architecture":
+        tier = "incompatible"
+    else:
+        tier = "unknown"
+
+    return ScannedModel(model_dir, tier, verdict.arch_id, architecture)
+
+
+def _tier_badge(tier: str) -> tuple[str, str]:
+    if tier == "verified":
+        return ("Verified", "bold green")
+    if tier == "arch-compatible":
+        return ("Compatible (unverified)", "yellow")
+    if tier == "no-mtp":
+        return ("No MTP head", "dim")
+    if tier == "incompatible":
+        return ("Unsupported architecture", "red")
+    return ("Unknown", "dim")
+
+
+def _scanned_model_options(
+    models: list[ScannedModel],
+    root: Path,
+) -> list[tuple[str, str, str]]:
+    options: list[tuple[str, str, str]] = []
+    for index, model in enumerate(models, start=1):
+        try:
+            display_name = str(model.path.relative_to(root))
+        except ValueError:
+            display_name = _pretty_path(model.path)
+        badge, _ = _tier_badge(model.tier)
+        arch = model.architecture or model.arch_id or "unknown architecture"
+        subline = f"{badge}  ·  {model.error[:80]}" if model.error else f"{badge}  ·  {arch}"
+        options.append((str(index), display_name, subline))
+    return options
 
 
 # ---------- rich helpers (with stdlib fallback) -----------------------------
@@ -299,7 +522,7 @@ def screen_model(*, configured: str | None = None) -> str:
             (
                 "4",
                 "Local folder",
-                "e.g. /Users/you/models/your-model",
+                "e.g. ~/models/your-model  ·  or a parent like ~/.lmstudio/models",
             )
         )
     else:
@@ -321,7 +544,7 @@ def screen_model(*, configured: str | None = None) -> str:
             (
                 "3",
                 "Local folder",
-                "e.g. /Users/you/models/your-model",
+                "e.g. ~/models/your-model  ·  or a parent like ~/.lmstudio/models",
             )
         )
 
@@ -338,8 +561,7 @@ def screen_model(*, configured: str | None = None) -> str:
             entered = _prompt_text("Hugging Face repo id (namespace/name)", default=DEFAULT_HF_MODEL)
             return entered or DEFAULT_HF_MODEL
         # choice == "4"
-        entered = _prompt_text("Local folder path", default=str(configured) or DEFAULT_HF_MODEL)
-        return entered or str(configured) or DEFAULT_HF_MODEL
+        return _pick_local_model(default=str(configured))
 
     if choice == "1":
         return DEFAULT_HF_MODEL
@@ -347,8 +569,97 @@ def screen_model(*, configured: str | None = None) -> str:
         entered = _prompt_text("Hugging Face repo id (namespace/name)", default=DEFAULT_HF_MODEL)
         return entered or DEFAULT_HF_MODEL
     # choice == "3"
-    entered = _prompt_text("Local folder path", default=DEFAULT_HF_MODEL)
-    return entered or DEFAULT_HF_MODEL
+    return _pick_local_model(default=None)
+
+
+def _pick_local_model(*, default: str | None) -> str:
+    pretty_default = _pretty_path(default) if default else None
+    while True:
+        entered = _prompt_text("Local folder path", default=pretty_default)
+        if not entered:
+            print("  Path is required. Falling back to verified default.")
+            return DEFAULT_HF_MODEL
+
+        root = Path(entered).expanduser().resolve()
+        if not root.exists():
+            print(f"  Path does not exist: {_pretty_path(root)}")
+            print()
+            continue
+        if not root.is_dir():
+            print(f"  Not a directory: {_pretty_path(root)}")
+            print()
+            continue
+
+        if _is_model_dir(root):
+            return str(root)
+
+        chosen = _scan_and_pick(root)
+        if chosen is None:
+            continue
+        return chosen
+
+
+def _scan_and_pick(root: Path) -> str | None:
+    print(f"  Scanning {_pretty_path(root)} for MTP-compatible models...")
+    found = _scan_for_models(root)
+    if found:
+        print(f"  Found {len(found)} candidate model folder(s). Checking configs...")
+    classified: list[ScannedModel] = []
+    classify_deadline = time.monotonic() + LOCAL_SCAN_CLASSIFY_TIMEOUT_S
+    for path in found:
+        if classified and time.monotonic() >= classify_deadline:
+            print(
+                "  Compatibility scan is taking longer than expected; "
+                f"showing {len(classified)} result(s)."
+            )
+            break
+        classified.append(_classify_scanned_model(path))
+
+    if not classified:
+        print(f"  No models found under {_pretty_path(root)}.")
+        print(
+            "  (a model directory has a config.json at its root — "
+            "for LM Studio that's <publisher>/<repo-name>/)"
+        )
+        print()
+        return None
+
+    classified.sort(key=lambda m: (_TIER_RANK.get(m.tier, 99), str(m.path).lower()))
+
+    cap = 24
+    visible = classified[:cap]
+    hidden = len(classified) - cap
+    options = _scanned_model_options(visible, root)
+    options.append(
+        (
+            str(len(visible) + 1),
+            "Type a different folder path",
+            "Re-enter a model directory or a different parent.",
+        )
+    )
+
+    runnable = sum(1 for m in classified if m.tier == "verified")
+    compat = sum(1 for m in classified if m.tier == "arch-compatible")
+    intro = (
+        f"Found {len(classified)} model(s) under {_pretty_path(root)}  ·  "
+        f"{runnable} verified, {compat} compatible"
+    )
+    if hidden > 0:
+        intro += f"  (showing first {cap}; {hidden} not shown)"
+
+    _choice_panel(
+        heading="Pick a model",
+        intro=intro,
+        options=options,
+        border_style="cyan",
+    )
+
+    valid = [opt[0] for opt in options]
+    choice = _prompt_choice("Select", valid, default="1")
+    idx = int(choice) - 1
+    if idx == len(visible):
+        return None
+    return str(visible[idx].path)
 
 
 def screen_mode() -> tuple[str, bool]:

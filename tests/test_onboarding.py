@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import builtins
 import json
+from pathlib import Path
 
 import pytest
 
@@ -545,3 +546,85 @@ def test_start_skips_onboarding_with_explicit_flags(tmp_path, monkeypatch):
     assert rc == 0
     assert invocations == []  # onboarding was NOT invoked
     assert getattr(args, "_onboarded", False) is False
+
+
+# ---------- local-folder scanning: typing a parent dir lists models -------
+def _make_model_dir(parent, name, *, config: dict | None = None) -> Path:
+    target = parent / name
+    target.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "architectures": ["Qwen3NextForCausalLM"],
+        "model_type": "qwen3_next",
+        "hidden_size": 5120,
+        "num_hidden_layers": 64,
+        "vocab_size": 248320,
+        "mtp_num_hidden_layers": 1,
+    }
+    if config is not None:
+        payload.update(config)
+    (target / "config.json").write_text(json.dumps(payload), encoding="utf-8")
+    return target
+
+
+def test_scan_walks_lmstudio_publisher_layout(tmp_path):
+    _make_model_dir(tmp_path, "lmstudio-community/Qwen2.5-7B-Instruct-MLX-4bit")
+    _make_model_dir(tmp_path, "mlx-community/Qwen3.5-27B-4bit")
+    _make_model_dir(tmp_path, "Youssofal/Qwen3.6-27B-MTPLX")
+
+    found = onboarding._scan_for_models(tmp_path)
+
+    assert sorted(p.name for p in found) == sorted(
+        [
+            "Qwen2.5-7B-Instruct-MLX-4bit",
+            "Qwen3.5-27B-4bit",
+            "Qwen3.6-27B-MTPLX",
+        ]
+    )
+
+
+def test_scan_for_models_honors_timeout(tmp_path, monkeypatch):
+    _make_model_dir(tmp_path, "pub/model")
+    ticks = iter([0.0, 10.0])
+    monkeypatch.setattr(onboarding.time, "monotonic", lambda: next(ticks, 10.0))
+
+    found = onboarding._scan_for_models(tmp_path, timeout_s=1.0)
+
+    assert found == []
+
+
+def test_scan_and_pick_prints_candidate_progress_before_picker(tmp_path, monkeypatch, capsys):
+    target = _make_model_dir(tmp_path, "lmstudio-community/Qwen-A")
+    monkeypatch.setattr(
+        onboarding,
+        "_classify_scanned_model",
+        lambda path: onboarding.ScannedModel(
+            path=path,
+            tier="arch-compatible",
+            arch_id="qwen3-next-mtp",
+            architecture="Qwen3NextForCausalLM",
+        ),
+    )
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "1")
+
+    chosen = onboarding._scan_and_pick(tmp_path)
+
+    captured = capsys.readouterr().out
+    assert chosen == str(target)
+    assert "Found 1 candidate model folder(s). Checking configs..." in captured
+
+
+def test_screen_model_local_folder_routes_through_picker(tmp_path, monkeypatch):
+    target = _make_model_dir(tmp_path, "Real")
+    invocations: list[str | None] = []
+
+    def fake_picker(*, default):
+        invocations.append(default)
+        return str(target)
+
+    monkeypatch.setattr(onboarding, "_pick_local_model", fake_picker)
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "3")
+
+    chosen = onboarding.screen_model(configured=None)
+
+    assert chosen == str(target)
+    assert invocations == [None]
