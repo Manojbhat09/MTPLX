@@ -21,13 +21,14 @@ import subprocess
 import sys
 import time
 import uuid
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from pathlib import Path
-from queue import Queue
-from threading import Event, Lock
+from queue import Empty, Queue
+from threading import Event, Lock, Timer
 from typing import Any, Callable
 
 import numpy as np
@@ -38,7 +39,7 @@ if str(ROOT) not in sys.path:
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from mtplx.adaptive import AdaptiveDepthPolicy, ExpectedValueDepthPolicy
@@ -131,6 +132,25 @@ _REASONING_TAG_RE = re.compile(
     r"<(think|thinking|reason|reasoning|thought)\b[^>]*>.*?</\1\s*>",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+class _StreamCancelled(RuntimeError):
+    """Raised inside the generation worker after the SSE client disconnects."""
+
+
+def _raise_if_stream_cancelled(cancel_event: Event) -> None:
+    if cancel_event.is_set():
+        raise _StreamCancelled("stream client disconnected")
+
+
+def _cancel_stream_generation(cancel_event: Event, generation_future: Any | None) -> None:
+    cancel_event.set()
+    if generation_future is None:
+        return
+    try:
+        generation_future.cancel()
+    except Exception:
+        return
 
 
 def _comma_floats(value: str) -> tuple[float, ...]:
@@ -326,6 +346,79 @@ class AnthropicMessagesRequest(BaseModel):
     stream: bool = False
 
 
+def _startup_line(text: str = "") -> None:
+    print(text, flush=True)
+
+
+def _startup_server_url(args: argparse.Namespace) -> str:
+    host = str(getattr(args, "host", "127.0.0.1"))
+    if host.strip() in {"", "0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    return f"http://{host}:{int(getattr(args, 'port', 8000))}"
+
+
+def _startup_openai_base_url(args: argparse.Namespace) -> str:
+    return _startup_server_url(args) + "/v1"
+
+
+def _startup_chat_url(args: argparse.Namespace) -> str:
+    return _startup_server_url(args) + "/"
+
+
+def _open_browser_later(url: str, *, delay_s: float = 1.0) -> None:
+    def open_url() -> None:
+        try:
+            webbrowser.open(url, new=2, autoraise=True)
+        except Exception as exc:
+            print(f"[mtplx] could not open browser: {exc}", flush=True)
+
+    timer = Timer(delay_s, open_url)
+    timer.daemon = True
+    timer.start()
+
+
+class _StartupHeartbeat:
+    def __init__(self, label: str, *, interval_s: float = 10.0) -> None:
+        script = (
+            "import signal,sys,time\n"
+            "label=sys.argv[1]\n"
+            "interval=float(sys.argv[2])\n"
+            "running=True\n"
+            "def stop(_signum,_frame):\n"
+            "    global running\n"
+            "    running=False\n"
+            "signal.signal(signal.SIGTERM, stop)\n"
+            "elapsed=0.0\n"
+            "while running:\n"
+            "    time.sleep(interval)\n"
+            "    if not running:\n"
+            "        break\n"
+            "    elapsed += interval\n"
+            "    print(f'      {label}... {elapsed:.0f}s elapsed', flush=True)\n"
+        )
+        self.proc = subprocess.Popen(
+            [sys.executable, "-c", script, label, str(float(interval_s))],
+            stdout=None,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+
+    def set(self) -> None:
+        proc = self.proc
+        if proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=1.0)
+
+
+def _startup_heartbeat(label: str, *, interval_s: float = 10.0) -> _StartupHeartbeat:
+    return _StartupHeartbeat(label, interval_s=interval_s)
+
+
 class ServerState:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -335,6 +428,8 @@ class ServerState:
         self.foreground_active = 0
         self.rate_limiter = _RateLimiter(args.rate_limit)
         self.profile = get_profile(args.profile)
+        runtime_label = "Fast MTP" if self.profile.name == "performance-cold" else self.profile.name
+        _startup_line(f"[4/6] Preparing {runtime_label} runtime")
         if args.generation_mode == "mtp" and not args.load_mtp:
             raise ValueError("--generation-mode mtp requires --load-mtp")
         if args.diagnostic_env_ablation:
@@ -355,6 +450,8 @@ class ServerState:
                         + json.dumps(bad_profile_env, sort_keys=True)
                     )
             self.fast_path_env_status = _fast_path_env_status()
+        _startup_line("[4/6] Checking local acceleration runtime")
+        _startup_line("      This may take a few seconds.")
         self.mlx_fork_status = _mlx_fork_status()
         if (
             args.strict_mlx_fork_assert
@@ -366,8 +463,23 @@ class ServerState:
                 + json.dumps(self.mlx_fork_status, sort_keys=True)
             )
         self.mlx_cache_limit_status = _configure_mlx_cache_limit(args)
+        _startup_line("[4/6] Runtime checks complete")
         started = time.perf_counter()
-        self.runtime = load(args.model, mtp=bool(args.load_mtp), contract=MTPContract())
+        _startup_line(f"[5/6] Loading model weights: {args.model}")
+        _startup_line("      This is the long step; MTPLX is mapping the model into MLX.")
+        _startup_line("      Model load in progress (this may take a minute).")
+        load_heartbeat = _startup_heartbeat("Model still loading")
+        try:
+            self.runtime = load(args.model, mtp=bool(args.load_mtp), contract=MTPContract())
+        except BaseException as exc:
+            elapsed_s = time.perf_counter() - started
+            _startup_line(f"[5/6] Model load failed after {elapsed_s:.1f}s: {type(exc).__name__}: {exc}")
+            raise
+        finally:
+            load_heartbeat.set()
+        self.load_time_s = time.perf_counter() - started
+        _startup_line(f"[5/6] Model loaded in {self.load_time_s:.1f}s")
+        _startup_line("[5/6] Installing native-MTP draft head")
         self.draft_lm_head = (
             _install_draft_lm_head(
                 self.runtime,
@@ -380,14 +492,19 @@ class ServerState:
         )
         self.draft_head_identity = _draft_head_identity(self.runtime)
         self.template_hash = _template_hash(self.runtime.tokenizer)
-        self.load_time_s = time.perf_counter() - started
         self.context_window = (
             int(args.context_window)
             if int(args.context_window) > 0
             else _resolve_context_window(self.runtime.tokenizer, args.model)
         )
+        _startup_line(f"[5/6] Context window: {self.context_window} tokens")
         self.sessions = EngineSessionManager()
         self.last_metrics: list[dict[str, Any]] = []
+        # Activity timestamps used by the parent-process thermal watchdog to
+        # decide when to drop fans back to auto after an idle period.
+        self.last_request_started_at: float = 0.0
+        self.last_request_at: float = 0.0
+        self.requests_completed: int = 0
         self.main_system_prompt_hash: str | None = None
         self.generation_executor = ThreadPoolExecutor(
             max_workers=1,
@@ -398,6 +515,7 @@ class ServerState:
     def begin_foreground(self) -> None:
         with self.foreground_lock:
             self.foreground_active += 1
+            self.last_request_started_at = time.time()
 
     def end_foreground(self) -> None:
         with self.foreground_lock:
@@ -406,6 +524,10 @@ class ServerState:
     def has_foreground(self) -> bool:
         with self.foreground_lock:
             return self.foreground_active > 0
+
+    def foreground_count(self) -> int:
+        with self.foreground_lock:
+            return int(self.foreground_active)
 
 
 LOCALHOST_BINDS = {"", "127.0.0.1", "::1", "localhost"}
@@ -856,6 +978,17 @@ def _encode_prompt(tokenizer: Any, prompt: str | list[int] | list[str] | None) -
     return list(tokenizer.encode(str(prompt)))
 
 
+def _count_text_tokens(tokenizer: Any, text: str) -> int:
+    if not text:
+        return 0
+    try:
+        return len(tokenizer.encode(text, add_special_tokens=False))
+    except TypeError:
+        return len(tokenizer.encode(text))
+    except Exception:
+        return 0
+
+
 def _json_safe(value: Any) -> Any:
     if is_dataclass(value):
         return _json_safe(asdict(value))
@@ -930,12 +1063,18 @@ def _metrics_envelope(
     )
     cached_tokens = int(stats.get("cached_tokens") or 0)
     new_prefill_tokens = int(stats.get("new_prefill_tokens") or (prompt_tokens - cached_tokens))
+    prefill_tok_s = (
+        max(0, new_prefill_tokens) / prompt_eval_time_s
+        if prompt_eval_time_s > 0
+        else None
+    )
     return {
         "prompt_tokens": int(prompt_tokens),
         "cached_tokens": cached_tokens,
         "new_prefill_tokens": max(0, new_prefill_tokens),
         "completion_tokens": int(completion_tokens),
         "prompt_eval_time_s": prompt_eval_time_s,
+        "prefill_tok_s": prefill_tok_s,
         "ttft_s": ttft_s,
         "decode_elapsed_s": decode_elapsed_s,
         "request_elapsed_s": request_elapsed_s,
@@ -999,6 +1138,7 @@ PUBLIC_MTPLX_STATS_KEYS = (
     "elapsed_s",
     "tok_s",
     "prompt_eval_time_s",
+    "prefill_tok_s",
     "ttft_s",
     "decode_elapsed_s",
     "request_elapsed_s",
@@ -1045,6 +1185,8 @@ PUBLIC_MTPLX_STATS_KEYS = (
     "speculative_depth",
     "peak_memory_bytes",
     "reasoning_reentries",
+    "reasoning_tokens",
+    "answer_tokens",
 )
 PUBLIC_POSTCOMMIT_KEYS = (
     "stored",
@@ -1571,6 +1713,8 @@ def _run_generation(
         stats["server_blank_retry_suppressed"] = bool(streaming_response and blank_retry_budget)
         state.last_metrics.append(dict(envelope))
         state.last_metrics = state.last_metrics[-100:]
+        state.last_request_at = time.time()
+        state.requests_completed += 1
         last = {
             "text": out.text,
             "tokens": out.tokens,
@@ -1588,23 +1732,24 @@ def _run_generation(
         if seed_is_explicit or out.text.strip():
             break
     assert last is not None
-    print(
-        json.dumps(
-            {
-                "event": "mtplx_openai_generation",
-                "prompt_tokens": last["prompt_tokens"],
-                "completion_tokens": last["completion_tokens"],
-                "elapsed_s": round(float(last["elapsed_s"]), 6),
-                "tok_s": round(float(last["tok_s"]), 6),
-                "seed": last["stats"].get("server_seed"),
-                "attempts": last["stats"].get("server_attempts"),
-                "blank_retries": last["stats"].get("server_blank_retries"),
-                "text_preview": str(last["text"])[:120],
-            },
-            ensure_ascii=False,
-        ),
-        flush=True,
-    )
+    if not bool((request_observability or {}).get("warmup")):
+        print(
+            json.dumps(
+                {
+                    "event": "mtplx_openai_generation",
+                    "prompt_tokens": last["prompt_tokens"],
+                    "completion_tokens": last["completion_tokens"],
+                    "elapsed_s": round(float(last["elapsed_s"]), 6),
+                    "tok_s": round(float(last["tok_s"]), 6),
+                    "seed": last["stats"].get("server_seed"),
+                    "attempts": last["stats"].get("server_attempts"),
+                    "blank_retries": last["stats"].get("server_blank_retries"),
+                    "text_preview": str(last["text"])[:120],
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
     return last
 
 
@@ -1618,8 +1763,11 @@ def _run_startup_warmup(state: ServerState) -> dict[str, Any]:
         "error": None,
     }
     if warmup_tokens <= 0:
+        _startup_line("[6/6] Warmup skipped (--warmup-tokens 0)")
         return status
     started = time.perf_counter()
+    _startup_line(f"[6/6] Warming model with {warmup_tokens} tokens")
+    warmup_heartbeat = _startup_heartbeat("warmup still running", interval_s=5.0)
     try:
         prompt_ids = _encode_prompt(state.runtime.tokenizer, "MTPLX warmup.")
         generated = _run_generation(
@@ -1639,9 +1787,13 @@ def _run_startup_warmup(state: ServerState) -> dict[str, Any]:
                 "error": f"{type(exc).__name__}: {exc}",
             }
         )
+        warmup_heartbeat.set()
+        _startup_line(f"[6/6] Warmup failed after {status['elapsed_s']:.1f}s: {status['error']}")
         if getattr(state.args, "strict_warmup", False):
             raise
         return status
+    finally:
+        warmup_heartbeat.set()
     status.update(
         {
             "ran": True,
@@ -1650,6 +1802,9 @@ def _run_startup_warmup(state: ServerState) -> dict[str, Any]:
             "tok_s": generated.get("tok_s"),
         }
     )
+    tok_s = status.get("tok_s")
+    tok_s_text = "unknown tok/s" if tok_s is None else f"{float(tok_s):.2f} tok/s"
+    _startup_line(f"[6/6] Warmup complete in {status['elapsed_s']:.1f}s ({tok_s_text})")
     return status
 
 
@@ -1952,6 +2107,1113 @@ def _display_text(
     return f"{text}{separator}{footer}"
 
 
+def _chat_ui_html(*, model_id: str, server_url: str, api_key_required: bool) -> str:
+    api_note = "API key required" if api_key_required else "local · no API key"
+    template = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>MTPLX</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' x2='1' y1='0' y2='1'%3E%3Cstop offset='0' stop-color='%23a5b4fc'/%3E%3Cstop offset='1' stop-color='%235b8dee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='url(%23g)'/%3E%3Ctext x='50%25' y='59%25' font-family='-apple-system,Segoe UI,sans-serif' font-size='15' font-weight='800' fill='white' text-anchor='middle'%3EM%3C/text%3E%3C/svg%3E">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0b0d;
+      --surface: #14161a;
+      --surface-2: #1a1d22;
+      --line: rgba(255, 255, 255, 0.07);
+      --line-strong: rgba(255, 255, 255, 0.14);
+      --text: #ececec;
+      --muted: #9ca3af;
+      --muted-2: #6b7280;
+      --accent: #5b8dee;
+      --accent-strong: #7aa3f3;
+      --accent-soft: rgba(91, 141, 238, 0.10);
+      --user-tint: rgba(91, 141, 238, 0.09);
+      --reason-bg: #1a1726;
+      --reason-text: #c5b8e0;
+      --reason-border: rgba(165, 132, 245, 0.22);
+      --code-bg: #0a0b0d;
+      --code-border: rgba(255, 255, 255, 0.06);
+      --ok: #5fd28b;
+      --warn: #f0b85c;
+      --error: #ef6868;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+      --font-mono: "SF Mono", ui-monospace, Menlo, Monaco, "Cascadia Code", Consolas, monospace;
+      --sidebar-w: 268px;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: 15px;
+      line-height: 1.6;
+      display: grid;
+      grid-template-rows: 48px 1fr;
+      grid-template-columns: var(--sidebar-w) 1fr;
+      grid-template-areas:
+        "topbar topbar"
+        "sidebar chat";
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    @media (max-width: 900px) {
+      body { grid-template-columns: 1fr; grid-template-areas: "topbar" "chat"; }
+      aside#sidebar { display: none; }
+      aside#sidebar.open { display: block; position: fixed; inset: 48px 0 0 0; z-index: 30; }
+    }
+
+    /* Topbar */
+    header.topbar {
+      grid-area: topbar;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(20, 22, 26, 0.85);
+      backdrop-filter: blur(12px);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 14px;
+      letter-spacing: 0.2px;
+    }
+    .brand .logo {
+      width: 24px;
+      height: 24px;
+      border-radius: 7px;
+      background: linear-gradient(135deg, #a5b4fc, var(--accent));
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 800; font-size: 13px;
+    }
+    .topbar-meta { color: var(--muted); font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .topbar-meta .sep { color: var(--muted-2); margin: 0 8px; }
+    .topbar-meta .dim { color: var(--muted-2); }
+    .topbar-actions { display: flex; align-items: center; gap: 4px; }
+    .icon-btn {
+      width: 32px; height: 32px;
+      border: 0; border-radius: 8px;
+      background: transparent; color: var(--muted);
+      cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      transition: background 0.12s, color 0.12s;
+    }
+    .icon-btn:hover { background: var(--surface-2); color: var(--text); }
+    .icon-btn svg { width: 16px; height: 16px; }
+
+    /* Sidebar */
+    aside#sidebar {
+      grid-area: sidebar;
+      background: var(--surface);
+      border-right: 1px solid var(--line);
+      overflow-y: auto;
+      padding: 18px 16px 24px;
+    }
+    .sb-section { margin-bottom: 20px; }
+    .sb-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--muted-2);
+      margin: 0 0 10px;
+      padding: 0 2px;
+    }
+    .sb-row { margin-bottom: 14px; padding: 0 2px; }
+    .sb-row label {
+      display: flex; justify-content: space-between; align-items: baseline;
+      font-size: 13px; color: var(--text); margin-bottom: 6px;
+    }
+    .sb-row label .v {
+      color: var(--muted);
+      font-weight: 600; font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    .sb-row textarea, .sb-row select {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 9px 11px;
+      font: inherit; font-size: 13px;
+      outline: none;
+      transition: border-color 0.12s, box-shadow 0.12s;
+    }
+    .sb-row textarea:focus, .sb-row select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    .sb-row textarea { min-height: 64px; max-height: 200px; resize: vertical; line-height: 1.45; }
+    .sb-row .help { color: var(--muted-2); font-size: 11px; margin-top: 5px; line-height: 1.4; }
+    .sb-row select {
+      appearance: none; -webkit-appearance: none; padding-right: 28px;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 4l3 3 3-3' stroke='%239ca3af' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 10px center; background-size: 10px;
+    }
+
+    /* Slider — thin track + dot thumb (Open WebUI style) */
+    input[type="range"] {
+      -webkit-appearance: none; appearance: none;
+      width: 100%; height: 18px;
+      background: transparent; cursor: pointer;
+      margin: 0;
+    }
+    input[type="range"]::-webkit-slider-runnable-track {
+      height: 3px; border-radius: 999px;
+      background: linear-gradient(to right, var(--accent) 0%, var(--accent) var(--filled, 0%), var(--surface-2) var(--filled, 0%), var(--surface-2) 100%);
+    }
+    input[type="range"]::-moz-range-track { height: 3px; border-radius: 999px; background: var(--surface-2); }
+    input[type="range"]::-moz-range-progress { height: 3px; border-radius: 999px; background: var(--accent); }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: white; border: 0;
+      margin-top: -5.5px;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+      cursor: grab;
+      transition: transform 0.1s;
+    }
+    input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.18); cursor: grabbing; }
+    input[type="range"]::-moz-range-thumb {
+      width: 14px; height: 14px; border-radius: 50%;
+      background: white; border: 0;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+      cursor: grab;
+    }
+
+    .sb-actions { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+    .sb-btn {
+      width: 100%;
+      background: transparent; border: 1px solid var(--line);
+      color: var(--muted);
+      padding: 9px 12px; border-radius: 8px;
+      cursor: pointer; font: inherit; font-size: 12px;
+      transition: border-color 0.12s, color 0.12s, background 0.12s;
+    }
+    .sb-btn:hover { border-color: var(--line-strong); color: var(--text); background: var(--surface-2); }
+
+    /* Chat area */
+    main.chat-area {
+      grid-area: chat; min-height: 0;
+      display: grid; grid-template-rows: 1fr auto;
+      position: relative; overflow: hidden;
+    }
+    #messages { overflow-y: auto; scroll-behavior: smooth; padding: 24px 24px 8px; }
+    .messages-inner { max-width: 760px; margin: 0 auto; }
+
+    /* Turns — borderless, ChatGPT/Open-WebUI style */
+    .turn { padding: 14px 0; }
+    .turn-user { display: flex; justify-content: flex-end; }
+    .turn-user .turn-body {
+      max-width: 85%;
+      background: var(--user-tint);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 10px 16px;
+      white-space: pre-wrap;
+    }
+    .turn-assistant {
+      display: grid;
+      grid-template-columns: 32px 1fr;
+      gap: 14px; align-items: start;
+    }
+    .avatar {
+      width: 32px; height: 32px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, #a5b4fc, var(--accent));
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 800; font-size: 13px;
+      letter-spacing: 0.5px; flex-shrink: 0; margin-top: 2px;
+    }
+    .turn-assistant .turn-body { min-width: 0; }
+
+    /* Reasoning is its own card ABOVE the answer, not nested inside */
+    .reasoning-block {
+      margin: 0 0 12px;
+      background: var(--reason-bg);
+      border: 1px solid var(--reason-border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .reasoning-block[hidden] { display: none; }
+    .reasoning-summary {
+      cursor: pointer;
+      padding: 10px 14px;
+      color: var(--reason-text);
+      font-size: 12px; font-weight: 600;
+      letter-spacing: 0.2px;
+      display: flex; align-items: center; gap: 8px;
+      user-select: none;
+    }
+    .reasoning-summary .chev {
+      width: 10px; height: 10px;
+      transition: transform 0.15s;
+      opacity: 0.75;
+    }
+    .reasoning-block.open .reasoning-summary .chev { transform: rotate(90deg); }
+    .reasoning-summary .label { flex: 1; }
+    .reasoning-summary .meta { color: var(--muted-2); font-size: 11px; font-weight: 500; }
+    .reasoning-body {
+      padding: 0 14px 12px;
+      color: var(--reason-text);
+      font-size: 13px; line-height: 1.6;
+      white-space: pre-wrap;
+      max-height: 320px; overflow-y: auto;
+    }
+    .reasoning-block:not(.open) .reasoning-body { display: none; }
+
+    /* Answer body — markdown rendered */
+    .answer { color: var(--text); }
+    .answer.streaming-plain { white-space: pre-wrap; }
+    .answer p { margin: 0 0 0.75em; }
+    .answer p:last-child { margin-bottom: 0; }
+    .answer h1, .answer h2, .answer h3, .answer h4 { margin: 1em 0 0.5em; line-height: 1.3; font-weight: 700; }
+    .answer h1 { font-size: 1.5em; }
+    .answer h2 { font-size: 1.3em; }
+    .answer h3 { font-size: 1.13em; }
+    .answer ul, .answer ol { padding-left: 1.4em; margin: 0.4em 0 0.8em; }
+    .answer li { margin: 0.2em 0; }
+    .answer a { color: var(--accent-strong); text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+    .answer a:hover { color: var(--accent); }
+    .answer blockquote {
+      border-left: 3px solid var(--line-strong);
+      margin: 0.6em 0; padding: 0.2em 0 0.2em 1em;
+      color: var(--muted);
+    }
+    .answer code {
+      font-family: var(--font-mono); font-size: 0.92em;
+      background: var(--code-bg);
+      border: 1px solid var(--code-border);
+      border-radius: 4px;
+      padding: 1.5px 6px;
+    }
+    .answer pre {
+      position: relative;
+      margin: 0.9em 0; padding: 0;
+      border: 1px solid var(--code-border);
+      border-radius: 10px;
+      background: var(--code-bg);
+      overflow: hidden;
+    }
+    .answer pre code {
+      display: block;
+      padding: 12px 14px;
+      font-size: 13px; line-height: 1.6;
+      overflow-x: auto;
+      border: 0; background: transparent; border-radius: 0;
+      white-space: pre;
+    }
+    .copy-btn {
+      position: absolute; top: 7px; right: 7px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 11px; font-weight: 500;
+      padding: 3px 9px; border-radius: 5px;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.12s, color 0.12s, border-color 0.12s;
+    }
+    .answer pre:hover .copy-btn { opacity: 1; }
+    .copy-btn:hover { color: var(--text); border-color: var(--line-strong); }
+    .copy-btn.copied { color: var(--ok); border-color: rgba(95, 210, 139, 0.4); }
+
+    /* Stats below the answer — minimal inline pills, no border boxes */
+    .stats {
+      margin-top: 10px;
+      display: flex; flex-wrap: wrap;
+      gap: 4px 12px;
+      font-size: 12px;
+      color: var(--muted-2);
+      font-variant-numeric: tabular-nums;
+    }
+    .stats[hidden] { display: none; }
+    .stats .stat-tps { color: var(--ok); font-weight: 600; }
+    .stats .stat-ttft { color: var(--muted); }
+
+    /* Jump-to-latest pill */
+    .jump-pill {
+      position: absolute;
+      bottom: 96px; left: 50%;
+      transform: translate(-50%, 8px);
+      background: var(--surface-2);
+      color: var(--text);
+      padding: 7px 13px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      cursor: pointer; font: inherit;
+      font-size: 12px; font-weight: 500;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.15s, transform 0.15s;
+      z-index: 10;
+    }
+    .jump-pill.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+    .jump-pill:hover { background: var(--surface); }
+
+    /* Composer */
+    .composer-wrap {
+      padding: 12px 24px 18px;
+      background: linear-gradient(to top, var(--bg) 0%, var(--bg) 75%, transparent);
+    }
+    .composer { max-width: 760px; margin: 0 auto; position: relative; }
+    #status-row {
+      min-height: 18px;
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; color: var(--muted-2);
+      padding: 0 4px 6px;
+    }
+    #status-row.ready { color: var(--muted); }
+    #status-row.streaming { color: var(--accent-strong); }
+    #status-row .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor; flex-shrink: 0;
+    }
+    #live-stats { margin-left: auto; color: var(--muted-2); font-variant-numeric: tabular-nums; }
+    #live-stats .tps { color: var(--ok); font-weight: 600; }
+
+    .composer-box {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px; align-items: end;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 8px 8px 8px 14px;
+      transition: border-color 0.12s, box-shadow 0.12s;
+    }
+    .composer-box:focus-within { border-color: var(--line-strong); }
+    #prompt {
+      min-height: 38px; max-height: 220px;
+      resize: none;
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      padding: 8px 0;
+      font: inherit; font-size: 15px; line-height: 1.5;
+      outline: none;
+    }
+    #prompt::placeholder { color: var(--muted-2); }
+    .send-btn {
+      width: 36px; height: 36px;
+      border: 0; border-radius: 9px;
+      background: var(--accent); color: white;
+      cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      transition: background 0.12s, transform 0.05s;
+    }
+    .send-btn:hover { background: var(--accent-strong); }
+    .send-btn:active { transform: scale(0.95); }
+    .send-btn:disabled { opacity: 0.45; cursor: default; }
+    .send-btn svg { width: 16px; height: 16px; }
+    .send-btn.stop { background: var(--error); }
+    .send-btn.stop:hover { background: #f47e7e; }
+
+    @media (max-width: 900px) {
+      header.topbar { padding: 0 12px; }
+      .topbar-meta { display: none; }
+      #messages { padding: 18px 14px 6px; }
+      .composer-wrap { padding: 10px 14px 14px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand"><span class="logo">M</span>MTPLX</span>
+    <span class="topbar-meta"><span>__MODEL__</span><span class="sep">·</span><span class="dim">__API_NOTE__</span><span class="sep">·</span><span class="dim">__SERVER_URL__/v1</span></span>
+    <div class="topbar-actions">
+      <button id="sidebar-toggle" class="icon-btn" title="Toggle settings" aria-label="Toggle settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+      <button id="new-chat-btn" class="icon-btn" title="Start a new conversation" aria-label="New conversation">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </div>
+  </header>
+  <aside id="sidebar">
+    <div class="sb-section">
+      <p class="sb-title">Sampling</p>
+      <div class="sb-row">
+        <label for="ctl-temp">Temperature <span class="v" id="val-temp">0.60</span></label>
+        <input id="ctl-temp" type="range" min="0" max="2" step="0.05" value="0.6">
+      </div>
+      <div class="sb-row">
+        <label for="ctl-top-p">Top P <span class="v" id="val-top-p">0.95</span></label>
+        <input id="ctl-top-p" type="range" min="0" max="1" step="0.01" value="0.95">
+      </div>
+      <div class="sb-row">
+        <label for="ctl-top-k">Top K <span class="v" id="val-top-k">20</span></label>
+        <input id="ctl-top-k" type="range" min="0" max="100" step="1" value="20">
+        <p class="help">0 disables top-k.</p>
+      </div>
+    </div>
+    <div class="sb-section">
+      <p class="sb-title">Speculative</p>
+      <div class="sb-row">
+        <label for="ctl-depth">Draft depth <span class="v" id="val-depth">3</span></label>
+        <input id="ctl-depth" type="range" min="1" max="7" step="1" value="3">
+        <p class="help">MTP draft tokens per verify cycle.</p>
+      </div>
+    </div>
+    <div class="sb-section">
+      <p class="sb-title">Output</p>
+      <div class="sb-row">
+        <label for="ctl-max-tokens">Max tokens <span class="v" id="val-max-tokens">8k</span></label>
+        <input id="ctl-max-tokens" type="range" min="256" max="32768" step="256" value="8192">
+        <p class="help" id="max-tokens-help">Detecting context length…</p>
+      </div>
+      <div class="sb-row">
+        <label for="ctl-think">Reasoning</label>
+        <select id="ctl-think">
+          <option value="auto" selected>Auto</option>
+          <option value="on">Always show thinking</option>
+          <option value="off">Hide thinking</option>
+        </select>
+      </div>
+    </div>
+    <div class="sb-section">
+      <p class="sb-title">System prompt</p>
+      <div class="sb-row">
+        <textarea id="ctl-system" placeholder="Optional. Overrides the model default."></textarea>
+      </div>
+    </div>
+    <div class="sb-actions">
+      <button id="reset-defaults" class="sb-btn" type="button">Reset to defaults</button>
+    </div>
+  </aside>
+  <main class="chat-area">
+    <section id="messages" aria-live="polite">
+      <div class="messages-inner">
+        <div class="turn turn-assistant turn-greeting">
+          <div class="avatar">M</div>
+          <div class="turn-body">
+            <div class="answer"><p>Ready when you are. Settings on the left persist between sessions.</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <button id="jump-pill" class="jump-pill" type="button" aria-label="Jump to latest">Jump to latest ↓</button>
+    <div class="composer-wrap">
+      <div class="composer">
+        <div id="status-row" class="ready" role="status">
+          <span class="dot"></span>
+          <span id="status-text">Ready</span>
+          <span id="live-stats"></span>
+        </div>
+        <form id="chat-form" autocomplete="off">
+          <div class="composer-box">
+            <textarea id="prompt" placeholder="Message MTPLX (Enter to send · Shift+Enter for newline)" rows="1" autofocus></textarea>
+            <button id="send" class="send-btn" type="submit" aria-label="Send">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js" defer></script>
+  <script>
+    "use strict";
+    const MODEL_ID = __MODEL_JSON__;
+    const messagesEl = document.getElementById("messages");
+    const messagesInner = messagesEl.querySelector(".messages-inner");
+    const form = document.getElementById("chat-form");
+    const promptEl = document.getElementById("prompt");
+    const sendBtn = document.getElementById("send");
+    const statusRow = document.getElementById("status-row");
+    const statusText = document.getElementById("status-text");
+    const liveStatsEl = document.getElementById("live-stats");
+    const jumpPill = document.getElementById("jump-pill");
+    const newChatBtn = document.getElementById("new-chat-btn");
+    const sidebarToggleBtn = document.getElementById("sidebar-toggle");
+    const sidebarEl = document.getElementById("sidebar");
+    const history = [];
+    let activeAbort = null;
+    let pinnedToBottom = true;
+
+    const SVG_SEND = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>';
+    const SVG_STOP = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+
+    // ---------- settings ------------------------------------------------------
+    const SETTINGS_KEY = "mtplx.chat.settings.v3";
+    const DEFAULTS = {
+      temperature: 0.6,
+      top_p: 0.95,
+      top_k: 20,
+      depth: 3,
+      max_tokens: 16384,
+      reasoning: "auto",
+      system: ""
+    };
+    // RANGES is mutable so we can rewrite max_tokens.max after we discover
+    // the model's real context window via /health. Hardcoding a 32768 cap
+    // (our previous default) lied about a 256k-context model and stopped
+    // users from raising the answer budget for long replies.
+    const RANGES = {
+      temperature: {min: 0, max: 2},
+      top_p: {min: 0, max: 1},
+      top_k: {min: 0, max: 100},
+      depth: {min: 1, max: 7},
+      max_tokens: {min: 256, max: 32768}
+    };
+    const maxTokensHelpEl = document.getElementById("max-tokens-help");
+    function formatTokens(n) {
+      if (n >= 1000) return (n / 1000).toFixed(1).replace(/\\.0$/, "") + "k";
+      return String(n);
+    }
+    async function discoverServerLimits() {
+      try {
+        const res = await fetch("/health", {cache: "no-store"});
+        if (!res.ok) throw new Error("health " + res.status);
+        const health = await res.json();
+        const ctx = parseInt(health.context_window, 10);
+        const serverCap = parseInt(health.max_response_tokens, 10);
+        if (Number.isFinite(ctx) && ctx > 0) {
+          // Allow up to (context - some headroom) tokens of output. We leave
+          // 4k for the prompt so users typing a long question don't get a
+          // 400 from the server even at the slider's max.
+          let cap = Math.max(1024, ctx - 4096);
+          if (Number.isFinite(serverCap) && serverCap > 0) cap = Math.min(cap, serverCap);
+          // Round down to a clean step.
+          cap = Math.floor(cap / 256) * 256;
+          RANGES.max_tokens.max = cap;
+          if (ctlEls.max_tokens) {
+            ctlEls.max_tokens.max = String(cap);
+            // Re-clamp the current value so a saved value above the new cap
+            // doesn't render off the right edge of the slider.
+            ctlEls.max_tokens.value = String(Math.min(parseInt(ctlEls.max_tokens.value, 10) || DEFAULTS.max_tokens, cap));
+          }
+          if (maxTokensHelpEl) {
+            maxTokensHelpEl.textContent =
+              "Cap is the model's " + formatTokens(ctx) + " context (slider tops out at " +
+              formatTokens(cap) + ").";
+          }
+          refreshLabels();
+          refreshSliderFills();
+        }
+      } catch (err) {
+        if (maxTokensHelpEl) maxTokensHelpEl.textContent =
+          "Could not detect context length; using a 32k default.";
+      }
+    }
+    const ctlEls = {
+      temperature: document.getElementById("ctl-temp"),
+      top_p: document.getElementById("ctl-top-p"),
+      top_k: document.getElementById("ctl-top-k"),
+      depth: document.getElementById("ctl-depth"),
+      max_tokens: document.getElementById("ctl-max-tokens"),
+      reasoning: document.getElementById("ctl-think"),
+      system: document.getElementById("ctl-system")
+    };
+    const valEls = {
+      temperature: document.getElementById("val-temp"),
+      top_p: document.getElementById("val-top-p"),
+      top_k: document.getElementById("val-top-k"),
+      depth: document.getElementById("val-depth"),
+      max_tokens: document.getElementById("val-max-tokens")
+    };
+    function loadSettings() {
+      try {
+        const raw = window.localStorage.getItem(SETTINGS_KEY);
+        if (!raw) return Object.assign({}, DEFAULTS);
+        const parsed = JSON.parse(raw);
+        return Object.assign({}, DEFAULTS, parsed && typeof parsed === "object" ? parsed : {});
+      } catch (err) {
+        console.warn("settings load failed", err);
+        return Object.assign({}, DEFAULTS);
+      }
+    }
+    function saveSettings(s) {
+      try { window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch (_e) { /* ignore quota */ }
+    }
+    function clamp(value, min, max, fallback, isInt) {
+      const n = isInt ? parseInt(value, 10) : parseFloat(value);
+      if (!Number.isFinite(n)) return fallback;
+      return Math.min(max, Math.max(min, n));
+    }
+    function applySettingsToUI(s) {
+      ctlEls.temperature.value = clamp(s.temperature, RANGES.temperature.min, RANGES.temperature.max, DEFAULTS.temperature, false);
+      ctlEls.top_p.value = clamp(s.top_p, RANGES.top_p.min, RANGES.top_p.max, DEFAULTS.top_p, false);
+      ctlEls.top_k.value = clamp(s.top_k, RANGES.top_k.min, RANGES.top_k.max, DEFAULTS.top_k, true);
+      ctlEls.depth.value = clamp(s.depth, RANGES.depth.min, RANGES.depth.max, DEFAULTS.depth, true);
+      ctlEls.max_tokens.value = clamp(s.max_tokens, RANGES.max_tokens.min, RANGES.max_tokens.max, DEFAULTS.max_tokens, true);
+      ctlEls.reasoning.value = String(s.reasoning || "auto");
+      ctlEls.system.value = String(s.system || "");
+      refreshLabels();
+      refreshSliderFills();
+    }
+    function refreshLabels() {
+      valEls.temperature.textContent = Number(ctlEls.temperature.value).toFixed(2);
+      valEls.top_p.textContent = Number(ctlEls.top_p.value).toFixed(2);
+      const tk = parseInt(ctlEls.top_k.value, 10) || 0;
+      valEls.top_k.textContent = tk === 0 ? "off" : String(tk);
+      valEls.depth.textContent = String(parseInt(ctlEls.depth.value, 10) || 0);
+      const mt = parseInt(ctlEls.max_tokens.value, 10) || 0;
+      valEls.max_tokens.textContent = mt >= 1000 ? (mt / 1000).toFixed(1).replace(/\\.0$/, "") + "k" : String(mt);
+    }
+    function refreshSliderFills() {
+      for (const key of ["temperature", "top_p", "top_k", "depth", "max_tokens"]) {
+        const el = ctlEls[key];
+        const range = RANGES[key];
+        if (!el || !range) continue;
+        const value = Number(el.value);
+        const pct = ((value - range.min) / (range.max - range.min)) * 100;
+        el.style.setProperty("--filled", pct.toFixed(2) + "%");
+      }
+    }
+    function readSettings() {
+      const s = {
+        temperature: clamp(ctlEls.temperature.value, RANGES.temperature.min, RANGES.temperature.max, DEFAULTS.temperature, false),
+        top_p: clamp(ctlEls.top_p.value, RANGES.top_p.min, RANGES.top_p.max, DEFAULTS.top_p, false),
+        top_k: clamp(ctlEls.top_k.value, RANGES.top_k.min, RANGES.top_k.max, DEFAULTS.top_k, true),
+        depth: clamp(ctlEls.depth.value, RANGES.depth.min, RANGES.depth.max, DEFAULTS.depth, true),
+        max_tokens: clamp(ctlEls.max_tokens.value, RANGES.max_tokens.min, RANGES.max_tokens.max, DEFAULTS.max_tokens, true),
+        reasoning: ctlEls.reasoning.value || "auto",
+        system: (ctlEls.system.value || "").trim()
+      };
+      refreshLabels();
+      refreshSliderFills();
+      return s;
+    }
+    let settings = loadSettings();
+    applySettingsToUI(settings);
+    discoverServerLimits().then(() => {
+      // Re-clamp + redraw after the real context window arrives so users
+      // who reload the page don't see "8k" sitting under a fresh 256k cap.
+      settings = readSettings();
+      saveSettings(settings);
+    });
+    for (const key of Object.keys(ctlEls)) {
+      ctlEls[key].addEventListener("input", () => { settings = readSettings(); saveSettings(settings); });
+    }
+    document.getElementById("reset-defaults").addEventListener("click", () => {
+      settings = Object.assign({}, DEFAULTS);
+      applySettingsToUI(settings);
+      saveSettings(settings);
+    });
+    sidebarToggleBtn.addEventListener("click", () => sidebarEl.classList.toggle("open"));
+
+    // ---------- markdown ------------------------------------------------------
+    function escapeHtml(text) {
+      return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+    function renderMarkdown(text) {
+      try {
+        if (typeof window.marked !== "undefined") {
+          window.marked.setOptions({
+            gfm: true,
+            breaks: true,
+            mangle: false,
+            headerIds: false
+          });
+          return window.marked.parse(String(text || ""));
+        }
+      } catch (err) {
+        console.warn("markdown parse failed; falling back to text", err);
+      }
+      // Fallback: escape and convert simple newlines to <br>
+      return escapeHtml(text).replace(/\\n/g, "<br>");
+    }
+    function attachCopyButtons(scope) {
+      for (const pre of scope.querySelectorAll("pre")) {
+        if (pre.querySelector(".copy-btn")) continue;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "copy-btn";
+        btn.textContent = "Copy";
+        btn.addEventListener("click", async () => {
+          const code = pre.querySelector("code");
+          const text = code ? code.textContent || "" : pre.textContent || "";
+          try {
+            await navigator.clipboard.writeText(text);
+            btn.textContent = "Copied";
+            btn.classList.add("copied");
+            setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 1400);
+          } catch (err) { btn.textContent = "Error"; }
+        });
+        pre.appendChild(btn);
+      }
+    }
+
+    // ---------- scroll handling ----------------------------------------------
+    const SCROLL_PIN_THRESHOLD = 24;
+    function isPinned() {
+      const remaining = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+      return remaining <= SCROLL_PIN_THRESHOLD;
+    }
+    messagesEl.addEventListener("scroll", () => {
+      pinnedToBottom = isPinned();
+      jumpPill.classList.toggle("show", !pinnedToBottom);
+    });
+    jumpPill.addEventListener("click", () => {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      pinnedToBottom = true;
+      jumpPill.classList.remove("show");
+    });
+    function maybeScrollToBottom() {
+      if (pinnedToBottom) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    }
+
+    // ---------- DOM helpers ---------------------------------------------------
+    function setStatus(text, kind) {
+      statusText.textContent = text;
+      statusRow.className = kind || "";
+    }
+    function appendUser(text) {
+      const node = document.createElement("div");
+      node.className = "turn turn-user";
+      const body = document.createElement("div");
+      body.className = "turn-body";
+      body.textContent = text;
+      node.appendChild(body);
+      messagesInner.appendChild(node);
+      maybeScrollToBottom();
+    }
+    function appendAssistantTurn() {
+      const node = document.createElement("div");
+      node.className = "turn turn-assistant";
+      const avatar = document.createElement("div");
+      avatar.className = "avatar";
+      avatar.textContent = "M";
+      const body = document.createElement("div");
+      body.className = "turn-body";
+
+      const reasoningBlock = document.createElement("div");
+      reasoningBlock.className = "reasoning-block";
+      reasoningBlock.hidden = true;
+      const reasoningSummary = document.createElement("div");
+      reasoningSummary.className = "reasoning-summary";
+      reasoningSummary.innerHTML =
+        '<svg class="chev" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2l4 3-4 3"/></svg>' +
+        '<span class="label">Thinking</span>' +
+        '<span class="meta"></span>';
+      const reasoningBody = document.createElement("div");
+      reasoningBody.className = "reasoning-body";
+      reasoningBlock.appendChild(reasoningSummary);
+      reasoningBlock.appendChild(reasoningBody);
+      reasoningSummary.addEventListener("click", () => reasoningBlock.classList.toggle("open"));
+
+      const answerBody = document.createElement("div");
+      answerBody.className = "answer streaming-plain";
+
+      const stats = document.createElement("div");
+      stats.className = "stats";
+      stats.hidden = true;
+
+      body.appendChild(reasoningBlock);
+      body.appendChild(answerBody);
+      body.appendChild(stats);
+      node.appendChild(avatar);
+      node.appendChild(body);
+      messagesInner.appendChild(node);
+      maybeScrollToBottom();
+      return {node, reasoningBlock, reasoningSummary, reasoningBody, answerBody, stats};
+    }
+    function setReasoningMeta(turn, text) {
+      const meta = turn.reasoningSummary.querySelector(".meta");
+      if (meta) meta.textContent = text;
+    }
+    function renderStats(statsEl, stats) {
+      if (!stats) return;
+      const verifyMs = stats.verify_calls ? (1000 * Number(stats.verify_time_s || 0) / Number(stats.verify_calls)) : null;
+      const tps = Number(stats.decode_tok_s ?? stats.request_tok_s);
+      const parts = [];
+      if (Number.isFinite(tps)) parts.push('<span class="stat-tps">' + tps.toFixed(1) + ' tok/s</span>');
+      if (Number.isFinite(Number(stats.completion_tokens))) parts.push(Number(stats.completion_tokens) + ' tokens');
+      if (Number.isFinite(Number(stats.reasoning_tokens)) && Number(stats.reasoning_tokens) > 0) parts.push(Number(stats.reasoning_tokens) + ' thinking');
+      if (Number.isFinite(Number(stats.ttft_s))) parts.push('<span class="stat-ttft">ttft ' + Number(stats.ttft_s).toFixed(2) + 's</span>');
+      if (Number.isFinite(verifyMs)) parts.push(verifyMs.toFixed(1) + ' ms/verify');
+      if (Number.isFinite(Number(stats.verify_calls))) parts.push(Number(stats.verify_calls) + ' verifies');
+      statsEl.innerHTML = parts.join(' <span style="color:var(--muted-2)">·</span> ');
+      statsEl.hidden = parts.length === 0;
+    }
+    function renderLiveStats(state) {
+      const tps = state.tokens > 0 && state.elapsed > 0 ? (state.tokens / state.elapsed) : null;
+      const parts = [];
+      if (tps !== null) parts.push('<span class="tps">' + tps.toFixed(1) + ' tok/s</span>');
+      if (state.tokens > 0) parts.push(state.tokens + ' tokens');
+      liveStatsEl.innerHTML = parts.length ? '· ' + parts.join(' · ') : '';
+    }
+
+    // ---------- streaming -----------------------------------------------------
+    function splitFallbackReasoning(reasoningText, answerText) {
+      if (answerText.trim() || !reasoningText.trim()) return {reasoningText, answerText};
+      const blocks = reasoningText.trim().split(/\\n\\s*\\n/).filter(Boolean);
+      if (blocks.length < 2) return {reasoningText, answerText};
+      const answer = blocks[blocks.length - 1].trim();
+      const reasoning = blocks.slice(0, -1).join("\\n\\n").trim();
+      return {reasoningText: reasoning, answerText: answer};
+    }
+    function drainSse(buffer, onPayload) {
+      let offset = 0;
+      while (true) {
+        const index = buffer.indexOf("\\n\\n", offset);
+        if (index < 0) break;
+        const eventText = buffer.slice(offset, index);
+        offset = index + 2;
+        for (const line of eventText.split("\\n")) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6).trim();
+          if (data === "[DONE]") continue;
+          try { onPayload(JSON.parse(data)); } catch (err) { console.warn(err, data); }
+        }
+      }
+      return buffer.slice(offset);
+    }
+    function setSendButton(mode) {
+      if (mode === "stop") {
+        sendBtn.classList.add("stop");
+        sendBtn.dataset.action = "stop";
+        sendBtn.innerHTML = SVG_STOP;
+        sendBtn.setAttribute("aria-label", "Stop generation");
+      } else {
+        sendBtn.classList.remove("stop");
+        sendBtn.dataset.action = "send";
+        sendBtn.innerHTML = SVG_SEND;
+        sendBtn.setAttribute("aria-label", "Send");
+      }
+    }
+    async function sendMessage(text) {
+      // Remove the greeting bubble on first send.
+      const greeting = messagesInner.querySelector(".turn-greeting");
+      if (greeting) greeting.remove();
+
+      appendUser(text);
+      history.push({role: "user", content: text});
+      const turn = appendAssistantTurn();
+      pinnedToBottom = true;
+      maybeScrollToBottom();
+      setSendButton("stop");
+      promptEl.disabled = false;
+      setStatus("Thinking", "streaming");
+
+      const settingsNow = readSettings();
+      const messages = settingsNow.system
+        ? [{role: "system", content: settingsNow.system}, ...history]
+        : history.slice();
+      const requestBody = {
+        model: MODEL_ID,
+        messages,
+        stream: true,
+        temperature: settingsNow.temperature,
+        top_p: settingsNow.top_p,
+        max_tokens: settingsNow.max_tokens
+      };
+      if (settingsNow.top_k > 0) requestBody.top_k = settingsNow.top_k;
+      if (settingsNow.reasoning === "on") requestBody.enable_thinking = true;
+      else if (settingsNow.reasoning === "off") requestBody.enable_thinking = false;
+
+      activeAbort = new AbortController();
+      let assistantText = "";
+      let reasoningText = "";
+      let finalStats = null;
+      let firstTokenAt = null;
+      const startedAt = performance.now();
+      const liveState = {tokens: 0, elapsed: 0};
+      // Stall watchdog: if no SSE chunk arrives within this window, abort
+      // and surface a clear error instead of leaving the UI parked on
+      // "Thinking" forever (the failure mode the user reported after a
+      // settings change).
+      let lastChunkAt = performance.now();
+      const STALL_WARN_MS = 30000;
+      const STALL_ABORT_MS = 90000;
+      let stallTimer = null;
+      function armStallWatchdog() {
+        if (stallTimer) clearInterval(stallTimer);
+        stallTimer = setInterval(() => {
+          const idle = performance.now() - lastChunkAt;
+          if (idle > STALL_ABORT_MS) {
+            clearInterval(stallTimer);
+            stallTimer = null;
+            try { activeAbort && activeAbort.abort("stalled"); } catch (_e) {}
+          } else if (idle > STALL_WARN_MS) {
+            setStatus("Waiting on server (" + Math.round(idle / 1000) + "s)…", "streaming");
+          }
+        }, 1000);
+      }
+      function disarmStallWatchdog() {
+        if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+      }
+      try {
+        armStallWatchdog();
+        const response = await fetch("/v1/chat/completions", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(requestBody),
+          signal: activeAbort.signal
+        });
+        if (!response.ok || !response.body) {
+          let detail = "Request failed: " + response.status;
+          try {
+            const errBody = await response.json();
+            if (errBody?.error?.message) detail = errBody.error.message;
+          } catch (_e) { /* ignore */ }
+          throw new Error(detail);
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const {value, done} = await reader.read();
+          if (done) break;
+          lastChunkAt = performance.now();
+          buffer += decoder.decode(value, {stream: true});
+          buffer = drainSse(buffer, (payload) => {
+            if (payload.error) throw new Error(payload.error.message || "generation failed");
+            if (payload.mtplx_stats) {
+              finalStats = payload.mtplx_stats;
+              renderStats(turn.stats, finalStats);
+            }
+            const delta = payload.choices?.[0]?.delta || {};
+            const reasoningPiece = delta.reasoning_content || "";
+            const answerPiece = delta.content || "";
+            if (reasoningPiece) {
+              reasoningText += reasoningPiece;
+              turn.reasoningBody.textContent = reasoningText;
+              if (turn.reasoningBlock.hidden) {
+                turn.reasoningBlock.hidden = false;
+                turn.reasoningBlock.classList.add("open");
+              }
+              setReasoningMeta(turn, "streaming…");
+            }
+            if (answerPiece) {
+              if (firstTokenAt === null) firstTokenAt = performance.now();
+              assistantText += answerPiece;
+              turn.answerBody.textContent = assistantText;
+              liveState.tokens += 1;
+              liveState.elapsed = (performance.now() - startedAt) / 1000;
+              renderLiveStats(liveState);
+              setStatus("Streaming", "streaming");
+              // Auto-collapse the reasoning block once the answer starts (still expandable).
+              if (!turn.reasoningBlock.hidden) {
+                turn.reasoningBlock.classList.remove("open");
+                setReasoningMeta(turn, "click to expand");
+              }
+            }
+            maybeScrollToBottom();
+          });
+        }
+        const separated = splitFallbackReasoning(reasoningText, assistantText);
+        reasoningText = separated.reasoningText;
+        assistantText = separated.answerText;
+        turn.reasoningBody.textContent = reasoningText;
+        turn.reasoningBlock.hidden = !reasoningText.trim();
+        if (!turn.reasoningBlock.hidden) setReasoningMeta(turn, "click to expand");
+        const finalText = assistantText.trim() ? assistantText : "(No text returned.)";
+        turn.answerBody.classList.remove("streaming-plain");
+        turn.answerBody.innerHTML = renderMarkdown(finalText);
+        attachCopyButtons(turn.answerBody);
+        if (finalStats) renderStats(turn.stats, finalStats);
+        history.push({role: "assistant", content: assistantText});
+        setStatus("Ready", "ready");
+        renderLiveStats(liveState);
+      } catch (err) {
+        const aborted = err && (err.name === "AbortError" || /aborted/i.test(String(err.message || "")));
+        const stalled =
+          aborted &&
+          (performance.now() - lastChunkAt) > STALL_ABORT_MS;
+        if (stalled) {
+          turn.answerBody.classList.remove("streaming-plain");
+          turn.answerBody.innerHTML = renderMarkdown(
+            "*[no response from server in " + Math.round(STALL_ABORT_MS / 1000) + "s — request aborted]*\\n\\n" +
+              "If MTPLX is still loading the model, wait a few seconds and retry. " +
+              "If the server has crashed, restart it: `mtplx start --max` (or just `mtplx start`)."
+          );
+          attachCopyButtons(turn.answerBody);
+          setStatus("Server unresponsive", "");
+        } else if (aborted) {
+          turn.answerBody.classList.remove("streaming-plain");
+          turn.answerBody.innerHTML = renderMarkdown(assistantText || "*[stopped]*");
+          attachCopyButtons(turn.answerBody);
+          history.push({role: "assistant", content: assistantText});
+          setStatus("Stopped", "ready");
+        } else {
+          turn.answerBody.textContent = "Error: " + (err?.message || String(err));
+          setStatus("Error", "");
+        }
+      } finally {
+        disarmStallWatchdog();
+        activeAbort = null;
+        setSendButton("send");
+        promptEl.disabled = false;
+        promptEl.focus();
+        autoResizePrompt();
+        maybeScrollToBottom();
+      }
+    }
+
+    // ---------- form wiring ---------------------------------------------------
+    function autoResizePrompt() {
+      promptEl.style.height = "auto";
+      promptEl.style.height = Math.min(promptEl.scrollHeight, 220) + "px";
+    }
+    promptEl.addEventListener("input", autoResizePrompt);
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (sendBtn.dataset.action === "stop") {
+        if (activeAbort) activeAbort.abort();
+        return;
+      }
+      const text = promptEl.value.trim();
+      if (!text) return;
+      promptEl.value = "";
+      autoResizePrompt();
+      sendMessage(text);
+    });
+    promptEl.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+
+    newChatBtn.addEventListener("click", () => {
+      if (activeAbort) activeAbort.abort();
+      history.length = 0;
+      messagesInner.innerHTML = '<div class="turn turn-assistant turn-greeting"><div class="avatar">M</div><div class="turn-body"><div class="answer"><p>New conversation. Settings on the left are unchanged.</p></div></div></div>';
+      pinnedToBottom = true;
+      jumpPill.classList.remove("show");
+      setStatus("Ready", "ready");
+      renderLiveStats({tokens: 0, elapsed: 0});
+      promptEl.focus();
+      autoResizePrompt();
+    });
+
+    setSendButton("send");
+    autoResizePrompt();
+  </script>
+</body>
+</html>"""
+    return (
+        template
+        .replace("__MODEL__", html.escape(model_id))
+        .replace("__API_NOTE__", html.escape(api_note))
+        .replace("__SERVER_URL__", html.escape(server_url))
+        .replace("__MODEL_JSON__", json.dumps(model_id))
+    )
+
+
 def _thinking_enabled_for_request(
     state: ServerState,
     request: ChatCompletionRequest,
@@ -2006,21 +3268,50 @@ def create_app(state: ServerState) -> FastAPI:
             )
         return await call_next(request)
 
-    @app.get("/")
-    def root() -> dict[str, Any]:
-        return {
-            "name": "MTPLX OpenAI-compatible server",
-            "model": state.model_id,
-            "base_url": "/v1",
-            "chat_completions": "/v1/chat/completions",
-        }
+    @app.get("/", response_class=HTMLResponse)
+    def root(request: Request) -> HTMLResponse:
+        server_url = str(request.base_url).rstrip("/")
+        return HTMLResponse(
+            _chat_ui_html(
+                model_id=state.model_id,
+                server_url=server_url,
+                api_key_required=bool(state.args.api_key),
+            )
+        )
 
     @app.head("/")
     def root_head() -> Response:
         return Response(status_code=200)
 
+    @app.get("/v1")
+    @app.get("/v1/")
+    def v1_landing(request: Request) -> dict[str, Any]:
+        server_url = str(request.base_url).rstrip("/")
+        return {
+            "ok": True,
+            "name": "MTPLX OpenAI-compatible API",
+            "model": state.model_id,
+            "message": "Do not use this as a browser chat page. Paste this URL into Open WebUI Settings > Connections as the OpenAI API Base URL.",
+            "mtplx_api_base_url": f"{server_url}/v1",
+            "openwebui": {
+                "where": "Open WebUI -> Settings -> Connections -> OpenAI-compatible connection",
+                "base_url": f"{server_url}/v1",
+                "api_key": "leave blank for localhost" if not state.args.api_key else "use the API key you started MTPLX with",
+                "model": state.model_id,
+            },
+            "endpoints": {
+                "models": f"{server_url}/v1/models",
+                "chat_completions": f"{server_url}/v1/chat/completions",
+                "health": f"{server_url}/health",
+            },
+        }
+
     @app.get("/health")
     def health() -> dict[str, Any]:
+        if hasattr(state, "foreground_count"):
+            foreground_active = int(state.foreground_count())
+        else:
+            foreground_active = int(getattr(state, "foreground_active", 0) or 0)
         return {
             "ok": True,
             "model": state.model_id,
@@ -2042,6 +3333,16 @@ def create_app(state: ServerState) -> FastAPI:
             "rate_limit_per_minute": int(state.args.rate_limit),
             "stream_interval": int(state.args.stream_interval),
             "warmup": state.warmup_status,
+            "foreground_active": foreground_active,
+            "active_requests": foreground_active,
+            "last_request_started_at": getattr(state, "last_request_started_at", 0.0),
+            "requests_completed": getattr(state, "requests_completed", 0),
+            "last_request_at": getattr(state, "last_request_at", 0.0),
+            "idle_seconds": (
+                time.time() - getattr(state, "last_request_at", 0.0)
+                if getattr(state, "last_request_at", 0.0) > 0
+                else None
+            ),
             "reasoning_parser": state.args.reasoning_parser,
             "load_time_s": state.load_time_s,
             "draft_lm_head": state.draft_lm_head,
@@ -2315,6 +3616,7 @@ def create_app(state: ServerState) -> FastAPI:
                 yield f"data: {json.dumps(first)}\n\n"
 
                 queue: Queue[tuple[str, Any]] = Queue()
+                cancel_event = Event()
                 decoder = _IncrementalTokenDecoder(state.runtime.tokenizer)
                 splitter = _ThinkingContentStreamSplitter(thinking_enabled=thinking_enabled)
                 stream_interval = max(1, int(state.args.stream_interval))
@@ -2323,10 +3625,13 @@ def create_app(state: ServerState) -> FastAPI:
                 commit_state = {"commit": False, "assistant_history_content": None}
 
                 def on_tokens(new_tokens: list[int]) -> None:
+                    _raise_if_stream_cancelled(cancel_event)
                     queue.put(("tokens", list(new_tokens)))
+                    _raise_if_stream_cancelled(cancel_event)
 
                 def worker() -> None:
                     try:
+                        _raise_if_stream_cancelled(cancel_event)
                         if session is None:
                             generated = _run_generation(
                                 state,
@@ -2400,6 +3705,8 @@ def create_app(state: ServerState) -> FastAPI:
                                 else:
                                     queue.put(("released", None))
                                 return
+                    except _StreamCancelled as exc:
+                        queue.put(("cancelled", exc))
                     except EngineSessionBusy as exc:
                         queue.put(("error", HTTPException(status_code=409, detail=str(exc))))
                     except BaseException as exc:
@@ -2416,7 +3723,7 @@ def create_app(state: ServerState) -> FastAPI:
                     else:
                         queue.put(("done", generated))
 
-                state.generation_executor.submit(worker)
+                generation_future = state.generation_executor.submit(worker)
 
                 def delta_chunk(field: str, text: str) -> str:
                     payload = {
@@ -2515,7 +3822,13 @@ def create_app(state: ServerState) -> FastAPI:
 
                 try:
                     while True:
-                        kind, item = await asyncio.to_thread(queue.get)
+                        try:
+                            kind, item = await asyncio.to_thread(queue.get, True, 0.25)
+                        except Empty:
+                            if cancel_event.is_set() or await raw_request.is_disconnected():
+                                _cancel_stream_generation(cancel_event, generation_future)
+                                return
+                            continue
                         if kind == "tokens":
                             for field, text in drain_stream_tokens(item):
                                 remember_stream_chunk(field, text)
@@ -2559,6 +3872,16 @@ def create_app(state: ServerState) -> FastAPI:
                                         yield "data: [DONE]\n\n"
                                         return
                             generated["stats"]["reasoning_reentries"] = splitter.reentry_count
+                            reasoning_text = "".join(history_reasoning_chunks).strip()
+                            answer_text = "".join(history_content_chunks).strip()
+                            generated["stats"]["reasoning_tokens"] = _count_text_tokens(
+                                state.runtime.tokenizer,
+                                reasoning_text,
+                            )
+                            generated["stats"]["answer_tokens"] = _count_text_tokens(
+                                state.runtime.tokenizer,
+                                answer_text,
+                            )
                             if state.last_metrics:
                                 state.last_metrics[-1]["reasoning_reentries"] = splitter.reentry_count
                             footer = _stats_footer_text(state, generated)
@@ -2569,17 +3892,21 @@ def create_app(state: ServerState) -> FastAPI:
                             yield error_chunk(item)
                             yield "data: [DONE]\n\n"
                             return
+                        elif kind == "cancelled":
+                            return
                         else:
                             yield error_chunk(RuntimeError(f"unexpected stream event: {kind}"))
                             yield "data: [DONE]\n\n"
                             return
                 except asyncio.CancelledError:
+                    _cancel_stream_generation(cancel_event, generation_future)
                     raise
                 except BaseException as exc:
                     yield error_chunk(exc)
                     yield "data: [DONE]\n\n"
                     return
                 finally:
+                    _cancel_stream_generation(cancel_event, generation_future)
                     if session is not None and not commit_event.is_set():
                         commit_state["commit"] = False
                         commit_event.set()
@@ -3037,17 +4364,43 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=True,
         help="Refuse startup unless the selected profile's required MLX fork is active.",
     )
+    parser.add_argument(
+        "--open-browser",
+        action="store_true",
+        help="Open the local MTPLX browser chat UI after startup.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     validate_server_security_args(args)
-    state = ServerState(args)
+    try:
+        state = ServerState(args)
+    except RuntimeError as exc:
+        if str(exc).startswith("Patched MLX qmv fork is not active:"):
+            _startup_line("error: fast MLX fork is not active")
+            _startup_line(str(exc))
+            _startup_line("try: mtplx start --profile stable")
+            _startup_line("try: mtplx start --profile performance-cold")
+            _startup_line("     (public start disables the strict fork assert when the fork is missing)")
+            raise SystemExit(2) from None
+        raise
     app = create_app(state)
     import uvicorn
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    _startup_line()
+    _startup_line("MTPLX is ready.")
+    _startup_line("Chat UI: " + _startup_chat_url(args))
+    _startup_line("OpenAI API Base URL: " + _startup_openai_base_url(args))
+    _startup_line("Model: " + str(args.model_id))
+    _startup_line("API key: leave blank for localhost")
+    _startup_line("Health check: " + _startup_server_url(args) + "/health")
+    _startup_line("Keep this terminal open. Press Ctrl-C to stop MTPLX.")
+    if args.open_browser:
+        _startup_line("Opening chat UI in your browser...")
+        _open_browser_later(_startup_chat_url(args))
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", access_log=False)
 
 
 if __name__ == "__main__":

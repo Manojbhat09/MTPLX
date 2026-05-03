@@ -42,6 +42,7 @@ EXACT_PAGED_ATTENTION_ENV = {
 }
 
 LONG_RESPONSE_STAGED_ENV = {
+    "MTPLX_DROP_EVENTS": "1",
     "MTPLX_EVAL_STATE_ROOTS_ON_COMMIT": "1",
     "MTPLX_EVAL_STATE_ROOTS_INCLUDE_MTP": "1",
     "MTPLX_EVAL_STATE_ROOTS_INCLUDE_LIVE": "1",
@@ -202,6 +203,7 @@ PROFILES: dict[ProfileName, RuntimeProfile] = {
 
 PROFILE_ALIASES = {
     "default": "stable",
+    "safe": "stable",
     "native-mtp-60": "performance-cold",
     "native_mtp_60": "performance-cold",
     "native_mtp_60_cold": "performance-cold",

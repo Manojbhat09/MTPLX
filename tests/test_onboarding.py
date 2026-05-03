@@ -1,0 +1,528 @@
+"""Smoke tests for the quickstart onboarding flow.
+
+Verifies state persistence, fallback labels, and the screen helpers don't
+raise. The interactive ``run_onboarding_screens`` is exercised with a stubbed
+``input`` so the test runs non-interactively.
+"""
+
+from __future__ import annotations
+
+import builtins
+import json
+
+import pytest
+
+from mtplx.ui import onboarding
+
+
+def test_state_load_returns_none_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(tmp_path / "missing.json"))
+    assert onboarding.load_state() is None
+
+
+def test_state_round_trip(tmp_path, monkeypatch):
+    state_file = tmp_path / "quickstart.json"
+    monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(state_file))
+
+    onboarding.save_state(
+        {
+            "model": "mtplx/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP",
+            "profile": "performance-cold",
+            "max": True,
+            "target": "openwebui",
+        }
+    )
+    loaded = onboarding.load_state()
+    assert loaded is not None
+    assert loaded["model"] == "mtplx/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP"
+    assert loaded["profile"] == "performance-cold"
+    assert loaded["max"] is True
+    assert loaded["target"] == "openwebui"
+    assert "saved_at" in loaded
+    # File on disk is valid JSON.
+    with state_file.open("r", encoding="utf-8") as handle:
+        json.load(handle)
+
+
+def test_mode_label_covers_all_modes():
+    """Mode labels must include the actual tok/s envelope so users can tell
+    the difference between Stable and Fast at a glance — the old labels just
+    said 'no fan control' twice without explaining what the runtime path
+    difference was."""
+    safe = onboarding.mode_label({"profile": "stable", "max": False})
+    fast = onboarding.mode_label({"profile": "performance-cold", "max": False})
+    maxed = onboarding.mode_label({"profile": "performance-cold", "max": True})
+    assert "Stable" in safe and "tok/s" in safe
+    assert "Fast" in fast and "tok/s" in fast
+    assert "Max" in maxed and "100%" in maxed
+
+
+def test_interface_label_covers_all_targets():
+    assert "Web UI" in onboarding.interface_label("openwebui")
+    assert "Web UI" in onboarding.interface_label("web")
+    assert "CLI" in onboarding.interface_label("cli")
+    assert "CLI" in onboarding.interface_label("terminal")
+
+
+def test_run_onboarding_screens_with_stubbed_input(monkeypatch, capsys):
+    """Walk all three screens with stubbed ``input`` answers."""
+    answers = iter(["1", "2", "1"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    state = onboarding.run_onboarding_screens()
+    assert state["model"] == onboarding.DEFAULT_HF_MODEL
+    assert state["profile"] == "performance-cold"
+    assert state["max"] is False
+    assert state["target"] == "openwebui"
+
+
+def test_run_onboarding_max_mode_sets_max_flag_when_thermal_available(monkeypatch):
+    """Picking Max + a working fan controller → ``max=True``."""
+    answers = iter(["1", "3", "2"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    monkeypatch.setattr(onboarding, "ensure_thermal_control_installed", lambda: True)
+    state = onboarding.run_onboarding_screens()
+    assert state["profile"] == "performance-cold"
+    assert state["max"] is True
+    assert state["target"] == "terminal"
+
+
+def test_run_onboarding_max_mode_drops_flag_when_thermal_unavailable(monkeypatch):
+    """Picking Max + declined/failed install → ``max=False`` (don't lie about
+    fan boost we can't deliver)."""
+    answers = iter(["1", "3", "2"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    monkeypatch.setattr(onboarding, "ensure_thermal_control_installed", lambda: False)
+    state = onboarding.run_onboarding_screens()
+    assert state["profile"] == "performance-cold"
+    assert state["max"] is False
+    assert state["target"] == "terminal"
+
+
+def test_ensure_thermal_control_installed_returns_true_when_already_present(monkeypatch):
+    monkeypatch.setattr(
+        "mtplx.thermal.detect_thermal_control",
+        lambda: {"available": True, "selected": {"kind": "thermalforge"}},
+    )
+    assert onboarding.ensure_thermal_control_installed() is True
+
+
+def test_ensure_thermal_control_installed_user_picks_skip(monkeypatch):
+    """Choosing option 2 (skip) returns False; consistent with the rest of the
+    onboarding which is always numbered, never Y/N."""
+    monkeypatch.setattr(
+        "mtplx.thermal.detect_thermal_control",
+        lambda: {"available": False, "instructions": "..."},
+    )
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "2")
+    assert onboarding.ensure_thermal_control_installed() is False
+
+
+def test_ensure_thermal_control_installed_user_picks_install_success(monkeypatch):
+    monkeypatch.setattr(
+        "mtplx.thermal.detect_thermal_control",
+        lambda: {"available": False, "instructions": "..."},
+    )
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "1")
+
+    def fake_install(*, install_daemon: bool = True, streaming: bool = True):
+        return {
+            "ok": True,
+            "daemon_ok": True,
+            "method": "source",
+            "message": "ThermalForge installed and ready.",
+            "steps": [],
+            "detection": {"available": True},
+        }
+
+    monkeypatch.setattr("mtplx.thermal.install_thermal_control", fake_install)
+    assert onboarding.ensure_thermal_control_installed() is True
+
+
+def test_ensure_thermal_control_installed_install_fails(monkeypatch):
+    monkeypatch.setattr(
+        "mtplx.thermal.detect_thermal_control",
+        lambda: {"available": False, "instructions": "..."},
+    )
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "1")
+
+    def fake_install(*, install_daemon: bool = True, streaming: bool = True):
+        return {
+            "ok": False,
+            "method": None,
+            "message": "all install paths failed",
+            "steps": [],
+            "detection": {"available": False},
+        }
+
+    monkeypatch.setattr("mtplx.thermal.install_thermal_control", fake_install)
+    assert onboarding.ensure_thermal_control_installed() is False
+
+
+def test_ensure_thermal_control_install_uses_numbered_prompt_not_yn(monkeypatch, capsys):
+    """Regression for the user complaint that the install offer asked Y/N
+    while the rest of the onboarding asked for numbered choices."""
+    monkeypatch.setattr(
+        "mtplx.thermal.detect_thermal_control",
+        lambda: {"available": False, "instructions": "..."},
+    )
+    captured: list[str] = []
+
+    def fake_input(prompt: str = "") -> str:
+        captured.append(prompt)
+        return "2"  # skip
+
+    monkeypatch.setattr(builtins, "input", fake_input)
+    onboarding.ensure_thermal_control_installed()
+    assert captured, "install prompt was never displayed"
+    rendered = " ".join(captured).lower()
+    assert "type" in rendered
+    assert "press enter" in rendered
+    assert "y/n" not in rendered
+    assert "[y" not in rendered
+
+
+def test_prompt_choice_uses_explicit_type_and_press_enter_phrasing(monkeypatch, capsys):
+    """Regression for the user complaint that the old ``Select [1]:`` prompt
+    didn't make it obvious you had to type a number and press Enter."""
+    captured: list[str] = []
+
+    def fake_input(prompt: str = "") -> str:
+        captured.append(prompt)
+        return "1"
+
+    monkeypatch.setattr(builtins, "input", fake_input)
+    onboarding._prompt_choice("ignored", ["1", "2", "3"], default="1")
+    assert captured, "input prompt was never displayed"
+    rendered = captured[0]
+    assert "Type" in rendered
+    assert "press Enter" in rendered
+    assert "1-3" in rendered or "1, 2, 3" in rendered
+
+
+def test_run_quickstart_flow_saves_state_on_first_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(tmp_path / "first.json"))
+    answers = iter(["1", "1", "2"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    state = onboarding.run_quickstart_flow(fresh=False)
+    assert state is not None
+    assert state["target"] == "terminal"
+    # Persisted to disk.
+    persisted = onboarding.load_state()
+    assert persisted is not None
+    assert persisted["target"] == "terminal"
+
+
+def test_run_quickstart_flow_returning_user_says_same(tmp_path, monkeypatch):
+    monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(tmp_path / "returning.json"))
+    onboarding.save_state(
+        {
+            "model": "mtplx/foo",
+            "profile": "stable",
+            "max": False,
+            "target": "openwebui",
+        }
+    )
+    # Returning-user prompt: empty answer (default Y) should reuse last state.
+    answers = iter([""])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    state = onboarding.run_quickstart_flow(fresh=False)
+    assert state is not None
+    assert state["model"] == "mtplx/foo"
+    assert state["target"] == "openwebui"
+
+
+def test_run_quickstart_flow_returning_user_with_stale_max_drops_max(
+    tmp_path, monkeypatch
+):
+    """If saved state says max=True but ThermalForge has gone away (or was
+    never actually installed), re-offer the install instead of silently
+    boosting fans that can't be controlled."""
+    monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(tmp_path / "stale-max.json"))
+    onboarding.save_state(
+        {
+            "model": "mtplx/foo",
+            "profile": "performance-cold",
+            "max": True,
+            "target": "openwebui",
+        }
+    )
+    # User accepts "same as last time" then declines the install offer.
+    answers = iter(["", "2"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    monkeypatch.setattr(
+        "mtplx.thermal.detect_thermal_control",
+        lambda: {"available": False, "instructions": "..."},
+    )
+    state = onboarding.run_quickstart_flow(fresh=False)
+    assert state is not None
+    assert state["max"] is False  # downgraded; honesty preserved
+    # Persisted file is rewritten so the next run reflects reality.
+    persisted = onboarding.load_state()
+    assert persisted is not None and persisted["max"] is False
+
+
+def test_run_quickstart_flow_returning_user_says_no(tmp_path, monkeypatch):
+    monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(tmp_path / "redo.json"))
+    onboarding.save_state(
+        {
+            "model": "mtplx/old",
+            "profile": "stable",
+            "max": False,
+            "target": "terminal",
+        }
+    )
+    answers = iter(["n", "1", "2", "1"])  # 'n' → walk onboarding again
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    state = onboarding.run_quickstart_flow(fresh=False)
+    assert state is not None
+    assert state["model"] == onboarding.DEFAULT_HF_MODEL
+    assert state["profile"] == "performance-cold"
+    assert state["target"] == "openwebui"
+
+
+def test_screen_model_surfaces_configured_path_first(tmp_path, monkeypatch):
+    """A user with a configured local path should see it as option 1 so the
+    'verified default' choice doesn't trigger a needless re-download."""
+    configured = "/Users/test/Documents/MTPLX/models/Qwen3.6-27B-MTPLX"
+    answers = iter(["1"])  # accept option 1 = configured path
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    chosen = onboarding.screen_model(configured=configured)
+    assert chosen == configured
+
+
+def test_screen_model_picks_canonical_default_when_configured_offered(monkeypatch):
+    """With a configured path shown as option 1, option 2 still maps to the
+    canonical Hugging Face default."""
+    configured = "/Users/test/Documents/MTPLX/models/Qwen3.6-27B-MTPLX"
+    answers = iter(["2"])  # explicit "verified default"
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    chosen = onboarding.screen_model(configured=configured)
+    assert chosen == onboarding.DEFAULT_HF_MODEL
+
+
+def test_screen_model_no_configured_uses_three_options(monkeypatch):
+    """Without a configured path, the screen falls back to the original 3
+    options and option 1 maps to the canonical HF default."""
+    answers = iter(["1"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    chosen = onboarding.screen_model(configured=None)
+    assert chosen == onboarding.DEFAULT_HF_MODEL
+
+
+def test_run_quickstart_flow_fresh_skips_returning_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(tmp_path / "fresh.json"))
+    onboarding.save_state(
+        {
+            "model": "mtplx/old",
+            "profile": "stable",
+            "max": False,
+            "target": "terminal",
+        }
+    )
+    # With fresh=True we go straight to the onboarding screens; only 3 inputs.
+    answers = iter(["1", "1", "1"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    state = onboarding.run_quickstart_flow(fresh=True)
+    assert state is not None
+    assert state["target"] == "openwebui"
+
+
+def test_run_quickstart_flow_returns_none_on_ctrlc(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(tmp_path / "abort.json"))
+
+    def raising_input(_prompt: str = "") -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(builtins, "input", raising_input)
+    state = onboarding.run_quickstart_flow(fresh=True)
+    assert state is None
+
+
+# ---------- regression: ~/.mtplx/config.toml must not silently skip the flow --
+#
+# The original bug report: ``mtplx quickstart`` skipped the onboarding because
+# ``apply_user_config`` had pre-filled ``args.model`` from ``~/.mtplx/config.toml``
+# and the heuristic mistook that for an explicit ``--model`` on the command line.
+# These tests pin the new flag-scan based detection so the regression can't
+# come back.
+def test_explicit_cli_flag_detection_ignores_config_file_defaults(tmp_path, monkeypatch):
+    """Simulating a user with config.toml model + bare ``mtplx quickstart`` must
+    still allow onboarding (i.e. ``has_explicit_model`` must be False)."""
+    from mtplx.cli import _explicit_cli_flags
+
+    flags = _explicit_cli_flags(["quickstart"])
+    assert "model" not in flags
+    assert "profile" not in flags
+    assert "max" not in flags
+
+
+def test_explicit_cli_flag_detection_picks_up_typed_flags():
+    from mtplx.cli import _explicit_cli_flags
+
+    flags = _explicit_cli_flags(["quickstart", "cli", "--model", "foo", "--profile", "stable"])
+    assert "model" in flags
+    assert "profile" in flags
+
+    flags_eq = _explicit_cli_flags(["quickstart", "--model=foo"])
+    assert "model" in flags_eq
+
+    flags_max = _explicit_cli_flags(["quickstart", "--max"])
+    assert "max" in flags_max
+
+
+def test_quickstart_invokes_onboarding_when_no_explicit_flags(tmp_path, monkeypatch):
+    """Bare ``mtplx quickstart`` (with config.toml pre-filling model) must drop
+    into ``run_quickstart_flow`` — this is the user-reported bug."""
+    monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(tmp_path / "regression.json"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    invocations: list[dict] = []
+
+    def fake_flow(*, fresh: bool = False, configured_model: str | None = None):
+        invocations.append({"fresh": fresh, "configured_model": configured_model})
+        return {
+            "model": "mtplx/onboarded",
+            "profile": "stable",
+            "max": False,
+            "target": "terminal",
+        }
+
+    monkeypatch.setattr("mtplx.ui.onboarding.run_quickstart_flow", fake_flow)
+
+    # Simulate the post-config args object that quickstart sees.
+    import argparse
+
+    args = argparse.Namespace(
+        target=None,
+        model="/some/configured/path",  # pre-filled from config.toml
+        profile="performance-cold",  # parser default
+        max=False,
+        prompt=None,
+        dry_run=False,
+        yes=False,
+        fresh=False,
+        download=False,
+        cache_dir=None,
+        unsafe_force_unverified=False,
+        show_stats=True,
+        host="127.0.0.1",
+        port=8000,
+        api_key=None,
+        model_id="mtplx-test",
+        warmup_tokens=16,
+        stream_interval=1,
+        rate_limit=0,
+        max_response_tokens=None,
+        reasoning_parser="qwen3",
+        strict_warmup=False,
+        strict_fast_path=False,
+        json=False,
+        max_tokens=None,
+        temperature=0.6,
+        top_p=0.95,
+        top_k=20,
+        depth=3,
+        seed=0,
+        system=None,
+        _cli_flags=set(),  # no flags typed → must trigger onboarding
+    )
+
+    # Stub the downstream model resolution to avoid hitting MLX.
+    def fake_resolve_model(model, *, cache_dir, download):
+        return "/tmp/fake-runtime", {"model": model, "runtime_model": "/tmp/fake-runtime"}
+
+    monkeypatch.setattr(
+        "mtplx.commands.public._quickstart_resolve_model",
+        fake_resolve_model,
+    )
+
+    def fake_gate(runtime_model, *, unsafe_force_unverified, yes):
+        return {"runtime_contract": {"verified": True}, "compatibility": "verified"}, None
+
+    monkeypatch.setattr("mtplx.commands.public._model_gate", fake_gate)
+
+    def fake_run_openwebui(args, *, runtime_model, inspection):
+        return 0
+
+    monkeypatch.setattr(
+        "mtplx.commands.public._quickstart_run_openwebui",
+        fake_run_openwebui,
+    )
+
+    def fake_run_terminal(args, *, runtime_model, inspection):
+        return 0
+
+    monkeypatch.setattr(
+        "mtplx.commands.public._quickstart_run_terminal_chat",
+        fake_run_terminal,
+    )
+
+    from mtplx.commands.public import cmd_quickstart_public
+
+    rc = cmd_quickstart_public(args)
+    assert rc == 0
+    assert len(invocations) == 1
+    assert invocations[0]["configured_model"] == "/some/configured/path"
+    assert args._onboarded is True
+    assert args.model == "mtplx/onboarded"
+
+
+def test_quickstart_skips_onboarding_with_explicit_flags(tmp_path, monkeypatch):
+    """Explicit ``--model`` (or any of the gating flags) must short-circuit
+    the onboarding entirely."""
+    monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(tmp_path / "skipped.json"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    invocations: list[dict] = []
+
+    def fake_flow(*, fresh: bool = False, configured_model: str | None = None):
+        invocations.append({"fresh": fresh, "configured_model": configured_model})
+        return {"model": "x", "profile": "stable", "max": False, "target": "terminal"}
+
+    monkeypatch.setattr("mtplx.ui.onboarding.run_quickstart_flow", fake_flow)
+
+    import argparse
+
+    args = argparse.Namespace(
+        target=None,
+        model="custom/explicit",
+        profile="performance-cold",
+        max=False,
+        prompt=None,
+        dry_run=True,  # also short-circuits
+        yes=False,
+        fresh=False,
+        download=False,
+        cache_dir=None,
+        unsafe_force_unverified=False,
+        show_stats=True,
+        host="127.0.0.1",
+        port=8000,
+        api_key=None,
+        model_id="mtplx-test",
+        warmup_tokens=16,
+        stream_interval=1,
+        rate_limit=0,
+        max_response_tokens=None,
+        reasoning_parser="qwen3",
+        strict_warmup=False,
+        strict_fast_path=False,
+        json=True,
+        max_tokens=None,
+        temperature=0.6,
+        top_p=0.95,
+        top_k=20,
+        depth=3,
+        seed=0,
+        system=None,
+        _cli_flags={"model"},  # user typed --model
+    )
+
+    from mtplx.commands.public import cmd_quickstart_public
+
+    rc = cmd_quickstart_public(args)
+    assert rc == 0
+    assert invocations == []  # onboarding was NOT invoked
+    assert getattr(args, "_onboarded", False) is False

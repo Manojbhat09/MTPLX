@@ -74,11 +74,13 @@ def test_cli_help_without_mlx(tmp_path: Path) -> None:
     proc = _run_no_mlx(tmp_path, ["-m", "mtplx.cli", "--help"])
 
     assert proc.returncode == 0, proc.stderr
-    assert "usage: mtplx" in proc.stdout
-    assert "doctor" in proc.stdout
+    assert "Commands" in proc.stdout
+    assert "Native MTP speculative decoding" in proc.stdout
+    assert "mtplx quickstart" in proc.stdout
+    assert "setup" in proc.stdout
+    assert "status" in proc.stdout
     assert "inspect" in proc.stdout
-    assert "init" in proc.stdout
-    assert "profiles" in proc.stdout
+    assert "mtplx help advanced" in proc.stdout
 
 
 def test_doctor_json_reports_missing_mlx_without_traceback(tmp_path: Path) -> None:

@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
+import time
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Iterator
@@ -22,13 +24,20 @@ PROFILE_LABELS = {
     "silent": "Silent",
 }
 
+# Real ThermalForge CLI — verified against
+# https://github.com/ProducerGuy/ThermalForge (Apr 2026):
+#   thermalforge max     → ramp fans to max
+#   thermalforge auto    → restore Apple defaults
+#   thermalforge status  → JSON
+THERMALFORGE_TAP = "ProducerGuy/tap/thermalforge"
+
 INSTALL_INSTRUCTIONS = {
     "thermalforge": "Install ThermalForge and ensure the thermalforge CLI is on PATH.",
     "tgpro": "Install TG Pro and ensure tgpro or tgpro-cli is on PATH.",
     "none": (
-        "Install ThermalForge, or install TG Pro with a CLI, then rerun the "
-        "same command. MTPLX will continue without fan control when --max is "
-        "requested and no supported tool is present."
+        "Run `mtplx max --install` to install ThermalForge automatically, or "
+        "install TG Pro manually if you prefer. MTPLX will continue without "
+        "fan control when --max is requested and no supported tool is present."
     ),
 }
 
@@ -68,9 +77,29 @@ def _version(path: str) -> dict[str, Any]:
     return _run_probe([path, "--help"])
 
 
+MTPLX_THERMALFORGE_DIR = os.path.expanduser("~/.mtplx/bin")
+MTPLX_THERMALFORGE_PATH = os.path.join(MTPLX_THERMALFORGE_DIR, "thermalforge")
+
+
+def _find_thermalforge() -> str | None:
+    """Locate a ``thermalforge`` binary in MTPLX's preferred order.
+
+    1. ``~/.mtplx/bin/thermalforge`` — the copy MTPLX owns and installs. We
+       prefer this so that anything external (an upstream installer with
+       broken cwd handling, an OS update, ``brew uninstall``, etc.)
+       cannot break MTPLX's fan control.
+    2. ``shutil.which("thermalforge")`` — system PATH (typically
+       ``/usr/local/bin/thermalforge`` from a manual install).
+    """
+
+    if os.path.isfile(MTPLX_THERMALFORGE_PATH) and os.access(MTPLX_THERMALFORGE_PATH, os.X_OK):
+        return MTPLX_THERMALFORGE_PATH
+    return shutil.which("thermalforge")
+
+
 @lru_cache(maxsize=1)
 def detect_thermal_control() -> dict[str, Any]:
-    thermalforge = shutil.which("thermalforge")
+    thermalforge = _find_thermalforge()
     tgpro = shutil.which("tgpro") or shutil.which("tgpro-cli")
     tools: list[dict[str, Any]] = []
     if thermalforge:
@@ -102,17 +131,32 @@ def detect_thermal_control() -> dict[str, Any]:
 
 
 def _profile_command_candidates(tool: dict[str, Any], profile: str) -> list[list[str]]:
-    label = PROFILE_LABELS[profile]
     path = str(tool["path"])
     kind = str(tool["kind"])
     if kind == "thermalforge":
-        return [
-            [path, "profile", label],
-            [path, "set-profile", label],
-            [path, "set", label],
-            [path, "--profile", label],
-        ]
+        # Verified on macOS 14+ (May 2026): even with the privileged daemon
+        # running, ``thermalforge max`` and ``thermalforge auto`` still fail
+        # without sudo ("Fan unlock failed: Run with sudo."). Status is fine
+        # without sudo. So we always wrap fan-set commands in ``sudo -n``,
+        # which the install path enables via a passwordless sudoers rule.
+        # Keep the unprefixed form as a fallback for hand-configured daemon
+        # setups, but try sudo first so cleanup can finish inside macOS
+        # Terminal's short SIGHUP grace window.
+        if profile in ("performance", "max"):
+            return [
+                ["sudo", "-n", path, "max"],
+                [path, "max"],
+            ]
+        if profile == "silent":
+            return [
+                ["sudo", "-n", path, "auto"],
+                [path, "auto"],
+            ]
+        return [[path, "auto"]]
     if kind == "tgpro":
+        # TG Pro CLI syntax is product-documented as best-effort across
+        # versions; keep the original try-list.
+        label = PROFILE_LABELS[profile]
         return [
             [path, "profile", label],
             [path, "set-profile", label],
@@ -123,6 +167,10 @@ def _profile_command_candidates(tool: dict[str, Any], profile: str) -> list[list
 
 def _status_command_candidates(tool: dict[str, Any]) -> list[list[str]]:
     path = str(tool["path"])
+    kind = str(tool["kind"])
+    if kind == "thermalforge":
+        # ThermalForge `status` already emits JSON.
+        return [[path, "status"]]
     return [
         [path, "status", "--json"],
         [path, "status"],
@@ -144,6 +192,698 @@ def thermal_status() -> dict[str, Any]:
         "status": first_ok,
         "attempts": attempts,
     }
+
+
+def fan_summary() -> dict[str, Any]:
+    """Best-effort fan-RPM summary, used to verify ``thermalforge max`` actually
+    ramped the fans rather than silently no-op'ing.
+
+    Returns ``{"ok": bool, "min_rpm": int|None, "max_rpm": int|None,
+    "fans": [...]}``. ``ok`` is True when at least one fan reading was parsed.
+    """
+
+    status = thermal_status()
+    if not status.get("ok"):
+        return {"ok": False, "min_rpm": None, "max_rpm": None, "fans": [], "raw": status}
+    raw_stdout = status.get("status", {}).get("stdout") or ""
+    rpms: list[int] = []
+    fans: list[dict[str, Any]] = []
+    try:
+        import json as _json
+
+        parsed = _json.loads(raw_stdout)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        # Real ThermalForge JSON shape (verified live against
+        # `thermalforge status` on macOS, May 2026):
+        #
+        #   {"fans": [{"actual_rpm": 2315, "target_rpm": 2317,
+        #              "min_rpm": 2317, "max_rpm": 7826, "mode": "auto",
+        #              "index": 0}, ...], "temperatures": {...}}
+        #
+        # `actual_rpm` is what the fan is currently spinning at;
+        # `target_rpm` is the daemon's setpoint; `max_rpm` / `min_rpm` are the
+        # fan's hardware capacity envelope. We read `actual_rpm` first
+        # (verifies real ramp), fall back to `target_rpm` (verifies
+        # commanded ramp), and finally any flat `rpm` field for non-
+        # ThermalForge tools.
+        candidates = parsed.get("fans") or parsed.get("Fans") or []
+        if isinstance(candidates, dict):
+            candidates = list(candidates.values())
+        for entry in candidates if isinstance(candidates, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            rpm_value = (
+                entry.get("actual_rpm")
+                if entry.get("actual_rpm") is not None
+                else entry.get("target_rpm")
+                if entry.get("target_rpm") is not None
+                else entry.get("rpm")
+                if entry.get("rpm") is not None
+                else entry.get("RPM")
+                if entry.get("RPM") is not None
+                else entry.get("speed")
+            )
+            try:
+                rpm_int = int(rpm_value)
+            except (TypeError, ValueError):
+                continue
+            rpms.append(rpm_int)
+            fans.append(
+                {
+                    "rpm": rpm_int,
+                    "target_rpm": entry.get("target_rpm"),
+                    "actual_rpm": entry.get("actual_rpm"),
+                    "max_capacity_rpm": entry.get("max_rpm"),
+                    "mode": entry.get("mode"),
+                    "raw": entry,
+                }
+            )
+    return {
+        "ok": bool(rpms),
+        "min_rpm": min(rpms) if rpms else None,
+        "max_rpm": max(rpms) if rpms else None,
+        "fans": fans,
+        "raw": status,
+    }
+
+
+# Threshold (RPM) above which we consider fans "ramped" after `thermalforge max`.
+# Apple Silicon idle RPMs are usually ~1500-2000; 4000+ is clearly elevated.
+FAN_RAMP_THRESHOLD_RPM = 4000
+
+
+def _summary_indicates_max(summary: dict[str, Any]) -> bool:
+    """Return True iff the parsed status snapshot says fans are commanded
+    to ramp (mode is manual/max OR target RPM is clearly above idle).
+
+    We check ``target_rpm`` rather than ``actual_rpm`` because the daemon
+    sets the target instantly when ``thermalforge max`` is accepted, while
+    actual RPM only catches up over ~15 seconds (Apple Silicon fans ramp at
+    roughly 400 RPM/sec). Reading actual_rpm too early is what made an
+    earlier verification path falsely report failure.
+    """
+
+    if not summary.get("ok"):
+        return False
+    for fan in summary.get("fans") or []:
+        mode = (fan.get("mode") or "").lower()
+        if mode in {"manual", "max"}:
+            return True
+        target = fan.get("target_rpm")
+        try:
+            if target is not None and int(target) >= FAN_RAMP_THRESHOLD_RPM:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+def _summary_indicates_auto(summary: dict[str, Any]) -> bool:
+    """Return True iff all parsed fan rows are back on the automatic curve."""
+
+    if not summary.get("ok"):
+        return False
+    fans = summary.get("fans") or []
+    if not fans:
+        return False
+    for fan in fans:
+        mode = str(fan.get("mode") or "").lower()
+        target = fan.get("target_rpm")
+        try:
+            target_int = None if target is None else int(target)
+        except (TypeError, ValueError):
+            target_int = None
+        # ThermalForge may report target_rpm as 0 or as the fan's low automatic
+        # setpoint (~min_rpm) while mode is auto. The mode is the authoritative
+        # restore signal; target only helps when a tool omits mode.
+        if mode in {"auto", "automatic", "default"}:
+            if target_int is not None and target_int >= FAN_RAMP_THRESHOLD_RPM:
+                return False
+            continue
+        if target_int is not None and target_int <= 0:
+            continue
+        return False
+    return True
+
+
+def set_thermal_profile_verified(
+    profile: str,
+    *,
+    settle_seconds: float = 1.0,
+    log: Any = None,
+) -> dict[str, Any]:
+    """Set a fan profile and *prove* it took effect.
+
+    ``log`` is an optional callable that receives one human-readable line per
+    diagnostic step (e.g. ``print`` or a logger.info).
+
+    Returns a dict with:
+      ``ok``         True iff fans are confirmed ramped (or the profile was
+                     ``silent``, where we don't verify upward motion).
+      ``baseline``   ``fan_summary`` before the profile change.
+      ``after``      ``fan_summary`` after waiting ``settle_seconds``.
+      ``profile``    The profile we set.
+      ``set_result`` Underlying set_thermal_profile() output.
+      ``message``    Human-readable summary suitable for printing.
+      ``actionable`` (when ``ok`` is False) Suggested next step for the user.
+    """
+
+    def _emit(line: str) -> None:
+        if log is not None:
+            try:
+                log(line)
+            except Exception:
+                pass
+
+    detection = detect_thermal_control()
+    if not detection.get("available"):
+        return {
+            "ok": False,
+            "baseline": None,
+            "after": None,
+            "profile": profile,
+            "set_result": {"ok": False, "detection": detection},
+            "message": detection.get("instructions") or "no fan controller installed",
+            "actionable": "run `mtplx max --install` to auto-install ThermalForge",
+        }
+
+    selected = detection["selected"]
+    tool_kind = selected.get("kind")
+    tool_path = selected.get("path")
+    _emit(f"[max] fan tool: {tool_kind} ({tool_path})")
+
+    baseline = fan_summary()
+    if baseline.get("ok"):
+        _emit(
+            f"[max] baseline fans: min {baseline['min_rpm']} RPM, "
+            f"max {baseline['max_rpm']} RPM"
+        )
+    else:
+        _emit("[max] baseline fans: no reading (daemon may be inactive)")
+
+    _emit(f"[max] running `{tool_kind} {'max' if profile != 'silent' else 'auto'}`...")
+    set_result = set_thermal_profile(profile)
+    if not set_result.get("ok"):
+        return {
+            "ok": False,
+            "baseline": baseline,
+            "after": None,
+            "profile": profile,
+            "set_result": set_result,
+            "message": (
+                f"`{tool_kind}` did not accept the command. "
+                f"stderr: {(set_result.get('attempts') or [{}])[-1].get('stderr', '')}"
+            ),
+            "actionable": (
+                "open /Applications/ThermalForge.app once and enable "
+                "'Launch at Login', or run `sudo thermalforge install` to "
+                "(re)install the daemon."
+            ),
+        }
+
+    if profile == "silent":
+        # Don't try to verify silent — fans may legitimately stay where they
+        # were (the daemon eases off rather than slamming low).
+        return {
+            "ok": True,
+            "baseline": baseline,
+            "after": fan_summary(),
+            "profile": profile,
+            "set_result": set_result,
+            "message": "fan profile restored",
+        }
+
+    if settle_seconds > 0:
+        _emit(f"[max] waiting {settle_seconds:.1f}s for the daemon to update target RPM...")
+        import time as _time
+
+        _time.sleep(settle_seconds)
+
+    after = fan_summary()
+    if not _summary_indicates_max(after):
+        # Helpful failure message: include what we did read so the user can
+        # see whether fans were genuinely ignored vs. just slow to ramp.
+        target = ", ".join(
+            f"fan{f.get('raw', {}).get('index', '?')}: target={f.get('target_rpm')} mode={f.get('mode')}"
+            for f in (after.get("fans") or [])
+        ) or "no fan readings"
+        return {
+            "ok": False,
+            "baseline": baseline,
+            "after": after,
+            "profile": profile,
+            "set_result": set_result,
+            "message": (
+                f"`{tool_kind} {profile}` was accepted but the fan daemon is "
+                f"not commanding max. State: {target}"
+            ),
+            "actionable": (
+                "open /Applications/ThermalForge.app once (this wakes the "
+                "menu-bar app and confirms the daemon is talking), then re-run."
+            ),
+        }
+
+    _emit(
+        f"[max] fans pinned: target {after['max_rpm']} RPM (actual will catch "
+        f"up over ~15s); current actual {after['min_rpm']} RPM"
+    )
+    return {
+        "ok": True,
+        "baseline": baseline,
+        "after": after,
+        "profile": profile,
+        "set_result": set_result,
+        "message": f"fans commanded to max ({after['max_rpm']} RPM target)",
+    }
+
+
+def restore_thermal_profile_verified(*, log: Any = None) -> dict[str, Any]:
+    """Restore Apple-default fan control and prove the daemon accepted it.
+
+    This is intentionally stricter than the old ``set_thermal_profile("silent")``
+    cleanup path. Marker files are only safe to delete once we know the fan
+    controller reports the automatic fan curve again.
+    """
+
+    def _emit(line: str) -> None:
+        if log is not None:
+            try:
+                log(line)
+            except Exception:
+                pass
+
+    _emit("[max] restoring fans to Apple auto curve...")
+    set_result = set_thermal_profile("silent")
+    after = fan_summary()
+    ok = bool(set_result.get("ok")) and _summary_indicates_auto(after)
+    message = "fan profile restored" if ok else "fan restore was attempted but not verified"
+    if ok:
+        _emit("[max] fans restored: mode=auto")
+    else:
+        _emit(f"[max] WARNING: {message}")
+    return {
+        "ok": ok,
+        "profile": "silent",
+        "set_result": set_result,
+        "after": after,
+        "message": message,
+    }
+
+
+def open_thermalforge_app() -> dict[str, Any]:
+    """Best-effort `open /Applications/ThermalForge.app` to wake the menu-bar
+    app, which in turn ensures the daemon is talking. Returns ``{"ok": ...}``.
+    """
+
+    app_path = "/Applications/ThermalForge.app"
+    if not os.path.isdir(app_path):
+        return {"ok": False, "message": f"{app_path} not found"}
+    try:
+        subprocess.run(["open", "-g", app_path], check=False, timeout=5.0)
+    except Exception as exc:
+        return {"ok": False, "message": f"failed to open: {exc}"}
+    return {"ok": True, "message": f"opened {app_path}"}
+
+
+SUDOERS_FILE = "/etc/sudoers.d/mtplx-thermalforge"
+
+
+def install_passwordless_sudoers_rule(
+    *,
+    binary_path: str | None = None,
+    streaming: bool = True,
+) -> dict[str, Any]:
+    """Install a sudoers rule allowing the current user to run ``thermalforge``
+    without a password, so MTPLX's fan control doesn't prompt every server
+    start (and the idle watchdog can ramp fans back up unattended).
+
+    Why this is necessary: ThermalForge's privileged daemon does not fully
+    proxy SMC fan-unlock writes; ``thermalforge max`` returns
+    "Run with sudo." even with the daemon running. The sudoers rule scopes
+    NOPASSWD to exactly the ``thermalforge`` binary, which is the minimum
+    elevation needed for fan control.
+    """
+
+    runner = _run_streaming if streaming else _run_probe
+
+    if binary_path is None:
+        binary_path = shutil.which("thermalforge") or "/usr/local/bin/thermalforge"
+
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or "_unknown"
+    rule = f"{user} ALL=(root) NOPASSWD: {binary_path}\n"
+
+    # `sudo tee` is the standard idiom for writing a privileged file
+    # interactively without spawning a root shell. We feed the rule via
+    # stdin to avoid quoting hell.
+    write_proc = subprocess.run(
+        ["sudo", "tee", SUDOERS_FILE],
+        input=rule,
+        text=True,
+        check=False,
+        capture_output=True,
+    )
+    if write_proc.returncode != 0:
+        return {
+            "ok": False,
+            "step": "sudo_tee",
+            "message": (
+                f"Could not write {SUDOERS_FILE}. sudo said: "
+                f"{(write_proc.stderr or '').strip()}"
+            ),
+        }
+
+    chmod_result = runner(["sudo", "chmod", "440", SUDOERS_FILE])
+    chmod_result["step"] = "chmod"
+    validate_result = runner(["sudo", "visudo", "-c", "-f", SUDOERS_FILE])
+    validate_result["step"] = "visudo_check"
+    if not validate_result.get("ok"):
+        # If syntax is bad, remove the file so we don't leave the system
+        # with an unparseable sudoers fragment.
+        runner(["sudo", "rm", "-f", SUDOERS_FILE])
+        return {
+            "ok": False,
+            "step": "visudo_check",
+            "message": (
+                "Sudoers rule was rejected by visudo and rolled back. "
+                f"Validation error: {validate_result.get('stderr', '').strip()}"
+            ),
+            "steps": [chmod_result, validate_result],
+        }
+
+    # Final sanity: passwordless sudo should now work.
+    probe = _run_probe(["sudo", "-n", binary_path, "status"], timeout_s=5.0)
+    return {
+        "ok": probe.get("ok", False),
+        "step": "verify_passwordless",
+        "binary_path": binary_path,
+        "message": (
+            "Passwordless sudo for thermalforge is configured."
+            if probe.get("ok")
+            else (
+                "Sudoers rule installed but `sudo -n thermalforge status` "
+                "still failed: " + (probe.get("stderr") or "").strip()
+            )
+        ),
+        "steps": [chmod_result, validate_result, {**probe, "step": "verify"}],
+    }
+
+
+def remove_passwordless_sudoers_rule(*, streaming: bool = True) -> dict[str, Any]:
+    """Counterpart to ``install_passwordless_sudoers_rule`` for clean uninstall."""
+
+    runner = _run_streaming if streaming else _run_probe
+    if not os.path.exists(SUDOERS_FILE):
+        return {"ok": True, "message": f"{SUDOERS_FILE} already absent"}
+    result = runner(["sudo", "rm", "-f", SUDOERS_FILE])
+    return {
+        "ok": result.get("ok", False),
+        "message": (
+            f"removed {SUDOERS_FILE}"
+            if result.get("ok")
+            else f"failed to remove {SUDOERS_FILE}"
+        ),
+        "result": result,
+    }
+
+
+# ---------- max-mode crash safety -------------------------------------------
+#
+# When `mtplx start --max` pins the fans, we also write a marker file with
+# the pid that did the pinning. If that process dies *cleanly* (Ctrl-C,
+# SIGTERM, normal exit) we run `thermalforge auto` and clear the marker. If
+# it dies hard (kill -9, terminal slammed shut, OOM), the marker stays
+# behind. The next MTPLX invocation detects the stale marker, sees the pid
+# isn't running anymore, and restores fans automatically — so the user
+# doesn't end up with a screaming Mac because of a previous crash.
+
+import atexit  # noqa: E402  (deferred until after main module body)
+import json as _json  # noqa: E402  (avoid clashing with local json imports)
+import signal  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+MAX_MARKER_FILE = Path("~/.mtplx/max-active.json").expanduser()
+
+
+def _write_max_marker(pid: int | None = None) -> None:
+    if pid is None:
+        pid = os.getpid()
+    binary = None
+    try:
+        selected = detect_thermal_control().get("selected")
+        if selected:
+            binary = selected.get("path")
+    except Exception:
+        binary = None
+    try:
+        MAX_MARKER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MAX_MARKER_FILE.write_text(
+            _json.dumps(
+                {
+                    "pid": int(pid),
+                    "started_at": time.time(),
+                    "binary": binary or _find_thermalforge(),
+                }
+            )
+        )
+    except Exception:
+        pass  # marker is best-effort; don't crash --max because we can't write it
+
+
+def _clear_max_marker() -> None:
+    try:
+        if MAX_MARKER_FILE.exists():
+            MAX_MARKER_FILE.unlink()
+    except Exception:
+        pass
+
+
+def _read_max_marker() -> dict[str, Any] | None:
+    try:
+        if not MAX_MARKER_FILE.exists():
+            return None
+        return _json.loads(MAX_MARKER_FILE.read_text())
+    except Exception:
+        return None
+
+
+def check_and_recover_stale_max() -> dict[str, Any]:
+    """Detect a marker left by a crashed --max session and restore fans.
+
+    Returns ``{"recovered": bool, "stale_pid": int|None,
+    "still_running": bool}``. Safe to call from any startup path; no-op when
+    no marker exists.
+    """
+
+    marker = _read_max_marker()
+    if not marker:
+        return {"recovered": False, "stale_pid": None, "still_running": False}
+    stale_pid = marker.get("pid")
+    if isinstance(stale_pid, int):
+        try:
+            os.kill(stale_pid, 0)
+            return {
+                "recovered": False,
+                "stale_pid": stale_pid,
+                "still_running": True,
+            }
+        except OSError:
+            pass  # process is gone, marker is stale
+    restore = restore_thermal_profile_verified()
+    if restore.get("ok"):
+        _clear_max_marker()
+    return {
+        "recovered": bool(restore.get("ok")),
+        "stale_pid": stale_pid,
+        "still_running": False,
+        "restore": restore,
+        "marker_cleared": bool(restore.get("ok")),
+    }
+
+
+def _spawn_thermal_sidecar() -> subprocess.Popen | None:
+    """Launch a detached fan-restore watchdog.
+
+    Required because closing a macOS Terminal window sends SIGHUP and
+    waits ~5 s before SIGKILL. The signal handler we install in this
+    process can take longer than that (the un-sudo'd
+    ``thermalforge auto`` candidate can block on the daemon for up to
+    15 s), so SIGKILL ends up landing while fans are still pinned. The
+    sidecar runs in its own session, survives the parent's death, and
+    issues ``sudo -n thermalforge auto`` the moment the parent
+    disappears.
+    """
+
+    detection = detect_thermal_control()
+    selected = detection.get("selected") if isinstance(detection, dict) else None
+    if not selected:
+        return None
+    binary = str(selected.get("path") or "")
+    if not binary:
+        return None
+    sidecar_module = "mtplx.thermal_sidecar"
+    cmd = [
+        sys.executable,
+        "-m",
+        sidecar_module,
+        "--parent-pid",
+        str(os.getpid()),
+        "--binary",
+        binary,
+        "--marker",
+        str(MAX_MARKER_FILE),
+    ]
+    try:
+        return subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception:
+        return None
+
+
+def install_max_lifecycle_hooks() -> Any:
+    """Wire signal handlers + atexit + a detached sidecar so fans always
+    get restored when the parent process exits — including SIGKILL,
+    terminal-close, OOM, and other uncatchable cases.
+
+    Returns a callable that runs the in-process cleanup explicitly;
+    callers should also invoke it from their own ``finally`` block as
+    belt-and-suspenders alongside the sidecar.
+    """
+
+    _write_max_marker()
+    _sidecar = _spawn_thermal_sidecar()
+    cleaned_up = [False]
+
+    def cleanup() -> dict[str, Any]:
+        if cleaned_up[0]:
+            return {"ok": True, "already_cleaned": True}
+        cleaned_up[0] = True
+        try:
+            restore = restore_thermal_profile_verified()
+        except Exception as exc:
+            restore = {"ok": False, "error": str(exc), "message": "fan restore raised"}
+        if restore.get("ok"):
+            _clear_max_marker()
+        # The sidecar will notice the parent is gone and re-issue auto
+        # too — that's intentional belt-and-suspenders. If the in-process
+        # cleanup succeeded, the sidecar's call is a harmless no-op.
+        return restore
+
+    def _signal_handler(signum: int, _frame: Any) -> None:
+        cleanup()
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+        except Exception:
+            os._exit(128 + int(signum))
+
+    atexit.register(cleanup)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, _signal_handler)
+        except (ValueError, OSError):
+            # signal.signal can only be called from the main thread of the
+            # main interpreter; ignore in non-standard contexts (tests).
+            pass
+    return cleanup
+
+
+class MaxSession:
+    """Verified, crash-safe lifecycle for every user-facing ``--max`` path."""
+
+    def __init__(self, *, log: Any = None, retry_open_app: bool = True) -> None:
+        self.log = log
+        self.retry_open_app = bool(retry_open_app)
+        self.cleanup: Any = None
+        self.active = False
+        self.thermal: dict[str, Any] = {
+            "enabled": False,
+            "start": None,
+            "verified": None,
+            "restore": None,
+        }
+
+    def _emit(self, line: str) -> None:
+        if self.log is not None:
+            try:
+                self.log(line)
+            except Exception:
+                pass
+
+    def start(self) -> bool:
+        recovery = check_and_recover_stale_max()
+        self.thermal["recovery"] = recovery
+        if recovery.get("recovered"):
+            self._emit(
+                "[max] recovered fans from a previous --max session that did "
+                f"not exit cleanly (stale pid {recovery.get('stale_pid')})"
+            )
+        elif recovery.get("restore") and not recovery.get("marker_cleared"):
+            self._emit(
+                "[max] WARNING: previous --max marker is stale, but fan restore "
+                "could not be verified; leaving the marker for the next status check"
+            )
+
+        detection = detect_thermal_control()
+        if not detection.get("available"):
+            verified = set_thermal_profile_verified("performance", log=self._emit)
+            self.thermal["verified"] = verified
+            self.thermal["start"] = verified.get("set_result")
+            return False
+
+        # Install marker, signal hooks, and detached sidecar before commanding
+        # max. That closes the small but important crash window during live
+        # verification itself.
+        self.cleanup = install_max_lifecycle_hooks()
+        verified = set_thermal_profile_verified("performance", log=self._emit)
+        if not verified.get("ok") and self.retry_open_app:
+            self._emit(f"[max] FIRST ATTEMPT FAILED: {verified.get('message')}")
+            actionable = verified.get("actionable")
+            if actionable:
+                self._emit(f"[max] trying recovery: {str(actionable).split('.')[0]}...")
+            open_result = open_thermalforge_app()
+            self.thermal["open_thermalforge_app"] = open_result
+            if open_result.get("ok"):
+                self._emit("[max] opened ThermalForge.app; retrying in 4s...")
+                time.sleep(4.0)
+                verified = set_thermal_profile_verified("performance", log=self._emit)
+
+        self.thermal["verified"] = verified
+        self.thermal["start"] = verified.get("set_result", {"ok": False})
+        if not verified.get("ok"):
+            self.stop()
+            return False
+
+        self.active = True
+        self.thermal["enabled"] = True
+        return True
+
+    def stop(self) -> dict[str, Any]:
+        restore: dict[str, Any]
+        if self.cleanup is not None:
+            restore = self.cleanup()
+        else:
+            restore = restore_thermal_profile_verified(log=self._emit)
+            if restore.get("ok"):
+                _clear_max_marker()
+        self.active = False
+        self.thermal["restore"] = restore
+        return restore
+
+    def __enter__(self) -> "MaxSession":
+        self.start()
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        if self.active or self.cleanup is not None:
+            self.stop()
 
 
 def set_thermal_profile(profile: str, *, dry_run: bool = False) -> dict[str, Any]:
@@ -218,3 +958,395 @@ def run_command_with_profile(
     with thermal_profile(profile, enabled=True) as thermal:
         proc = subprocess.run(command, env=env, cwd=cwd, check=False)
     return {"returncode": proc.returncode, "thermal": thermal, "command": command}
+
+
+# ---------- auto-install -----------------------------------------------------
+#
+# Bootstrap path for users who pick Max mode in `mtplx quickstart` and don't
+# already have a fan controller.
+#
+# As of 2026-04 the upstream Homebrew tap (ProducerGuy/tap) ships a formula
+# whose tarball is missing ``Scripts/generate-icon.swift``, so ``brew install
+# ProducerGuy/tap/thermalforge`` aborts with a Swift compile error. Source
+# install (``git clone … && ./setup.sh``) ships the missing file and is the
+# reliable path. The default auto path now uses only the MTPLX-owned source
+# build; Homebrew remains an explicit diagnostic/manual method.
+
+THERMALFORGE_GIT_URL = "https://github.com/ProducerGuy/ThermalForge.git"
+THERMALFORGE_BUILD_DIR = "~/.mtplx/build/ThermalForge"
+
+INSTALL_PREREQ_HINTS = {
+    "swift": (
+        "Xcode command-line tools are required to build ThermalForge from "
+        "source. Install them with:\n"
+        "  xcode-select --install\n"
+        "Then re-run `mtplx max --install`."
+    ),
+    "git": (
+        "git is required to clone ThermalForge. Install it with:\n"
+        "  xcode-select --install\n"
+        "Then re-run `mtplx max --install`."
+    ),
+    "brew": (
+        'Homebrew not found. Install it with:\n'
+        '  /bin/bash -c "$(curl -fsSL '
+        'https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\n'
+        "Then re-run `mtplx max --install`."
+    ),
+}
+
+
+def _run_streaming(
+    command: list[str],
+    *,
+    timeout_s: float | None = None,
+    cwd: str | None = None,
+) -> dict[str, Any]:
+    """Run ``command`` letting stdin/stdout/stderr pass through to the user.
+
+    Required so brew/git/sudo can show download progress and prompt for a
+    password naturally inside the user's terminal.
+    """
+
+    try:
+        proc = subprocess.run(command, check=False, timeout=timeout_s, cwd=cwd)
+    except Exception as exc:
+        return {"command": command, "returncode": None, "ok": False, "error": str(exc)}
+    return {
+        "command": command,
+        "returncode": proc.returncode,
+        "ok": proc.returncode == 0,
+    }
+
+
+def install_thermal_control(
+    *,
+    method: str = "auto",
+    install_daemon: bool = True,
+    streaming: bool = True,
+) -> dict[str, Any]:
+    """Auto-install ThermalForge.
+
+    ``method`` selects the install path:
+      ``"auto"``    — build from source into ``~/.mtplx/bin`` (default).
+      ``"source"``  — git clone + ./setup.sh (uses Xcode CLI tools).
+      ``"homebrew"`` — brew install ProducerGuy/tap/thermalforge + sudo daemon.
+
+    Returns a dict with ``ok`` (whether a working ``thermalforge`` CLI is on
+    PATH afterwards), ``method`` (which path actually succeeded), ``steps``
+    (per-step results), ``message`` (a single human-readable summary), and
+    ``detection`` (post-install thermal-control detection).
+    """
+
+    if method == "homebrew":
+        return _install_from_homebrew(install_daemon=install_daemon, streaming=streaming)
+    if method == "source":
+        return _install_from_source(install_daemon=install_daemon, streaming=streaming)
+    if method != "auto":
+        raise ValueError(f"unknown install method: {method}")
+
+    # ``auto`` no longer falls through to Homebrew. The upstream
+    # ``ProducerGuy/tap/thermalforge`` formula has been observed to fail
+    # mid-build (missing ``Scripts/generate-icon.swift`` in the formula's
+    # source archive, May 2026) AND, when it does succeed, installs into
+    # ``/usr/local/bin/`` which we can't keep stable. Source build to
+    # ``~/.mtplx/bin`` is the only path we trust.
+    return _install_from_source(install_daemon=install_daemon, streaming=streaming)
+
+
+# Backwards-compatible alias for the old ``mtplx max --install`` wiring and
+# any external imports.
+install_thermal_control_homebrew = install_thermal_control
+
+
+def _install_from_source(
+    *,
+    install_daemon: bool,  # kept for API parity; ignored (we don't install daemon)
+    streaming: bool,
+) -> dict[str, Any]:
+    """Build ThermalForge from source and install ONLY into MTPLX's private
+    ``~/.mtplx/bin`` directory.
+
+    Why we don't run upstream's ``setup.sh`` or ``thermalforge install``:
+    the upstream installer copies a binary to ``/usr/local/bin/`` and writes
+    a privileged launchd plist whose binary path it then locks in. If
+    *anything* (a stray ``thermalforge install`` invocation from the wrong
+    cwd, an OS update, a ``brew uninstall``, etc.) removes
+    ``/usr/local/bin/thermalforge`` after the fact, the daemon dies and the
+    CLI is gone — leaving the user with no fan control and no obvious
+    recovery path. Witnessed in the wild May 2026.
+
+    By installing under ``~/.mtplx/bin`` and using passwordless sudo
+    targeting that exact path, MTPLX's fan control is owned end-to-end by
+    MTPLX. Nothing outside ``mtplx max --install`` can break it.
+    """
+
+    runner = _run_streaming if streaming else _run_probe
+    steps: list[dict[str, Any]] = []
+
+    git = shutil.which("git")
+    if git is None:
+        return {
+            "ok": False,
+            "step": "prereq_git",
+            "needs_prereq": "git",
+            "message": INSTALL_PREREQ_HINTS["git"],
+            "steps": steps,
+            "detection": detect_thermal_control(),
+        }
+    swift = shutil.which("swift")
+    if swift is None:
+        return {
+            "ok": False,
+            "step": "prereq_swift",
+            "needs_prereq": "swift",
+            "message": INSTALL_PREREQ_HINTS["swift"],
+            "steps": steps,
+            "detection": detect_thermal_control(),
+        }
+
+    build_dir = os.path.expanduser(THERMALFORGE_BUILD_DIR)
+    parent = os.path.dirname(build_dir)
+    os.makedirs(parent, exist_ok=True)
+
+    if os.path.isdir(os.path.join(build_dir, ".git")):
+        pull_result = runner([git, "-C", build_dir, "pull", "--ff-only"], timeout_s=120.0)
+        pull_result["step"] = "git_pull"
+        steps.append(pull_result)
+        if not pull_result.get("ok"):
+            # Wipe and re-clone if pull fails — the working tree may be dirty.
+            shutil.rmtree(build_dir, ignore_errors=True)
+
+    if not os.path.isdir(os.path.join(build_dir, ".git")):
+        clone_result = runner(
+            [git, "clone", "--depth", "1", THERMALFORGE_GIT_URL, build_dir],
+            timeout_s=300.0,
+        )
+        clone_result["step"] = "git_clone"
+        steps.append(clone_result)
+        if not clone_result.get("ok"):
+            return {
+                "ok": False,
+                "step": "git_clone",
+                "message": (
+                    f"git clone of {THERMALFORGE_GIT_URL} failed. Check your "
+                    "network connection and re-run `mtplx max --install`."
+                ),
+                "steps": steps,
+                "detection": detect_thermal_control(),
+            }
+
+    # `swift build -c release` — incremental and fast on subsequent runs.
+    build_result = runner(
+        [swift, "build", "-c", "release"],
+        cwd=build_dir,
+        timeout_s=900.0,
+    )
+    build_result["step"] = "swift_build"
+    steps.append(build_result)
+    if not build_result.get("ok"):
+        return {
+            "ok": False,
+            "step": "swift_build",
+            "message": (
+                "swift build failed. The most common cause is incomplete "
+                "Xcode command-line tools. Run `xcode-select --install` and "
+                "re-run `mtplx max --install`."
+            ),
+            "steps": steps,
+            "detection": detect_thermal_control(),
+        }
+
+    # Find the freshly-built binary and copy it to MTPLX's private bin dir.
+    candidates = [
+        os.path.join(build_dir, ".build", "release", "thermalforge"),
+        os.path.join(build_dir, ".build", "arm64-apple-macosx", "release", "thermalforge"),
+        os.path.join(build_dir, ".build", "x86_64-apple-macosx", "release", "thermalforge"),
+    ]
+    built_binary = next((p for p in candidates if os.path.isfile(p)), None)
+    if built_binary is None:
+        return {
+            "ok": False,
+            "step": "post_build_locate",
+            "message": (
+                "swift build reported success but no thermalforge binary was "
+                "produced. Re-run `mtplx max --install` after deleting "
+                f"{build_dir}."
+            ),
+            "steps": steps,
+            "detection": detect_thermal_control(),
+        }
+
+    os.makedirs(MTPLX_THERMALFORGE_DIR, exist_ok=True)
+    try:
+        shutil.copy2(built_binary, MTPLX_THERMALFORGE_PATH)
+        os.chmod(MTPLX_THERMALFORGE_PATH, 0o755)
+    except OSError as exc:
+        return {
+            "ok": False,
+            "step": "copy_to_mtplx_bin",
+            "message": f"Could not copy thermalforge to {MTPLX_THERMALFORGE_PATH}: {exc}",
+            "steps": steps,
+            "detection": detect_thermal_control(),
+        }
+    steps.append(
+        {
+            "step": "copy_to_mtplx_bin",
+            "ok": True,
+            "src": built_binary,
+            "dst": MTPLX_THERMALFORGE_PATH,
+        }
+    )
+
+    detect_thermal_control.cache_clear()
+    detection = detect_thermal_control()
+
+    # Sudoers rule scoped exactly to OUR binary path. Any external user of
+    # ``thermalforge`` (the upstream installer, a manual /usr/local/bin
+    # copy) gets no extra privilege from this.
+    sudoers_result = install_passwordless_sudoers_rule(
+        binary_path=MTPLX_THERMALFORGE_PATH, streaming=streaming
+    )
+    sudoers_result["step"] = "passwordless_sudoers"
+    steps.append(sudoers_result)
+    if not sudoers_result.get("ok"):
+        return {
+            "ok": False,
+            "method": "source",
+            "message": (
+                "ThermalForge built and copied to "
+                f"{MTPLX_THERMALFORGE_PATH}, but passwordless sudo could "
+                "not be configured. Re-run `mtplx max --grant-sudo` after "
+                f"fixing the cause: {sudoers_result.get('message')}"
+            ),
+            "steps": steps,
+            "detection": detection,
+        }
+
+    # Final live verification: ramp fans, confirm the daemon accepted the
+    # command, then ALWAYS restore — even if verification reports failure
+    # — so we never leave the user's machine with fans blasting because of
+    # a buggy install path.
+    verify = set_thermal_profile_verified("performance", settle_seconds=1.0)
+    try:
+        set_thermal_profile("silent")
+    except Exception:
+        pass  # restore is best-effort; never let it mask the real result
+    steps.append(
+        {"step": "live_fan_test", **{k: v for k, v in verify.items() if k != "raw"}}
+    )
+
+    if not verify.get("ok"):
+        return {
+            "ok": False,
+            "method": "source",
+            "message": (
+                "ThermalForge is built and sudoers is configured, but the "
+                "live fan-ramp test did not register at the daemon. "
+                f"Reason: {verify.get('message')}. "
+                f"Action: {verify.get('actionable', '')}"
+            ),
+            "steps": steps,
+            "detection": detection,
+        }
+
+    return {
+        "ok": True,
+        "method": "source",
+        "binary": MTPLX_THERMALFORGE_PATH,
+        "message": (
+            f"ThermalForge installed at {MTPLX_THERMALFORGE_PATH} and "
+            "verified live (fans ramped and restored). MAX mode is ready."
+        ),
+        "steps": steps,
+        "detection": detection,
+    }
+
+
+def _install_from_homebrew(
+    *,
+    install_daemon: bool,
+    streaming: bool,
+) -> dict[str, Any]:
+    runner = _run_streaming if streaming else _run_probe
+    steps: list[dict[str, Any]] = []
+
+    brew = shutil.which("brew")
+    if brew is None:
+        return {
+            "ok": False,
+            "step": "prereq_brew",
+            "needs_prereq": "brew",
+            "message": INSTALL_PREREQ_HINTS["brew"],
+            "steps": steps,
+            "detection": detect_thermal_control(),
+        }
+
+    install_result = runner([brew, "install", THERMALFORGE_TAP], timeout_s=600.0)
+    install_result["step"] = "brew_install"
+    steps.append(install_result)
+    if not install_result.get("ok"):
+        return {
+            "ok": False,
+            "step": "brew_install",
+            "message": (
+                f"`brew install {THERMALFORGE_TAP}` failed. The upstream "
+                "formula has been flaky; try the source path: "
+                "`mtplx max --install` (auto) usually falls back to source."
+            ),
+            "steps": steps,
+            "detection": detect_thermal_control(),
+        }
+
+    detect_thermal_control.cache_clear()
+    detection = detect_thermal_control()
+    if not detection.get("available"):
+        return {
+            "ok": False,
+            "step": "post_install_detect",
+            "message": (
+                "thermalforge installed via brew but the CLI is not on PATH. "
+                "Open a new terminal (or `hash -r`) and re-run."
+            ),
+            "steps": steps,
+            "detection": detection,
+        }
+
+    if not install_daemon:
+        return {
+            "ok": True,
+            "daemon_ok": None,
+            "message": (
+                "ThermalForge CLI installed. To enable fan control without "
+                "a password every time, run: sudo thermalforge install"
+            ),
+            "steps": steps,
+            "detection": detection,
+        }
+
+    selected = detection["selected"]
+    daemon_path = str(selected["path"]) if selected else "thermalforge"
+    daemon_result = runner(["sudo", daemon_path, "install"], timeout_s=120.0)
+    daemon_result["step"] = "sudo_thermalforge_install"
+    steps.append(daemon_result)
+    if not daemon_result.get("ok"):
+        return {
+            "ok": True,
+            "daemon_ok": False,
+            "message": (
+                "ThermalForge CLI installed, but the daemon setup "
+                "(`sudo thermalforge install`) did not complete. MAX mode "
+                "still works but will ask for your password each run."
+            ),
+            "steps": steps,
+            "detection": detection,
+        }
+
+    return {
+        "ok": True,
+        "daemon_ok": True,
+        "method": "homebrew",
+        "message": "ThermalForge installed and ready. MAX mode will ramp the fans.",
+        "steps": steps,
+        "detection": detection,
+    }

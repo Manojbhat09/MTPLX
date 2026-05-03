@@ -1,5 +1,7 @@
 import asyncio
 import json
+from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +16,9 @@ from mtplx.server.openai import (
     _anthropic_stream_from_openai_sse,
     _anthropic_to_chat_request,
     _IncrementalTokenDecoder,
+    _StreamCancelled,
     _ThinkingContentStreamSplitter,
+    _cancel_stream_generation,
     _encode_messages,
     _effective_completion_tokens,
     _generation_params,
@@ -22,6 +26,7 @@ from mtplx.server.openai import (
     _online_hidden_config,
     _policy_fingerprint,
     _public_mtplx_stats,
+    _raise_if_stream_cancelled,
     _repair_streamed_generation_stats,
     _request_is_authorized,
     _strip_assistant_history_baggage,
@@ -29,7 +34,6 @@ from mtplx.server.openai import (
     parse_args,
     validate_server_security_args,
 )
-from types import SimpleNamespace
 
 
 class TinyTokenizer:
@@ -107,6 +111,27 @@ def test_rate_limiter_enforces_window():
     assert allowed is False
     assert retry_after > 0
     assert limiter.check("client", now=161.5) == (True, 0)
+
+
+def test_stream_cancel_helper_marks_event_and_cancels_future():
+    cancel_event = Event()
+
+    class Future:
+        cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+            return True
+
+    future = Future()
+    _raise_if_stream_cancelled(cancel_event)
+
+    _cancel_stream_generation(cancel_event, future)
+
+    assert cancel_event.is_set()
+    assert future.cancelled is True
+    with pytest.raises(_StreamCancelled):
+        _raise_if_stream_cancelled(cancel_event)
 
 
 def test_anthropic_content_blocks_convert_to_text():

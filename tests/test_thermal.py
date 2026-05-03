@@ -3,32 +3,509 @@ from mtplx import thermal
 
 def test_detect_thermal_control_reports_none_without_tools(monkeypatch):
     thermal.detect_thermal_control.cache_clear()
+    # Must mock both the PATH lookup AND the MTPLX-private bin lookup —
+    # detect_thermal_control checks ``~/.mtplx/bin/thermalforge`` first via
+    # ``_find_thermalforge`` so a real install on the dev machine would
+    # otherwise leak into the test.
+    monkeypatch.setattr(thermal, "_find_thermalforge", lambda: None)
     monkeypatch.setattr(thermal.shutil, "which", lambda _name: None)
 
     detected = thermal.detect_thermal_control()
 
     assert detected["available"] is False
     assert detected["selected"] is None
-    assert "Install ThermalForge" in detected["instructions"]
+    assert "mtplx max --install" in detected["instructions"]
     thermal.detect_thermal_control.cache_clear()
 
 
 def test_set_thermal_profile_without_tool_is_actionable(monkeypatch):
     thermal.detect_thermal_control.cache_clear()
+    monkeypatch.setattr(thermal, "_find_thermalforge", lambda: None)
     monkeypatch.setattr(thermal.shutil, "which", lambda _name: None)
 
     result = thermal.set_thermal_profile("performance")
 
     assert result["ok"] is False
     assert result["profile"] == "performance"
-    assert "Install ThermalForge" in result["message"]
+    assert "mtplx max --install" in result["message"]
     thermal.detect_thermal_control.cache_clear()
 
 
-def test_thermalforge_profile_candidates_are_explicit():
-    commands = thermal._profile_command_candidates(
+def test_thermalforge_profile_candidates_match_real_cli():
+    """ThermalForge's actual CLI is `thermalforge max` and `thermalforge auto`.
+    Verified live (May 2026) that even with the privileged daemon running,
+    fan-set commands require sudo (the daemon doesn't proxy SMC writes), so
+    we try ``sudo -n`` first so cleanup can complete inside Terminal's short
+    close window, while keeping the unprefixed form as a fallback for users
+    who somehow set up their own daemon path."""
+
+    max_cmds = thermal._profile_command_candidates(
         {"kind": "thermalforge", "path": "/usr/local/bin/thermalforge"},
         "max",
     )
+    assert max_cmds == [
+        ["sudo", "-n", "/usr/local/bin/thermalforge", "max"],
+        ["/usr/local/bin/thermalforge", "max"],
+    ]
 
-    assert commands[0] == ["/usr/local/bin/thermalforge", "profile", "Max"]
+    perf_cmds = thermal._profile_command_candidates(
+        {"kind": "thermalforge", "path": "/usr/local/bin/thermalforge"},
+        "performance",
+    )
+    assert perf_cmds == [
+        ["sudo", "-n", "/usr/local/bin/thermalforge", "max"],
+        ["/usr/local/bin/thermalforge", "max"],
+    ]
+
+    silent_cmds = thermal._profile_command_candidates(
+        {"kind": "thermalforge", "path": "/usr/local/bin/thermalforge"},
+        "silent",
+    )
+    assert silent_cmds == [
+        ["sudo", "-n", "/usr/local/bin/thermalforge", "auto"],
+        ["/usr/local/bin/thermalforge", "auto"],
+    ]
+
+
+def test_thermalforge_status_uses_native_status_command():
+    cmds = thermal._status_command_candidates(
+        {"kind": "thermalforge", "path": "/usr/local/bin/thermalforge"}
+    )
+    assert cmds == [["/usr/local/bin/thermalforge", "status"]]
+
+
+def test_install_thermal_control_homebrew_without_brew(monkeypatch):
+    monkeypatch.setattr(thermal.shutil, "which", lambda name: None)
+    result = thermal.install_thermal_control(method="homebrew")
+    assert result["ok"] is False
+    assert result.get("needs_prereq") == "brew"
+    assert "Homebrew" in result["message"]
+
+
+def test_install_thermal_control_homebrew_runs_tap(monkeypatch, tmp_path):
+    """The Homebrew path must shell out to the real upstream tap."""
+    thermal.detect_thermal_control.cache_clear()
+
+    def fake_which(name):
+        if name == "brew":
+            return "/opt/homebrew/bin/brew"
+        if name == "thermalforge":
+            return "/opt/homebrew/bin/thermalforge"
+        return None
+
+    monkeypatch.setattr(thermal.shutil, "which", fake_which)
+
+    invocations: list[list[str]] = []
+
+    def fake_run(command, *, timeout_s=None, cwd=None):
+        invocations.append(command)
+        return {"command": command, "returncode": 0, "ok": True}
+
+    monkeypatch.setattr(thermal, "_run_streaming", fake_run)
+    monkeypatch.setattr(thermal, "_run_probe", fake_run)
+
+    result = thermal.install_thermal_control(method="homebrew")
+
+    assert result["ok"] is True
+    assert any("ProducerGuy/tap/thermalforge" in tok for cmd in invocations for tok in cmd)
+    assert any("install" in cmd for cmd in invocations)
+    thermal.detect_thermal_control.cache_clear()
+
+
+def test_install_thermal_control_source_installs_to_mtplx_bin(monkeypatch, tmp_path):
+    """The source path must build with `swift build -c release` and copy the
+    binary to ``~/.mtplx/bin/thermalforge`` so the install is owned end-to-end
+    by MTPLX. It must NEVER touch ``/usr/local/bin/`` or run upstream's
+    `setup.sh` / `thermalforge install` (which has a destructive cwd bug)."""
+    thermal.detect_thermal_control.cache_clear()
+
+    def fake_which(name):
+        if name == "git":
+            return "/usr/bin/git"
+        if name == "swift":
+            return "/usr/bin/swift"
+        return None
+
+    monkeypatch.setattr(thermal.shutil, "which", fake_which)
+    build_dir = tmp_path / "ThermalForge"
+    bin_dir = tmp_path / "mtplx-bin"
+    monkeypatch.setattr(thermal, "THERMALFORGE_BUILD_DIR", str(build_dir))
+    monkeypatch.setattr(thermal, "MTPLX_THERMALFORGE_DIR", str(bin_dir))
+    monkeypatch.setattr(thermal, "MTPLX_THERMALFORGE_PATH", str(bin_dir / "thermalforge"))
+
+    invocations: list[list[str]] = []
+
+    def fake_run(command, *, timeout_s=None, cwd=None):
+        invocations.append(command)
+        if command[0] == "/usr/bin/git" and "clone" in command:
+            build_dir.mkdir(parents=True, exist_ok=True)
+            (build_dir / ".git").mkdir(exist_ok=True)
+        if command[0] == "/usr/bin/swift" and "build" in command:
+            release_dir = build_dir / ".build" / "release"
+            release_dir.mkdir(parents=True, exist_ok=True)
+            (release_dir / "thermalforge").write_text("#!/bin/sh\necho fake\n")
+            (release_dir / "thermalforge").chmod(0o755)
+        # Stub out passwordless-sudo install + visudo.
+        return {"command": command, "returncode": 0, "ok": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(thermal, "_run_streaming", fake_run)
+    monkeypatch.setattr(thermal, "_run_probe", fake_run)
+
+    # Stub the sudoers-rule install (writes via subprocess.run with stdin) and
+    # the live verification (would otherwise call the fake CLI).
+    monkeypatch.setattr(
+        thermal,
+        "install_passwordless_sudoers_rule",
+        lambda **kw: {"ok": True, "step": "passwordless_sudoers", "message": "ok"},
+    )
+    monkeypatch.setattr(
+        thermal,
+        "set_thermal_profile_verified",
+        lambda profile, **kw: {"ok": True, "message": "fans pinned"},
+    )
+    monkeypatch.setattr(
+        thermal,
+        "set_thermal_profile",
+        lambda profile, **kw: {"ok": True, "profile": profile},
+    )
+
+    result = thermal.install_thermal_control(method="source")
+
+    assert result["ok"] is True, result
+    assert result["method"] == "source"
+    assert result["binary"] == str(bin_dir / "thermalforge")
+    # We must never have invoked the upstream installer (`thermalforge install`)
+    # or `setup.sh` — that's what the destructive cwd bug lives in.
+    assert not any("install" in cmd and cmd[0].endswith("thermalforge") for cmd in invocations)
+    assert not any(cmd[0] == "bash" and cmd[1].endswith("setup.sh") for cmd in invocations)
+    # We DID build with swift.
+    assert any(cmd[0] == "/usr/bin/swift" and "build" in cmd for cmd in invocations)
+    # Binary actually landed at the MTPLX-private path.
+    assert (bin_dir / "thermalforge").exists()
+    thermal.detect_thermal_control.cache_clear()
+
+
+def test_install_thermal_control_auto_does_not_fall_back_to_homebrew(monkeypatch, tmp_path):
+    """`auto` must NOT silently fall back to Homebrew. The upstream brew
+    formula has been observed to fail mid-build (missing
+    ``Scripts/generate-icon.swift`` in the tarball, May 2026), and when it
+    does succeed it installs into ``/usr/local/bin`` which we can't keep
+    stable. We pin source-only behaviour."""
+    thermal.detect_thermal_control.cache_clear()
+    invocations: list[list[str]] = []
+
+    def fake_which(name):
+        # No swift -> source install bails at the prereq check.
+        if name == "git":
+            return "/usr/bin/git"
+        if name == "brew":
+            return "/opt/homebrew/bin/brew"
+        return None
+
+    monkeypatch.setattr(thermal.shutil, "which", fake_which)
+
+    def fake_run(command, *, timeout_s=None, cwd=None):
+        invocations.append(command)
+        return {"command": command, "returncode": 0, "ok": True}
+
+    monkeypatch.setattr(thermal, "_run_streaming", fake_run)
+    monkeypatch.setattr(thermal, "_run_probe", fake_run)
+
+    result = thermal.install_thermal_control(method="auto")
+
+    assert result["ok"] is False
+    assert result.get("needs_prereq") == "swift"
+    # Crucially: no `brew install` ever ran.
+    assert not any(
+        cmd and cmd[0] == "/opt/homebrew/bin/brew" and "install" in cmd for cmd in invocations
+    ), invocations
+    thermal.detect_thermal_control.cache_clear()
+
+
+def test_install_thermal_control_homebrew_alias_still_works(monkeypatch):
+    """Backwards-compat: the old ``install_thermal_control_homebrew`` name
+    still resolves (covers any external callers from earlier versions)."""
+    assert thermal.install_thermal_control_homebrew is thermal.install_thermal_control
+
+
+def test_fan_summary_parses_thermalforge_status_json(monkeypatch):
+    """Verify-after-set relies on parsing `thermalforge status` JSON. Pin the
+    parser against the *real* upstream shape (captured live from
+    `thermalforge status` on macOS, May 2026) so a future schema drift is
+    caught immediately. The original parser only knew about a flat ``rpm``
+    field that doesn't exist in the actual output and silently returned
+    ``ok=False`` — which is exactly the bug that made --max appear to do
+    nothing."""
+    thermal.detect_thermal_control.cache_clear()
+    monkeypatch.setattr(
+        thermal.shutil,
+        "which",
+        lambda name: "/usr/local/bin/thermalforge" if name == "thermalforge" else None,
+    )
+
+    fake_status_json = (
+        '{"fans": ['
+        '{"actual_rpm": 5800, "target_rpm": 5800, "min_rpm": 2317, '
+        '"max_rpm": 7826, "mode": "max", "index": 0},'
+        '{"actual_rpm": 6100, "target_rpm": 6100, "min_rpm": 2317, '
+        '"max_rpm": 7826, "mode": "max", "index": 1}'
+        '], "temperatures": {"TCMb": 78.5}}'
+    )
+
+    def fake_run(command, *, timeout_s=None, cwd=None):
+        if command and command[-1] == "status":
+            return {"command": command, "returncode": 0, "ok": True, "stdout": fake_status_json, "stderr": ""}
+        return {"command": command, "returncode": 0, "ok": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(thermal, "_run_probe", fake_run)
+    monkeypatch.setattr(thermal, "_run_streaming", fake_run)
+
+    summary = thermal.fan_summary()
+    assert summary["ok"] is True
+    assert summary["min_rpm"] == 5800
+    assert summary["max_rpm"] == 6100
+    # Verify we kept the rich fields so callers can reason about target vs
+    # actual when, for example, fans are still ramping toward the target.
+    assert summary["fans"][0]["target_rpm"] == 5800
+    assert summary["fans"][0]["actual_rpm"] == 5800
+    assert summary["fans"][0]["max_capacity_rpm"] == 7826
+    assert summary["fans"][0]["mode"] == "max"
+    thermal.detect_thermal_control.cache_clear()
+
+
+def test_fan_summary_handles_no_tool(monkeypatch):
+    monkeypatch.setattr(thermal, "_find_thermalforge", lambda: None)
+    monkeypatch.setattr(thermal.shutil, "which", lambda name: None)
+    thermal.detect_thermal_control.cache_clear()
+    summary = thermal.fan_summary()
+    assert summary["ok"] is False
+    assert summary["min_rpm"] is None
+    thermal.detect_thermal_control.cache_clear()
+
+
+def test_set_thermal_profile_verified_succeeds_when_daemon_commands_max(monkeypatch):
+    """Happy path: ``thermalforge max`` is accepted and the daemon flips
+    target_rpm + mode immediately. We must succeed even though actual_rpm
+    is still climbing — Apple Silicon fans need ~15s to physically reach
+    the target, and waiting that long during install is unacceptable.
+    Pinning ``mode`` and ``target_rpm`` is what catches the regression
+    that pinned the user's fans during install."""
+    thermal.detect_thermal_control.cache_clear()
+    thermal._find_thermalforge.__defaults__ if hasattr(thermal._find_thermalforge, "__defaults__") else None
+    monkeypatch.setattr(
+        thermal,
+        "_find_thermalforge",
+        lambda: "/usr/local/bin/thermalforge",
+    )
+    call_log: list[str] = []
+    pre_status = (
+        '{"fans": ['
+        '{"actual_rpm": 1850, "target_rpm": 2317, "max_rpm": 7826, "mode": "auto", "index": 0},'
+        '{"actual_rpm": 1900, "target_rpm": 2317, "max_rpm": 7826, "mode": "auto", "index": 1}'
+        ']}'
+    )
+    # Note actual_rpm is still way below the old threshold (1900-2400),
+    # but mode flipped to "manual" and target_rpm jumped to 7826. That's
+    # the only reliable signal that the command was accepted.
+    post_status = (
+        '{"fans": ['
+        '{"actual_rpm": 2380, "target_rpm": 7826, "max_rpm": 7826, "mode": "manual", "index": 0},'
+        '{"actual_rpm": 2410, "target_rpm": 7826, "max_rpm": 7826, "mode": "manual", "index": 1}'
+        ']}'
+    )
+    state = {"phase": "pre"}
+
+    def fake_run(command, *, timeout_s=None, cwd=None):
+        if command and command[-1] == "status":
+            stdout = pre_status if state["phase"] == "pre" else post_status
+            return {"command": command, "returncode": 0, "ok": True, "stdout": stdout, "stderr": ""}
+        if command and command[-1] == "max":
+            state["phase"] = "post"
+            return {"command": command, "returncode": 0, "ok": True, "stdout": "", "stderr": ""}
+        return {"command": command, "returncode": 0, "ok": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(thermal, "_run_probe", fake_run)
+    monkeypatch.setattr(thermal, "_run_streaming", fake_run)
+
+    result = thermal.set_thermal_profile_verified(
+        "performance",
+        settle_seconds=0,
+        log=call_log.append,
+    )
+
+    assert result["ok"] is True, result
+    assert any("fans pinned" in line.lower() for line in call_log)
+    thermal.detect_thermal_control.cache_clear()
+
+
+def test_set_thermal_profile_verified_fails_when_daemon_ignores_command(monkeypatch):
+    """``thermalforge max`` returned 0 but the daemon's mode is still ``auto``
+    (we got fooled into believing it worked). Verifier must catch this so
+    we can roll back and surface a clear actionable error."""
+    thermal.detect_thermal_control.cache_clear()
+    monkeypatch.setattr(
+        thermal,
+        "_find_thermalforge",
+        lambda: "/usr/local/bin/thermalforge",
+    )
+    stuck_status = (
+        '{"fans": ['
+        '{"actual_rpm": 1850, "target_rpm": 2317, "max_rpm": 7826, "mode": "auto", "index": 0},'
+        '{"actual_rpm": 1900, "target_rpm": 2317, "max_rpm": 7826, "mode": "auto", "index": 1}'
+        ']}'
+    )
+
+    def fake_run(command, *, timeout_s=None, cwd=None):
+        if command and command[-1] == "status":
+            return {"command": command, "returncode": 0, "ok": True, "stdout": stuck_status, "stderr": ""}
+        return {"command": command, "returncode": 0, "ok": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(thermal, "_run_probe", fake_run)
+    monkeypatch.setattr(thermal, "_run_streaming", fake_run)
+
+    result = thermal.set_thermal_profile_verified(
+        "performance",
+        settle_seconds=0,
+    )
+
+    assert result["ok"] is False
+    assert "not commanding max" in result["message"]
+    assert "ThermalForge.app" in (result.get("actionable") or "")
+    thermal.detect_thermal_control.cache_clear()
+
+
+def test_set_thermal_profile_verified_handles_no_tool(monkeypatch):
+    monkeypatch.setattr(thermal, "_find_thermalforge", lambda: None)
+    monkeypatch.setattr(thermal.shutil, "which", lambda name: None)
+    thermal.detect_thermal_control.cache_clear()
+    result = thermal.set_thermal_profile_verified("performance", settle_seconds=0)
+    assert result["ok"] is False
+    assert "mtplx max --install" in (result.get("actionable") or "")
+    thermal.detect_thermal_control.cache_clear()
+
+
+def test_restore_thermal_profile_verified_requires_auto_status(monkeypatch):
+    thermal.detect_thermal_control.cache_clear()
+    monkeypatch.setattr(thermal, "_find_thermalforge", lambda: "/usr/local/bin/thermalforge")
+    auto_status = (
+        '{"fans": ['
+        '{"actual_rpm": 2400, "target_rpm": 2318, "max_rpm": 7826, "mode": "auto", "index": 0},'
+        '{"actual_rpm": 2450, "target_rpm": 2503, "max_rpm": 7826, "mode": "auto", "index": 1}'
+        ']}'
+    )
+
+    def fake_run(command, *, timeout_s=None, cwd=None):
+        if command and command[-1] == "status":
+            return {"command": command, "returncode": 0, "ok": True, "stdout": auto_status, "stderr": ""}
+        return {"command": command, "returncode": 0, "ok": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(thermal, "_run_probe", fake_run)
+
+    result = thermal.restore_thermal_profile_verified()
+
+    assert result["ok"] is True
+    assert result["message"] == "fan profile restored"
+    thermal.detect_thermal_control.cache_clear()
+
+
+def test_restore_thermal_profile_verified_fails_when_still_manual(monkeypatch):
+    thermal.detect_thermal_control.cache_clear()
+    monkeypatch.setattr(thermal, "_find_thermalforge", lambda: "/usr/local/bin/thermalforge")
+    manual_status = (
+        '{"fans": ['
+        '{"actual_rpm": 2400, "target_rpm": 7826, "max_rpm": 7826, "mode": "manual", "index": 0}'
+        ']}'
+    )
+
+    def fake_run(command, *, timeout_s=None, cwd=None):
+        if command and command[-1] == "status":
+            return {"command": command, "returncode": 0, "ok": True, "stdout": manual_status, "stderr": ""}
+        return {"command": command, "returncode": 0, "ok": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(thermal, "_run_probe", fake_run)
+
+    result = thermal.restore_thermal_profile_verified()
+
+    assert result["ok"] is False
+    assert "not verified" in result["message"]
+    thermal.detect_thermal_control.cache_clear()
+
+
+def test_restore_thermal_profile_verified_rejects_auto_with_max_target(monkeypatch):
+    thermal.detect_thermal_control.cache_clear()
+    monkeypatch.setattr(thermal, "_find_thermalforge", lambda: "/usr/local/bin/thermalforge")
+    suspicious_status = (
+        '{"fans": ['
+        '{"actual_rpm": 2400, "target_rpm": 7826, "max_rpm": 7826, "mode": "auto", "index": 0}'
+        ']}'
+    )
+
+    def fake_run(command, *, timeout_s=None, cwd=None):
+        if command and command[-1] == "status":
+            return {"command": command, "returncode": 0, "ok": True, "stdout": suspicious_status, "stderr": ""}
+        return {"command": command, "returncode": 0, "ok": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(thermal, "_run_probe", fake_run)
+
+    result = thermal.restore_thermal_profile_verified()
+
+    assert result["ok"] is False
+    thermal.detect_thermal_control.cache_clear()
+
+
+def test_install_always_restores_fans_even_when_verification_fails(monkeypatch, tmp_path):
+    """Regression: a previous bug pinned the user's fans because verification
+    failed (settle window too short) and we skipped the restore call. The
+    install path must ALWAYS run `thermalforge auto` on the way out."""
+    thermal.detect_thermal_control.cache_clear()
+    bin_dir = tmp_path / "mtplx-bin"
+    monkeypatch.setattr(thermal, "MTPLX_THERMALFORGE_DIR", str(bin_dir))
+    monkeypatch.setattr(thermal, "MTPLX_THERMALFORGE_PATH", str(bin_dir / "thermalforge"))
+    monkeypatch.setattr(
+        thermal.shutil,
+        "which",
+        lambda name: {"git": "/usr/bin/git", "swift": "/usr/bin/swift"}.get(name),
+    )
+
+    build_dir = tmp_path / "ThermalForge"
+    monkeypatch.setattr(thermal, "THERMALFORGE_BUILD_DIR", str(build_dir))
+
+    def fake_run(command, *, timeout_s=None, cwd=None):
+        if command[0] == "/usr/bin/git" and "clone" in command:
+            build_dir.mkdir(parents=True, exist_ok=True)
+            (build_dir / ".git").mkdir(exist_ok=True)
+        if command[0] == "/usr/bin/swift" and "build" in command:
+            release_dir = build_dir / ".build" / "release"
+            release_dir.mkdir(parents=True, exist_ok=True)
+            (release_dir / "thermalforge").write_text("#!/bin/sh\nexit 0\n")
+            (release_dir / "thermalforge").chmod(0o755)
+        return {"command": command, "returncode": 0, "ok": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(thermal, "_run_streaming", fake_run)
+    monkeypatch.setattr(thermal, "_run_probe", fake_run)
+    monkeypatch.setattr(
+        thermal,
+        "install_passwordless_sudoers_rule",
+        lambda **kw: {"ok": True, "step": "passwordless_sudoers", "message": "ok"},
+    )
+    # Force verification to FAIL — this is the bug-trigger scenario.
+    monkeypatch.setattr(
+        thermal,
+        "set_thermal_profile_verified",
+        lambda profile, **kw: {"ok": False, "message": "fans not commanding max"},
+    )
+
+    restored: list[str] = []
+
+    def fake_set(profile, **kw):
+        restored.append(profile)
+        return {"ok": True, "profile": profile}
+
+    monkeypatch.setattr(thermal, "set_thermal_profile", fake_set)
+
+    result = thermal.install_thermal_control(method="source")
+
+    assert result["ok"] is False
+    # Critical: even though verification failed, we restored fans.
+    assert "silent" in restored, restored
+    thermal.detect_thermal_control.cache_clear()
