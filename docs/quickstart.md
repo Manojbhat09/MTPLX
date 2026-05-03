@@ -17,9 +17,9 @@ The commands above are no-MLX-safe except generation and serving. A missing MLX 
 After the verified model is available:
 
 ```bash
-mtplx run "hello"
-mtplx chat
-mtplx serve --port 8000 --no-stats-footer
+mtplx start
+mtplx start cli
+mtplx quickstart --port 8000 --no-stats-footer
 ```
 
 Use `mtplx doctor --deep --json` for exhaustive diagnostics and `mtplx doctor --bundle` to create a redacted support bundle.

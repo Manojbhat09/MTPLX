@@ -1,4 +1,4 @@
-"""Interactive onboarding flow for ``mtplx quickstart``.
+"""Interactive onboarding flow for ``mtplx start``.
 
 Three screens for first-time users (model -> mode -> interface), and a
 "same as last time?" prompt for returning users. Choices persist to
@@ -354,15 +354,12 @@ def screen_model(*, configured: str | None = None) -> str:
 def screen_mode() -> tuple[str, bool]:
     """Return (profile_name, max_mode_flag).
 
-    Three modes laid out on two axes — runtime path × fan control:
+    The consumer onboarding is speed-first:
 
-      Fast : aggressive cold-speed path, no fan control   ~60 tok/s start, decays
-      Stable : conservative MTP path,  no fan control     ~37 tok/s, holds steady
-      Max  : aggressive cold-speed path, fans pinned 100% for better sustained throughput (loud)
+      Medium : native-MTP speed path, Apple fan curve, burst not sustained
+      Max    : same path, ThermalForge pins fans at 100% for sustained speed
 
-    The user-visible difference between Stable and Fast is *which decoding path*
-    runs (different profile env, different throughput envelope). Both leave
-    fans on Apple's default curve. Max is Fast + ThermalForge fan boost.
+    Stable remains available through ``--profile stable`` / ``--profile safe``.
     """
 
     _step_panel(
@@ -372,27 +369,20 @@ def screen_mode() -> tuple[str, bool]:
         options=[
             (
                 "1",
-                "Fast  ·  ~60 tok/s on short replies, slows down on long ones",
-                "Aggressive cold-speed path. Snappy at first; throughput drops on long-context generation because fans stay on Apple's default curve.",
+                "Medium  ·  native-MTP speed path, about 2.2x burst (not sustained)",
+                "Fast speculative path with Apple's default fan curve; snappy on short replies, slower on long hot runs.",
             ),
             (
                 "2",
-                "Stable  ·  ~37 tok/s steady, no fan boost",
-                "Conservative MTP path. Slower but the speed barely changes between a 50-token reply and a 5000-token reply. Best for long answers.",
-            ),
-            (
-                "3",
-                "Max  ·  fan-boosted Fast path, fans pinned at 100% (loud)",
-                "Same cold-speed path as Fast, plus ThermalForge ramps the fans to reduce long-reply slowdown. Needs ThermalForge installed.",
+                "Max  ·  Medium path plus fans pinned at 100%, about 2.24x (loud)",
+                "Same runtime path as Medium, plus ThermalForge fan control to reduce long-reply slowdown.",
             ),
         ],
     )
-    choice = _prompt_choice("Select", ["1", "2", "3"], default="1")
+    choice = _prompt_choice("Select", ["1", "2"], default="1")
     if choice == "1":
         return "performance-cold", False
-    if choice == "3":
-        return "performance-cold", True
-    return "stable", False
+    return "performance-cold", True
 
 
 def screen_interface() -> str:
@@ -473,7 +463,7 @@ def ensure_thermal_control_installed() -> bool:
             ),
             (
                 "2",
-                "Skip — Max falls back to Cold-Speed",
+                "Skip — Max falls back to Medium",
                 "No fan boost, but everything else still works.",
             ),
         ],
@@ -509,7 +499,7 @@ def _print_install_skipped() -> None:
         console = Console()
         console.print(
             "[yellow]  Skipped. Continuing without fan boost — "
-            "Max behaves like Cold-Speed.[/yellow]\n"
+            "Max behaves like Medium.[/yellow]\n"
         )
     except Exception:
         print("  Skipped. Continuing without fan boost.\n")
@@ -607,6 +597,14 @@ def confirm_same_as_last(last: dict) -> bool:
     return answer in {"", "y", "yes", "same"}
 
 
+def _quickstart_state_is_reusable(last: dict | None) -> bool:
+    if not isinstance(last, dict):
+        return False
+    # Stable/safe remains available by explicit flag, but old saved states
+    # should not keep showing it in the speed-first onboarding path.
+    return str(last.get("profile") or "") == "performance-cold"
+
+
 def run_quickstart_flow(
     *,
     fresh: bool = False,
@@ -624,6 +622,8 @@ def run_quickstart_flow(
     """
 
     last = None if fresh else load_state()
+    if not _quickstart_state_is_reusable(last):
+        last = None
     try:
         if last and not fresh:
             if confirm_same_as_last(last):
@@ -651,13 +651,13 @@ def run_quickstart_flow(
 
 # ---------- label helpers ---------------------------------------------------
 def mode_label(state: dict) -> str:
-    profile = state.get("profile", "stable")
+    profile = state.get("profile", "performance-cold")
     if state.get("max"):
-        return "Max  ·  fan-boosted Fast path, fans pinned at 100%"
+        return "Max  ·  Medium path plus fans pinned at 100%, ~2.24x"
     if profile == "performance-cold":
-        return "Fast  ·  ~60 tok/s start, decays on long replies"
+        return "Medium  ·  native-MTP speed path, ~2.2x burst (not sustained)"
     if profile == "stable":
-        return "Stable  ·  ~37 tok/s, holds steady"
+        return "Stable  ·  exact/staged long-reply path"
     return str(profile)
 
 

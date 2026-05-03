@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from .constants import (
+    EXPECTED_ALL_PREQUANTIZED_MTP_KEYS,
+    EXPECTED_ALL_PREQUANTIZED_MTP_TENSOR_COUNT,
     EXPECTED_MTP_KEYS,
     EXPECTED_PREQUANTIZED_MTP_KEYS,
     EXPECTED_PREQUANTIZED_MTP_TENSOR_COUNT,
@@ -170,10 +172,16 @@ def inspect_mtp_tensors(model_dir: Path | str, config: dict[str, Any] | None = N
     mtp_path = expected_mtp_file(model_dir, config)
     mtp_quant = (config or {}).get("mtplx_mtp_quantization", {})
     prequantized = isinstance(mtp_quant, dict) and bool(mtp_quant.get("prequantized"))
-    expected_keys = set(EXPECTED_PREQUANTIZED_MTP_KEYS if prequantized else EXPECTED_MTP_KEYS)
-    expected_count = (
-        EXPECTED_PREQUANTIZED_MTP_TENSOR_COUNT if prequantized else EXPECTED_MTP_TENSOR_COUNT
-    )
+    quant_policy = str(mtp_quant.get("policy") or "") if isinstance(mtp_quant, dict) else ""
+    if prequantized and quant_policy == "all":
+        expected_keys = set(EXPECTED_ALL_PREQUANTIZED_MTP_KEYS)
+        expected_count = EXPECTED_ALL_PREQUANTIZED_MTP_TENSOR_COUNT
+    elif prequantized:
+        expected_keys = set(EXPECTED_PREQUANTIZED_MTP_KEYS)
+        expected_count = EXPECTED_PREQUANTIZED_MTP_TENSOR_COUNT
+    else:
+        expected_keys = set(EXPECTED_MTP_KEYS)
+        expected_count = EXPECTED_MTP_TENSOR_COUNT
     sidecar_format = "prequantized-mlx-affine" if prequantized else "bf16"
     if not mtp_path.exists():
         return MTPInspection(

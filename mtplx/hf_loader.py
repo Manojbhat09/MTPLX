@@ -45,6 +45,62 @@ def cached_model_path(repo_id: str, *, cache_dir: str | Path | None = None) -> P
     return model_cache_dir(cache_dir) / safe_model_name(repo_id)
 
 
+def _complete_indexed_weights(path: Path, index_name: str) -> bool:
+    index = path / index_name
+    if not index.is_file():
+        return False
+    try:
+        data = json.loads(index.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    weight_map = data.get("weight_map") if isinstance(data, dict) else None
+    if not isinstance(weight_map, dict):
+        return False
+    filenames = {
+        name
+        for name in weight_map.values()
+        if isinstance(name, str) and name.strip()
+    }
+    if not filenames:
+        return False
+    for name in filenames:
+        shard = path / name
+        try:
+            if not shard.is_file() or shard.stat().st_size <= 0:
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def _complete_unindexed_weights(path: Path) -> bool:
+    for pattern in ("*.safetensors", "*.bin", "*.gguf"):
+        for candidate in path.glob(pattern):
+            try:
+                if candidate.is_file() and candidate.stat().st_size > 0:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def cached_model_is_complete(path: Path) -> bool:
+    """Return whether a Hub cache directory is ready to run.
+
+    ``snapshot_download(local_dir=...)`` creates the destination early. An
+    interrupted pull can therefore leave config/tokenizer files plus an index,
+    which looks cached even though the weight shards are missing.
+    """
+
+    if not path.is_dir() or not (path / "config.json").is_file():
+        return False
+    return (
+        _complete_indexed_weights(path, "model.safetensors.index.json")
+        or _complete_indexed_weights(path, "pytorch_model.bin.index.json")
+        or _complete_unindexed_weights(path)
+    )
+
+
 def resolve_model_path(model_ref: str, *, cache_dir: str | Path | None = None) -> Path:
     local = Path(model_ref).expanduser()
     if local.exists():
@@ -53,7 +109,7 @@ def resolve_model_path(model_ref: str, *, cache_dir: str | Path | None = None) -
     if repo_id is None:
         return local
     cached = cached_model_path(repo_id, cache_dir=cache_dir)
-    if cached.exists():
+    if cached_model_is_complete(cached):
         return cached
     raise FileNotFoundError(
         f"Model {repo_id} is not cached. Run: mtplx pull {repo_id}"

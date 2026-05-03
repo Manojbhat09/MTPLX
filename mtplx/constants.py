@@ -46,6 +46,11 @@ MTP_QUANTIZED_LINEAR_WEIGHT_KEYS = (
     "mtp.layers.0.self_attn.v_proj.weight",
 )
 
+MTP_ALL_QUANTIZED_LINEAR_WEIGHT_KEYS = (
+    "mtp.fc.weight",
+    *MTP_QUANTIZED_LINEAR_WEIGHT_KEYS,
+)
+
 EXPECTED_PREQUANTIZED_MTP_KEYS = tuple(
     sorted(
         EXPECTED_MTP_KEYS
@@ -54,6 +59,21 @@ EXPECTED_PREQUANTIZED_MTP_KEYS = tuple(
     )
 )
 EXPECTED_PREQUANTIZED_MTP_TENSOR_COUNT = len(EXPECTED_PREQUANTIZED_MTP_KEYS)
+
+EXPECTED_ALL_PREQUANTIZED_MTP_KEYS = tuple(
+    sorted(
+        EXPECTED_MTP_KEYS
+        + tuple(
+            key.rsplit(".", 1)[0] + ".scales"
+            for key in MTP_ALL_QUANTIZED_LINEAR_WEIGHT_KEYS
+        )
+        + tuple(
+            key.rsplit(".", 1)[0] + ".biases"
+            for key in MTP_ALL_QUANTIZED_LINEAR_WEIGHT_KEYS
+        )
+    )
+)
+EXPECTED_ALL_PREQUANTIZED_MTP_TENSOR_COUNT = len(EXPECTED_ALL_PREQUANTIZED_MTP_KEYS)
 
 MULTIMODAL_SIDECARS = (
     "preprocessor_config.json",

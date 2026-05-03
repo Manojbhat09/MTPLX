@@ -6,6 +6,44 @@ import time
 from typing import Any
 
 
+def normalize_draft_lm_head_spec(
+    value: Any,
+    *,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return a validated draft LM-head spec from profile/contract metadata."""
+    if value is None:
+        return fallback
+    if not isinstance(value, dict):
+        raise ValueError("draft LM-head spec must be an object")
+    if "bits" not in value:
+        raise ValueError("draft LM-head spec missing bits")
+    bits = int(value["bits"])
+    group_size = int(value.get("group_size", 64))
+    mode = str(value.get("mode", "affine"))
+    if bits <= 0:
+        raise ValueError("draft LM-head bits must be positive")
+    if group_size <= 0:
+        raise ValueError("draft LM-head group_size must be positive")
+    if mode not in {"affine", "symmetric"}:
+        raise ValueError("draft LM-head mode must be 'affine' or 'symmetric'")
+    return {"bits": bits, "group_size": group_size, "mode": mode}
+
+
+def draft_lm_head_spec_from_runtime_contract(
+    contract_data: Any,
+    *,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Resolve a model-specific draft-head recommendation from contract data."""
+    if not isinstance(contract_data, dict):
+        return fallback
+    return normalize_draft_lm_head_spec(
+        contract_data.get("recommended_draft_lm_head"),
+        fallback=fallback,
+    )
+
+
 def _text_model(model: Any) -> Any:
     return getattr(model, "language_model", model)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from mtplx.hf_loader import (
+    cached_model_is_complete,
     cached_model_path,
     hf_cache_report,
     list_cached_models,
@@ -31,8 +32,22 @@ def test_safe_model_name_and_cache_path(tmp_path: Path):
 def test_resolve_model_path_uses_cache_for_hf_refs(tmp_path: Path):
     cached = tmp_path / "mtplx--example"
     cached.mkdir()
+    (cached / "config.json").write_text("{}\n", encoding="utf-8")
+    (cached / "model.safetensors").write_bytes(b"1234")
 
     assert resolve_model_path("mtplx/example", cache_dir=tmp_path) == cached
+
+
+def test_cached_model_is_complete_rejects_interrupted_indexed_download(tmp_path: Path):
+    cached = tmp_path / "mtplx--example"
+    cached.mkdir()
+    (cached / "config.json").write_text("{}\n", encoding="utf-8")
+    (cached / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"lm_head.weight": "model-00001-of-00002.safetensors"}}\n',
+        encoding="utf-8",
+    )
+
+    assert cached_model_is_complete(cached) is False
 
 
 def test_resolve_model_path_reports_missing_cache(tmp_path: Path):

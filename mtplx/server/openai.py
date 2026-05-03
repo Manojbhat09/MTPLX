@@ -310,6 +310,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
+    depth: int | None = None
     seed: int | None = None
     enable_thinking: bool | None = None
     stream: bool = False
@@ -324,6 +325,7 @@ class CompletionRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
+    depth: int | None = None
     seed: int | None = None
     stream: bool = False
 
@@ -345,6 +347,7 @@ class AnthropicMessagesRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
+    depth: int | None = None
     stream: bool = False
 
 
@@ -491,6 +494,15 @@ class ServerState:
             )
             if self.runtime.mtp_enabled
             else {"installed": False, "reason": "mtp_disabled"}
+        )
+        self.draft_sampler = (
+            SamplerConfig(
+                temperature=float(args.draft_temperature),
+                top_p=float(args.draft_top_p),
+                top_k=int(args.draft_top_k),
+            )
+            if args.draft_temperature is not None
+            else None
         )
         self.draft_head_identity = _draft_head_identity(self.runtime)
         self.template_hash = _template_hash(self.runtime.tokenizer)
@@ -699,6 +711,7 @@ def _anthropic_to_chat_request(request: AnthropicMessagesRequest) -> ChatComplet
         temperature=request.temperature,
         top_p=request.top_p,
         top_k=request.top_k,
+        depth=request.depth,
         stream=False,
     )
 
@@ -1016,6 +1029,29 @@ def _request_metadata(model: BaseModel) -> dict[str, Any]:
     return metadata if isinstance(metadata, dict) else {}
 
 
+def _request_depth_value(request: BaseModel) -> Any:
+    for key in ("depth", "mtp_depth", "speculative_depth"):
+        value = getattr(request, key, None)
+        if value is None:
+            value = _request_extra(request, key)
+        if value is not None:
+            return value
+    return None
+
+
+def _request_depth_for_generation(state: ServerState, request: BaseModel) -> int:
+    value = _request_depth_value(request)
+    if value is None:
+        return int(getattr(state.args, "depth", 3))
+    try:
+        depth = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="depth must be an integer") from exc
+    if depth < 1 or depth > 7:
+        raise HTTPException(status_code=400, detail="depth must be between 1 and 7")
+    return depth
+
+
 def _token_window_rate(token_times: list[float], window: int) -> float | None:
     if len(token_times) < 2:
         return None
@@ -1224,6 +1260,7 @@ def _request_observability(
     headers: dict[str, str],
     metadata: dict[str, Any],
     session_source: str | None,
+    request_depth: int,
 ) -> dict[str, Any]:
     user_texts = [
         _content_to_text(message.content)
@@ -1251,6 +1288,7 @@ def _request_observability(
         "request_metadata_keys": sorted(metadata.keys()),
         "request_session_source": session_source,
         "request_session_candidate_headers": candidate_headers,
+        "request_depth": int(request_depth),
         "request_last_user_preview": user_texts[-1][:180] if user_texts else None,
         "request_last_user_chars": len(user_texts[-1]) if user_texts else 0,
     }
@@ -1260,8 +1298,10 @@ def _policy_fingerprint(
     state: ServerState,
     *,
     thinking_enabled: bool,
+    depth: int | None = None,
 ) -> str:
-    adaptive = _adaptive_config(state.args)
+    effective_depth = int(depth if depth is not None else getattr(state.args, "depth", 3))
+    adaptive = _adaptive_config(state.args, max_depth=effective_depth)
     proposal_cache = _proposal_cache_config(state.args)
     online_hidden = _online_hidden_config(state.args)
     return ";".join(
@@ -1270,6 +1310,7 @@ def _policy_fingerprint(
             f"thinking={int(bool(thinking_enabled))}",
             f"strip_reasoning={int(bool(state.args.strip_assistant_reasoning_history))}",
             f"generation_mode={getattr(state.args, 'generation_mode', 'mtp')}",
+            f"depth={effective_depth}",
             "hidden_variant=post_norm",
             "mtp_history_policy=committed",
             f"draft_head={state.draft_head_identity}",
@@ -1300,13 +1341,14 @@ def _online_hidden_config(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _adaptive_config(args: argparse.Namespace) -> dict[str, Any]:
+def _adaptive_config(args: argparse.Namespace, *, max_depth: int | None = None) -> dict[str, Any]:
     policy = str(getattr(args, "adaptive_policy", "none") or "none")
     if policy == "none":
         return {"policy": "none"}
+    effective_max_depth = int(max_depth if max_depth is not None else args.depth)
     config: dict[str, Any] = {
         "policy": policy,
-        "max_depth": int(args.depth),
+        "max_depth": effective_max_depth,
         "min_depth": int(args.adaptive_min_depth),
     }
     if policy == "streak":
@@ -1339,13 +1381,16 @@ def _adaptive_config(args: argparse.Namespace) -> dict[str, Any]:
 
 def _make_adaptive_policy(
     args: argparse.Namespace,
+    *,
+    max_depth: int | None = None,
 ) -> AdaptiveDepthPolicy | ExpectedValueDepthPolicy | None:
     policy = str(getattr(args, "adaptive_policy", "none") or "none")
     if policy == "none":
         return None
+    effective_max_depth = int(max_depth if max_depth is not None else args.depth)
     if policy == "streak":
         return AdaptiveDepthPolicy(
-            max_depth=int(args.depth),
+            max_depth=effective_max_depth,
             min_depth=int(args.adaptive_min_depth),
             start_depth=int(args.adaptive_start_depth),
             increase_after=int(args.adaptive_increase_after),
@@ -1353,7 +1398,7 @@ def _make_adaptive_policy(
         )
     if policy == "expected_value":
         return ExpectedValueDepthPolicy(
-            max_depth=int(args.depth),
+            max_depth=effective_max_depth,
             min_depth=int(args.adaptive_min_depth),
             base_depth=int(args.adaptive_ev_base_depth),
             accept_priors=tuple(float(v) for v in args.adaptive_ev_accept_priors),
@@ -1507,6 +1552,7 @@ def _run_generation(
     top_p: float | None,
     top_k: int | None,
     seed: int | None,
+    depth: int | None = None,
     token_callback: Callable[[list[int]], None] | None = None,
     session_id: str | None = None,
     session_cache_hit: bool = False,
@@ -1528,6 +1574,7 @@ def _run_generation(
         top_p=top_p,
         top_k=top_k,
     )
+    effective_depth = int(depth if depth is not None else getattr(state.args, "depth", 3))
     started = time.perf_counter()
     token_times: list[float] = []
     lock_wait_time_s = 0.0
@@ -1589,13 +1636,14 @@ def _run_generation(
                     trace_metadata=trace_metadata,
                 )
             else:
-                adaptive_policy = _make_adaptive_policy(state.args)
+                adaptive_policy = _make_adaptive_policy(state.args, max_depth=effective_depth)
                 out = generate_mtpk(
                     state.runtime,
                     prompt_ids,
                     max_tokens=response_max,
                     sampler=sampler,
-                    speculative_depth=state.args.depth,
+                    draft_sampler=getattr(state, "draft_sampler", None),
+                    speculative_depth=effective_depth,
                     seed=generation_seed,
                     mtp_hidden_variant="post_norm",
                     mtp_cache_policy="persistent",
@@ -1700,7 +1748,7 @@ def _run_generation(
             session_cache_hit=session_cache_hit,
             cache_miss_reason=cache_miss_reason,
             session_restore_mode=session_restore_mode,
-            mtp_depth=state.args.depth if state.args.generation_mode == "mtp" else 0,
+            mtp_depth=effective_depth if state.args.generation_mode == "mtp" else 0,
             generation_limits=generation_limits,
         )
         if request_observability:
@@ -3025,6 +3073,7 @@ def _chat_ui_html(*, model_id: str, server_url: str, api_key_required: bool) -> 
         stream: true,
         temperature: settingsNow.temperature,
         top_p: settingsNow.top_p,
+        depth: settingsNow.depth,
         max_tokens: settingsNow.max_tokens
       };
       if (settingsNow.top_k > 0) requestBody.top_k = settingsNow.top_k;
@@ -3569,6 +3618,7 @@ def create_app(state: ServerState) -> FastAPI:
                 },
             )
         thinking_enabled = _thinking_enabled_for_request(state, request)
+        request_depth = _request_depth_for_generation(state, request)
         prompt_ids = _encode_messages(
             state.runtime.tokenizer,
             request.messages,
@@ -3590,6 +3640,7 @@ def create_app(state: ServerState) -> FastAPI:
         policy_fingerprint = _policy_fingerprint(
             state,
             thinking_enabled=thinking_enabled,
+            depth=request_depth,
         )
         if not background and not cache_bypass:
             requested_restore_mode = headers.get("x-mtplx-restore-mode", "reference_lease")
@@ -3615,6 +3666,7 @@ def create_app(state: ServerState) -> FastAPI:
             headers=headers,
             metadata=metadata,
             session_source=session_source,
+            request_depth=request_depth,
         )
         model = request.model or state.model_id
         response_id = f"chatcmpl-{uuid.uuid4().hex}"
@@ -3656,6 +3708,7 @@ def create_app(state: ServerState) -> FastAPI:
                                 top_p=request.top_p,
                                 top_k=request.top_k,
                                 seed=request.seed,
+                                depth=request_depth,
                                 token_callback=on_tokens,
                                 session_id=session_id,
                                 cache_miss_reason=cache_miss_reason,
@@ -3677,6 +3730,7 @@ def create_app(state: ServerState) -> FastAPI:
                                     top_p=request.top_p,
                                     top_k=request.top_k,
                                     seed=request.seed,
+                                    depth=request_depth,
                                     token_callback=on_tokens,
                                     session_id=session_id,
                                     cache_miss_reason=cache_miss_reason,
@@ -3974,6 +4028,7 @@ def create_app(state: ServerState) -> FastAPI:
                     top_p=request.top_p,
                     top_k=request.top_k,
                     seed=request.seed,
+                    depth=request_depth,
                     session_id=session_id,
                     cache_miss_reason=cache_miss_reason,
                     session_restore_mode=session_restore_mode,
@@ -3993,6 +4048,7 @@ def create_app(state: ServerState) -> FastAPI:
                     top_p=request.top_p,
                     top_k=request.top_k,
                     seed=request.seed,
+                    depth=request_depth,
                     session_id=session_id,
                     cache_miss_reason=cache_miss_reason,
                     session_restore_mode=session_restore_mode,
@@ -4109,6 +4165,7 @@ def create_app(state: ServerState) -> FastAPI:
     @app.post("/v1/completions")
     async def completions(request: CompletionRequest) -> Any:
         prompt_ids = _encode_prompt(state.runtime.tokenizer, request.prompt)
+        request_depth = _request_depth_for_generation(state, request)
         generated = _run_generation(
             state,
             prompt_ids,
@@ -4117,6 +4174,7 @@ def create_app(state: ServerState) -> FastAPI:
             top_p=request.top_p,
             top_k=request.top_k,
             seed=request.seed,
+            depth=request_depth,
         )
         model = request.model or state.model_id
         response_id = f"cmpl-{uuid.uuid4().hex}"
@@ -4366,6 +4424,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--draft-lm-head-bits", type=int, default=4)
     parser.add_argument("--draft-lm-head-group-size", type=int, default=64)
     parser.add_argument("--draft-lm-head-mode", default="affine")
+    parser.add_argument("--draft-temperature", type=float)
+    parser.add_argument("--draft-top-p", type=float, default=0.95)
+    parser.add_argument("--draft-top-k", type=int, default=20)
     parser.add_argument(
         "--mlx-cache-limit",
         help=(

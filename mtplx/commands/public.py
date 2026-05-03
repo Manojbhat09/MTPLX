@@ -211,6 +211,62 @@ def _compact_model_summary(inspection: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _profile_draft_lm_head_spec(profile: Any) -> dict[str, Any] | None:
+    draft = getattr(profile, "draft_lm_head", None)
+    if draft is None:
+        return None
+    return {
+        "bits": int(draft.bits),
+        "group_size": int(draft.group_size),
+        "mode": str(draft.mode),
+    }
+
+
+def _profile_draft_sampler_spec(profile: Any) -> dict[str, Any] | None:
+    draft = getattr(profile, "draft_sampler", None)
+    if draft is None:
+        return None
+    return {
+        "temperature": float(draft.temperature),
+        "top_p": float(draft.top_p),
+        "top_k": int(draft.top_k),
+    }
+
+
+def _model_draft_lm_head_spec(
+    inspection: dict[str, Any],
+    profile: Any,
+) -> dict[str, Any] | None:
+    """Use model contract draft-head metadata when present, else profile default."""
+
+    fallback = _profile_draft_lm_head_spec(profile)
+    try:
+        from mtplx.draft_lm_head import draft_lm_head_spec_from_runtime_contract
+
+        compatibility = inspection.get("compatibility") or {}
+        contract = compatibility.get("runtime_contract")
+        return draft_lm_head_spec_from_runtime_contract(contract, fallback=fallback)
+    except ImportError:
+        return fallback
+
+
+def _model_draft_sampler_spec(
+    inspection: dict[str, Any],
+    profile: Any,
+) -> dict[str, Any] | None:
+    """Use model contract draft-sampler metadata when present, else profile default."""
+
+    fallback = _profile_draft_sampler_spec(profile)
+    try:
+        from mtplx.draft_sampling import draft_sampler_spec_from_runtime_contract
+
+        compatibility = inspection.get("compatibility") or {}
+        contract = compatibility.get("runtime_contract")
+        return draft_sampler_spec_from_runtime_contract(contract, fallback=fallback)
+    except ImportError:
+        return fallback
+
+
 def _resolve_model_context_window(tokenizer: Any, model_path: str | Path) -> int:
     candidates: list[int] = []
     tokenizer_max = getattr(tokenizer, "model_max_length", None)
@@ -2572,10 +2628,10 @@ def _print_serve_start_line(text: str = "") -> None:
 
 
 _PROFILE_SHORT_SUMMARIES = {
-    "stable": "conservative no-fan path",
-    "performance-cold": "default cold-speed path",
+    "stable": "Stable: exact/staged long-reply path, no fan control",
+    "performance-cold": "Medium: native-MTP speed path, ~2.2x burst (not sustained)",
     "exact": "QA-only exact paged verifier",
-    "max-diagnostic": "fan-controlled diagnostic",
+    "max-diagnostic": "Max: Medium path with fan control",
 }
 
 
@@ -2587,7 +2643,7 @@ def _print_serve_start_banner(args: Any) -> None:
     port = int(getattr(args, "port", 8000))
     profile_name = getattr(args, "profile", None) or DEFAULT_PROFILE_NAME
     warmup_tokens = int(getattr(args, "warmup_tokens", 16) or 0)
-    mode_label = "Fast MTP" if profile_name == "performance-cold" else profile_name
+    mode_label = "Medium MTP" if profile_name == "performance-cold" else profile_name
     model_label = getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
     runtime_model = getattr(args, "model", DEFAULT_RUNTIME_MODEL_DIR)
     api_url = f"{_server_url(host, port)}/v1"
@@ -2622,6 +2678,15 @@ def _print_serve_handoff(args: Any, runtime_model: str, profile_name: str) -> No
     _print_serve_start_line()
 
 
+def _server_command_name(args: Any) -> str:
+    command = str(getattr(args, "command", None) or "quickstart")
+    if command == "quick-start":
+        return "quickstart"
+    if command in {"quickstart", "serve"}:
+        return command
+    return "quickstart"
+
+
 def cmd_serve_public(args: Any) -> int:
     api_key = getattr(args, "api_key", None)
     if not _is_localhost_bind(getattr(args, "host", None)) and not api_key:
@@ -2651,8 +2716,9 @@ def cmd_serve_public(args: Any) -> int:
                 return 0
         _print_serve_start_line(f"error: port {int(args.port)} is already in use")
         _print_serve_start_line(f"try: mtplx status")
-        _print_serve_start_line("try: stop the old mtplx start terminal with Ctrl-C")
-        _print_serve_start_line(f"try: mtplx start --port {int(args.port) + 1}")
+        server_command = _server_command_name(args)
+        _print_serve_start_line(f"try: stop the old mtplx {server_command} terminal with Ctrl-C")
+        _print_serve_start_line(f"try: mtplx {server_command} --port {int(args.port) + 1}")
         return 2
     profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
     runtime_model, resolve_error = _resolve_runtime_model_path(
@@ -2670,6 +2736,12 @@ def cmd_serve_public(args: Any) -> int:
     if gate_exit is not None:
         _print({"error": "model failed MTPLX compatibility gate", "model": inspection})
         return gate_exit
+    draft_lm_head = _model_draft_lm_head_spec(inspection, profile) or {
+        "bits": 4,
+        "group_size": 64,
+        "mode": "affine",
+    }
+    draft_sampler = _model_draft_sampler_spec(inspection, profile)
     strict_fast_path = bool(getattr(args, "strict_fast_path", False))
     relax_mlx_fork_assert = False
     if profile.required_mlx_fork_fragment:
@@ -2686,8 +2758,9 @@ def cmd_serve_public(args: Any) -> int:
                 )
                 observed = fork_status.get("path") or fork_status.get("error") or "unknown"
                 _print_serve_start_line(f"      Found: {observed}")
-                _print_serve_start_line("try: mtplx start --profile stable")
-                _print_serve_start_line("try: mtplx start --profile performance-cold")
+                server_command = _server_command_name(args)
+                _print_serve_start_line(f"try: mtplx {server_command} --profile stable")
+                _print_serve_start_line(f"try: mtplx {server_command} --profile performance-cold")
                 _print_serve_start_line("     (without --strict-fast-path, MTPLX starts in stock-MLX compatibility)")
                 return 2
             relax_mlx_fork_assert = True
@@ -2711,11 +2784,11 @@ def cmd_serve_public(args: Any) -> int:
         "--verify-core",
         "linear-gdn-from-conv-tape",
         "--draft-lm-head-bits",
-        "4",
+        str(draft_lm_head["bits"]),
         "--draft-lm-head-group-size",
-        "64",
+        str(draft_lm_head["group_size"]),
         "--draft-lm-head-mode",
-        "affine",
+        str(draft_lm_head["mode"]),
         "--rate-limit",
         str(getattr(args, "rate_limit", 0)),
         "--stream-interval",
@@ -2725,6 +2798,17 @@ def cmd_serve_public(args: Any) -> int:
         "--model-id",
         str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID),
     ]
+    if draft_sampler is not None:
+        cmd.extend(
+            [
+                "--draft-temperature",
+                str(float(draft_sampler["temperature"])),
+                "--draft-top-p",
+                str(float(draft_sampler["top_p"])),
+                "--draft-top-k",
+                str(int(draft_sampler["top_k"])),
+            ]
+        )
     if bool(getattr(args, "open_browser", False)):
         cmd.append("--open-browser")
     if relax_mlx_fork_assert:
@@ -3022,6 +3106,16 @@ def _quickstart_line(text: str = "") -> None:
     print(text, flush=True)
 
 
+def _start_command_name(args: Any) -> str:
+    command = str(getattr(args, "command", None) or "start")
+    return "start" if command in {"start", "quickstart", "quick-start"} else command
+
+
+def _start_invocation(args: Any, suffix: str = "") -> str:
+    command = _start_command_name(args)
+    return f"mtplx {command}{suffix}"
+
+
 def _handle_quickstart_reasoning_command(args: Any, prompt: str) -> bool:
     parts = prompt.strip().split()
     if not parts or parts[0].lower() not in {"/reasoning", "--reasoning"}:
@@ -3169,7 +3263,7 @@ def _quickstart_choose_model(args: Any, *, target: str = "terminal") -> tuple[st
     ):
         return model, download
 
-    _quickstart_line("MTPLX quickstart")
+    _quickstart_line(f"MTPLX {_start_command_name(args)}")
     _quickstart_line("Choose a model:")
     _quickstart_line(f"  1. Use default verified model ({model})")
     _quickstart_line("  2. Choose a local model folder")
@@ -3428,6 +3522,7 @@ def _quickstart_generate(
     max_tokens: int | None = None,
     include_history: bool = True,
     stream_label: str | None = None,
+    draft_sampler: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from mtplx.benchmarks.schema import PromptCase, encode_prompt_case
     from mtplx.generation import generate_mtpk
@@ -3487,6 +3582,15 @@ def _quickstart_generate(
                 top_p=float(getattr(args, "top_p", 0.95)),
                 top_k=int(getattr(args, "top_k", 20)),
             ),
+            draft_sampler=(
+                None
+                if draft_sampler is None
+                else SamplerConfig(
+                    temperature=float(draft_sampler["temperature"]),
+                    top_p=float(draft_sampler["top_p"]),
+                    top_k=int(draft_sampler["top_k"]),
+                )
+            ),
             speculative_depth=int(getattr(args, "depth", 3)),
             seed=int(getattr(args, "seed", 0)) + turn_index,
             mtp_hidden_variant="post_norm",
@@ -3535,6 +3639,7 @@ def _quickstart_generate(
         "text": out.text,
         "model": _compact_model_summary(inspection),
         "profile": profile.to_dict(),
+        "draft_sampler": draft_sampler,
         "stats": stats,
         "streamed": bool(terminal_streamer and terminal_streamer.started),
         "validations": [
@@ -3559,7 +3664,7 @@ def _quickstart_openwebui_payload(args: Any) -> dict[str, Any]:
         "model_id": model_id,
         "api_key": "not required for localhost",
         "server_command": (
-            f"mtplx start --host {host} --port {port} "
+            f"mtplx quickstart --host {host} --port {port} "
             f"--model {shlex.quote(str(getattr(args, 'model', DEFAULT_RUNTIME_MODEL_DIR)))} "
             "--no-stats-footer --open-browser"
         ),
@@ -3642,6 +3747,8 @@ def _quickstart_run_terminal_chat(args: Any, *, runtime_model: str, inspection: 
 def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspection: dict[str, Any]) -> int:
     profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
     apply_profile_env(profile.name)
+    draft_lm_head = _model_draft_lm_head_spec(inspection, profile)
+    draft_sampler = _model_draft_sampler_spec(inspection, profile)
 
     from mtplx.runtime import load
     from mtplx.ui import ModelLoadProgress, render_banner, render_startup_panel
@@ -3658,7 +3765,7 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
             mode_label=(
                 "Max MTP"
                 if getattr(args, "max", False)
-                else "Fast MTP"
+                else "Medium MTP"
                 if profile.name == "performance-cold"
                 else profile.name
             ),
@@ -3681,19 +3788,19 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
         progress.set_subtitle("ready")
     _quickstart_line(f"Model ready in {time.perf_counter() - started:.1f}s")
     draft_report = None
-    if profile.draft_lm_head is not None:
+    if draft_lm_head is not None:
         _quickstart_line(
             "[3/4] Installing fast draft head: "
-            f"{profile.draft_lm_head.bits}-bit gs{profile.draft_lm_head.group_size}"
+            f"{int(draft_lm_head['bits'])}-bit gs{int(draft_lm_head['group_size'])}"
         )
         draft_started = time.perf_counter()
         from mtplx.draft_lm_head import _install_draft_lm_head
 
         draft_report = _install_draft_lm_head(
             rt,
-            bits=profile.draft_lm_head.bits,
-            group_size=profile.draft_lm_head.group_size,
-            mode=profile.draft_lm_head.mode,
+            bits=int(draft_lm_head["bits"]),
+            group_size=int(draft_lm_head["group_size"]),
+            mode=str(draft_lm_head["mode"]),
         )
         _quickstart_line(f"      draft head ready in {time.perf_counter() - draft_started:.1f}s")
     _quickstart_line(
@@ -3703,7 +3810,14 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
     )
     _quickstart_line(f"Reasoning: {_reasoning_mode(args)}")
     if draft_report is not None:
-        _quickstart_line("Fast path: draft-only LM head is active.")
+        _quickstart_line("Medium/Max speed path: draft-only LM head is active.")
+    if draft_sampler is not None:
+        _quickstart_line(
+            "Draft sampler: "
+            f"temp={float(draft_sampler['temperature']):.2f} "
+            f"top_p={float(draft_sampler['top_p']):.2f} "
+            f"top_k={int(draft_sampler['top_k'])}"
+        )
     _quickstart_line()
 
     history: list[dict[str, str]] = []
@@ -3730,6 +3844,7 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
             max_tokens=max_tokens,
             include_history=include_history,
             stream_label=response_label,
+            draft_sampler=draft_sampler,
         )
         text = str(payload["text"])
         if not payload.get("streamed"):
@@ -3755,7 +3870,8 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
 
     if not sys.stdin.isatty():
         _quickstart_line("error: no interactive terminal detected")
-        _quickstart_line('try: mtplx quickstart --prompt "Say hi"')
+        prompt_hint = _start_invocation(args, ' --prompt "Say hi"')
+        _quickstart_line(f"try: {prompt_hint}")
         return 2
 
     _quickstart_line("Chat is ready. Type /speed for a real TPS sample, /reasoning on|off|auto, or /exit to quit.")
@@ -3799,7 +3915,7 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
 def cmd_quickstart_public(args: Any) -> int:
     raw_target = getattr(args, "target", None)
 
-    # Quickstart is the most common reason fans get blasted, so this is the
+    # Start is the most common reason fans get blasted, so this is the
     # right place to scrub a stale --max marker left behind by a previously
     # killed session. No-op when the previous run exited cleanly.
     try:
@@ -3812,7 +3928,7 @@ def cmd_quickstart_public(args: Any) -> int:
                 f"did not exit cleanly (stale pid {recovery.get('stale_pid')})\n"
             )
     except Exception:
-        pass  # best-effort — never block quickstart on cleanup
+        pass  # best-effort — never block start on cleanup
 
     # Onboarding flow: only when interactive, no explicit CLI overrides, and not
     # in dry-run / one-shot prompt / non-interactive automation. We detect
@@ -3852,6 +3968,15 @@ def cmd_quickstart_public(args: Any) -> int:
         chosen_model = choice.get("model")
         if chosen_model:
             args.model = chosen_model
+            # The user deliberately picked this model in onboarding. If it is
+            # an HF repo and missing locally, fetch without another prompt.
+            try:
+                from mtplx.hf_loader import repo_id_from_model_ref
+
+                if repo_id_from_model_ref(chosen_model):
+                    args.download = True
+            except Exception:
+                pass
         chosen_profile = choice.get("profile")
         if chosen_profile:
             args.profile = chosen_profile
@@ -3892,16 +4017,16 @@ def cmd_quickstart_public(args: Any) -> int:
     else:
         target = raw_target
     if target not in QUICKSTART_TARGETS:
-        _quickstart_line(f"error: unknown quickstart target: {raw_target}")
-        _quickstart_line("try: mtplx quickstart")
-        _quickstart_line("try: mtplx quickstart cli")
+        _quickstart_line(f"error: unknown start target: {raw_target}")
+        _quickstart_line(f"try: {_start_invocation(args)}")
+        _quickstart_line(f"try: {_start_invocation(args, ' cli')}")
         return 2
     model, download = _quickstart_choose_model(args, target=target)
     cache_dir = getattr(args, "cache_dir", None)
     if getattr(args, "dry_run", False):
         openwebui = _quickstart_openwebui_payload(args) if target == "openwebui" else None
         payload = {
-            "action": "quickstart",
+            "action": _start_command_name(args),
             "target": target,
             "model": model,
             "cache_dir": cache_dir,
@@ -3910,12 +4035,12 @@ def cmd_quickstart_public(args: Any) -> int:
             "terminal_chat": target == "terminal",
             "openwebui": openwebui,
             "stats_visible": bool(getattr(args, "show_stats", True)),
-            "next": "mtplx quickstart" if target == "openwebui" else "mtplx quickstart cli",
+            "next": _start_invocation(args) if target == "openwebui" else _start_invocation(args, " cli"),
         }
         if getattr(args, "json", False):
             _print(payload)
         else:
-            _quickstart_line("MTPLX quickstart")
+            _quickstart_line(f"MTPLX {_start_command_name(args)}")
             _quickstart_line(f"model: {model}")
             _quickstart_line(f"profile: {payload['profile']}")
             _quickstart_line(f"download if missing: {str(download).lower()}")
@@ -3925,7 +4050,7 @@ def cmd_quickstart_public(args: Any) -> int:
                 _quickstart_line("then: load once -> chat in this terminal -> stream output -> show speed stats")
         return 0
 
-    _quickstart_line("MTPLX quickstart")
+    _quickstart_line(f"MTPLX {_start_command_name(args)}")
     _quickstart_line(f"[1/4] Checking model: {model}")
     try:
         runtime_model, resolution = _quickstart_resolve_model(model, cache_dir=cache_dir, download=download)
@@ -3967,8 +4092,8 @@ def cmd_quickstart_public(args: Any) -> int:
         _quickstart_line("model is not available locally")
         if detail:
             _quickstart_line(f"detail: {detail}")
-        _quickstart_line("try: mtplx quickstart --download")
-        _quickstart_line("try: mtplx quickstart --model /path/to/model")
+        _quickstart_line(f"try: {_start_invocation(args, ' --download')}")
+        _quickstart_line(f"try: {_start_invocation(args, ' --model /path/to/model')}")
         return 1
 
     inspection, gate_exit = _model_gate(

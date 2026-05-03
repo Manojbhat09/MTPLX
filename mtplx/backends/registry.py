@@ -357,6 +357,8 @@ class RuntimeContract:
     recommended_profile: str
     exactness_baseline: dict[str, Any]
     verified_on: dict[str, Any]
+    recommended_draft_lm_head: dict[str, Any] | None = None
+    recommended_draft_sampler: dict[str, Any] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -381,6 +383,20 @@ class RuntimeContract:
         depth = int(data["mtp_depth_max"])
         if depth <= 0:
             raise ValueError("runtime contract mtp_depth_max must be positive")
+        recommended_draft_lm_head = None
+        if data.get("recommended_draft_lm_head") is not None:
+            from mtplx.draft_lm_head import normalize_draft_lm_head_spec
+
+            recommended_draft_lm_head = normalize_draft_lm_head_spec(
+                data.get("recommended_draft_lm_head")
+            )
+        recommended_draft_sampler = None
+        if data.get("recommended_draft_sampler") is not None:
+            from mtplx.draft_sampling import normalize_draft_sampler_spec
+
+            recommended_draft_sampler = normalize_draft_sampler_spec(
+                data.get("recommended_draft_sampler")
+            )
         return cls(
             mtplx_version=str(data["mtplx_version"]),
             arch_id=str(data["arch_id"]),
@@ -388,11 +404,13 @@ class RuntimeContract:
             recommended_profile=profile,
             exactness_baseline=dict(data["exactness_baseline"]),
             verified_on=dict(data["verified_on"]),
+            recommended_draft_lm_head=recommended_draft_lm_head,
+            recommended_draft_sampler=recommended_draft_sampler,
             raw=dict(data),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "mtplx_version": self.mtplx_version,
             "arch_id": self.arch_id,
             "mtp_depth_max": self.mtp_depth_max,
@@ -400,6 +418,11 @@ class RuntimeContract:
             "exactness_baseline": self.exactness_baseline,
             "verified_on": self.verified_on,
         }
+        if self.recommended_draft_lm_head is not None:
+            out["recommended_draft_lm_head"] = dict(self.recommended_draft_lm_head)
+        if self.recommended_draft_sampler is not None:
+            out["recommended_draft_sampler"] = dict(self.recommended_draft_sampler)
+        return out
 
 
 @dataclass(frozen=True)

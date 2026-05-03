@@ -33,7 +33,7 @@ gh release download v0.1.0-preview.1 --repo youssofal/mtplx \
   --pattern 'install_preview_global.sh'
 bash install_preview_global.sh ./mtplx-0.1.0rc1-py3-none-any.whl
 
-mtplx quickstart       # interactive: pick model → mode → web/CLI, then chat
+mtplx start            # interactive: pick model → mode → web/CLI, then chat
 ```
 
 That's it. The wizard handles the default speed model (`Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed`), runtime mode, and surface (browser chat at `127.0.0.1:8000/` or terminal chat) on first run. On every subsequent run it asks "same as last time?" so you're one keypress from chatting.
@@ -47,16 +47,16 @@ That's it. The wizard handles the default speed model (`Youssofal/Qwen3.6-27B-MT
 - **60+ tok/s cold on a 27B-class model.** Verified D3/192 long-code at 60.169 tok/s (Apple Silicon M5 Max, no fan boost, MLX-native, 2026-04-29).
 - **Real serving surface.** OpenAI-compatible `/v1/chat/completions` + `/v1/completions` + `/v1/models`, Anthropic-compatible `/v1/messages` (streaming SSE), `/health`, `/metrics`. Plug it into Open WebUI, Claude Code, Cline, Continue, or anything that speaks OpenAI.
 - **In-browser chat UI** with auto-detected model context (256k for Qwen3.6), live tokens-per-second, markdown rendering, code-block copy buttons, a stop button, and a settings sidebar that persists per-machine.
-- **Interactive quickstart wizard.** Pick model, mode, and surface in three numbered prompts. Returning users get "same as last time?". No flag-soup required.
+- **Interactive start wizard.** Pick model, mode, and surface in three numbered prompts. Returning users get "same as last time?". No flag-soup required.
 - **Honest profile names that tell you what they do.**
-  - `Fast` — default first-run path (`performance-cold`), snappy on short replies, decays on long contexts.
-  - `Stable` — conservative compatibility alias, no fan changes, predictable on long replies.
-  - `Max` — Fast + ThermalForge fans pinned at 100%, sustained max throughput. Auto-installs ThermalForge with one prompt and one sudo password if you opt in.
+  - `Medium` — default native-MTP speed path (`performance-cold`), about 2.2× burst over the same model with MTP off, not sustained without fan control.
+  - `Max` — Medium + ThermalForge fans pinned at 100%, about 2.24× in the measured speed lane, loud by design.
+  - `Stable` — hidden compatibility flag (`--profile stable` / `--profile safe`) for the exact/staged long-reply path.
 - **Crash-safe fan control.** When Max is on, MTPLX spawns a detached watchdog that restores fans to auto if the parent dies for any reason — including `kill -9` and "I closed the terminal". Verified live on hardware.
 - **Idle-aware Max mode.** Server tracks request activity; after 15 minutes of no chat, fans drop to auto, then ramp back up on the next message.
 - **Four-tier model compatibility contract.** `mtplx inspect <model>` reports: verified / arch-compatible-unverified / incompatible-architecture / no-MTP. No silent garbage runs.
 - **Lazy imports.** `mtplx --help`, `doctor`, `inspect`, `init`, `setup` work on a fresh venv *without MLX installed*. Generation and serving pull in MLX only when needed.
-- **Preview status: 414 tests passing**, including end-to-end onboarding, fan-control crash safety, OpenAI server fake-state, lazy-import survival, exactness gates.
+- **Preview status: 350-test suite green**, including end-to-end onboarding, fan-control crash safety, OpenAI server fake-state, lazy-import survival, exactness gates.
 
 > **Preview honesty.** The cold path is verified at 60+ tok/s. *Sustained* no-fan long-context throughput is currently ~37 tok/s on Flappy 10k versus a ≥50 tok/s target — the v0.1 release ships with this gap explicit. Closing it is the v0.2 deliverable; see [Roadmap](#roadmap).
 
@@ -76,18 +76,18 @@ mtplx help
 mtplx doctor --json
 
 # 3. Chat (the wizard does everything)
-mtplx quickstart
+mtplx start
 ```
 
 Power-user shortcuts (any of these skip the wizard):
 
 ```bash
-mtplx quickstart --fresh                    # re-run the wizard from scratch
-mtplx quickstart cli                        # terminal chat directly
-mtplx quickstart --max                      # browser chat with fan boost
-mtplx quickstart --model /path/to/model     # use a specific local or HF model
+mtplx start --fresh                         # re-run the wizard from scratch
+mtplx start cli                             # terminal chat directly
+mtplx start --max                           # browser chat with fan boost
+mtplx start --model /path/to/model          # use a specific local or HF model
 mtplx pull Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed
-mtplx start --port 8000                     # API server only, no chat
+mtplx quickstart --port 8000                # API server only, no chat
 ```
 
 OpenAI-compatible smoke test:
@@ -138,13 +138,13 @@ No second model, no greedy hack, no external drafter, no silent distribution dri
 
 ## Modes
 
-Picked by the quickstart wizard, or set explicitly via `--profile`. Every mode preserves exactness; the difference is the throughput envelope and whether MTPLX touches your fans.
+Picked by `mtplx start`, or set explicitly via `--profile`. Every mode preserves exactness; the difference is the runtime path and whether MTPLX touches your fans.
 
-| Mode | Profile | Fan control | Cold | Sustained | Best for |
-|---|---|---|---|---|---|
-| **Fast** | `performance-cold` | None | ~60 tok/s | Decays on long contexts | Default first run, short replies, snappy chat |
-| **Stable** | `stable` / `safe` | None (Apple defaults) | ~37 tok/s | ~37 tok/s, holds steady | Long answers, predictable speed |
-| **Max** | `performance-cold` + `--max` | ThermalForge pinned to 100% | ~60 tok/s | ~60 tok/s, no decay | Sustained workloads, you don't mind fans |
+| Mode | Profile | Mechanics | Speed lane | Best for |
+|---|---|---|---|---|
+| **Medium** | `performance-cold` | Native-MTP speed path, Apple fan curve | ~2.2× burst, not sustained | Default first run, short replies, snappy chat |
+| **Max** | `performance-cold` + `--max` | Medium path plus ThermalForge pinned to 100% | ~2.24× in the measured lane | Sustained workloads, you don't mind fans |
+| **Stable** | `stable` / `safe` | Exact/staged long-reply path, hidden from onboarding | Lower peak speed, steadier shape | Compatibility and conservative long replies |
 
 `Max` requires ThermalForge. `mtplx max --install` installs it from source into `~/.mtplx/bin/thermalforge`, sets up a passwordless sudoers rule scoped to that one binary, and verifies fans actually ramp before declaring success. One sudo prompt, end-to-end. Crash safety covers SIGINT, SIGTERM, SIGHUP, terminal close, and `kill -9` via a detached sidecar process.
 
@@ -184,7 +184,7 @@ Run `mtplx doctor --summary`, `mtplx doctor --deep --json`, or `mtplx doctor --b
 ## CLI surface
 
 ```bash
-mtplx quickstart            # interactive setup, then chat
+mtplx start                 # interactive setup, then chat
 mtplx help                  # detailed help; `mtplx help <command>` for any
 mtplx doctor                # install + model + integration health
 mtplx inspect <model>       # four-tier compatibility report
@@ -210,9 +210,9 @@ Every command has `--json` for machine-readable output and `--help` for context-
 
 ```mermaid
 flowchart TB
-    cli["CLI surface<br/>quickstart · run · chat · start · bench · inspect · init · setup · max"]
+    cli["CLI surface<br/>start · quickstart · run · chat · serve · bench · inspect · init · setup · max"]
     onboarding["Onboarding wizard<br/>~/.mtplx/quickstart.json"]
-    profiles["Profiles<br/>safe · performance-cold · exact · max-diagnostic"]
+    profiles["Profiles<br/>stable/safe · performance-cold · exact · max-diagnostic"]
     speculative["Speculative sampling<br/>p/q acceptance + residual correction"]
     registry["Architecture registry<br/>4-tier compatibility contract"]
     backends["MTP backends<br/>Qwen3-Next (verified) · DeepSeek V3 · GLM · MiMo (registered)"]
@@ -236,7 +236,7 @@ flowchart TB
 
 ## Roadmap
 
-**v0.1.0-preview.1 (today).** Verified Qwen3-Next-MTP cold path, OpenAI/Anthropic-compatible serving, in-browser chat, interactive quickstart wizard, four-tier compatibility, crash-safe Max mode, lazy-import CLI surface, 414 tests.
+**v0.1.0-preview.1 (today).** Verified Qwen3-Next-MTP cold path, OpenAI/Anthropic-compatible serving, in-browser chat, interactive `mtplx start` wizard, four-tier compatibility, crash-safe Max mode, lazy-import CLI surface, 350-test suite green.
 
 **v0.2 — sustained throughput.** Diagnostic-gated kernel ladder targeting `last64/first64 ≥ 0.90` no-fan on 10k generations while preserving the 60 tok/s class. Mechanism-driven: lazy-graph severance + output narrowing if graph history is the bottleneck; MLX-primitive-registered cache-update + `mx.compile` if dispatch tax dominates; an owned GDN+MLP verify-cycle kernel via `mx.fast.metal_kernel` only if the cheaper paths don't close the gap.
 

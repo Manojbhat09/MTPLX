@@ -80,6 +80,7 @@ class RuntimeProfile:
     required_mlx_fork_commit: str | None = None
     required_mlx_fork_fragment: str | None = None
     draft_lm_head: DraftLMHeadRequirement | None = None
+    draft_sampler: SamplerDefaults | None = None
     qa_only: bool = False
     fan_control_allowed: bool = False
     clock_anchor_allowed: bool = False
@@ -113,6 +114,15 @@ class RuntimeProfile:
                     "mode": self.draft_lm_head.mode,
                 }
             ),
+            "draft_sampler": (
+                None
+                if self.draft_sampler is None
+                else {
+                    "temperature": self.draft_sampler.temperature,
+                    "top_p": self.draft_sampler.top_p,
+                    "top_k": self.draft_sampler.top_k,
+                }
+            ),
             "qa_only": self.qa_only,
             "fan_control_allowed": self.fan_control_allowed,
             "clock_anchor_allowed": self.clock_anchor_allowed,
@@ -135,8 +145,8 @@ STABLE_PROFILE = RuntimeProfile(
     name="stable",
     runtime_profile="long_response_exact_staged",
     summary=(
-        "Conservative no-fan profile kept as the compatibility alias; it is "
-        "honest about the current sustained-throughput gap."
+        "Stable Mode: exact/staged long-reply path with no fan control. Hidden "
+        "from first-run onboarding, but available by flag for compatibility."
     ),
     env=_merge_env(EXACT_PAGED_ATTENTION_ENV, LONG_RESPONSE_STAGED_ENV),
     benchmark_ids=(
@@ -144,8 +154,8 @@ STABLE_PROFILE = RuntimeProfile(
         "phase0j-gdn8-speed4-target-layer-sched-state-root-mlx-vector-paged-flappy-uncapped-modelswap-20260501",
     ),
     caveats=(
-        "Sustained no-fan long-context throughput is below the 50+ tok/s target.",
-        "Current evidence includes a 37 tok/s no-fan Flappy 10k run.",
+        "Lower peak throughput than Medium or Max.",
+        "Selected for repeatable long replies while the v0.2 decay work continues.",
     ),
 )
 
@@ -153,15 +163,15 @@ PERFORMANCE_COLD_PROFILE = RuntimeProfile(
     name="performance-cold",
     runtime_profile="native_mtp_60_cold",
     summary=(
-        "Default first-run cold-throughput path; preserves the fast coding "
-        "demo path and may decay on long-context generation."
+        "Medium Mode: native-MTP speed path; about 2.2x burst over the same "
+        "Optimized-Speed model with MTP off, but not sustained without fan control."
     ),
     env=_items(NATIVE_MTP_60_FAST_PATH_ENV),
     benchmark_ids=(
         "mtp-depth-d3-gdn8-speed4-cyankiwi-mtp-draftlmhead4b-gs64-linear-gdn-from-conv-tape-mlx-qmv-unroll4-clean-preflight-batchedtargetarrays-lazymtphistory-dropevents-skipsnapshot-v4-20260429-143701",
     ),
     caveats=(
-        "Best cold throughput; may decay on long-context generation.",
+        "Best no-fan burst throughput; may decay on long-context generation.",
         "Requires the MLX-MTPLX fork for the native QMV/QMM fast path.",
     ),
     required_mlx_fork_commit=NATIVE_MTP_60_MLX_FORK_COMMIT,
@@ -182,8 +192,8 @@ MAX_DIAGNOSTIC_PROFILE = RuntimeProfile(
     name="max-diagnostic",
     runtime_profile="max_diagnostic",
     summary=(
-        "Fan-controlled diagnostic profile for sustained-throughput analysis; "
-        "never valid for headline product claims."
+        "Max Mode: Medium path plus ThermalForge fan control; about 2.24x in "
+        "the measured speed lane and loud by design."
     ),
     env=_merge_env(EXACT_PAGED_ATTENTION_ENV, LONG_RESPONSE_STAGED_ENV),
     caveats=(

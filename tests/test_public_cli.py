@@ -117,29 +117,29 @@ def test_main_menu_advertises_help_command(capsys):
     # `help` appears in the Commands section, not just as part of the footer.
     assert "  help " in captured or "help         " in captured
     # Listed near the top: must come before the lab-only commands.
-    quickstart_pos = captured.find("quickstart")
+    quickstart_pos = captured.find("start")
     help_pos = captured.find("\n  help")
     inspect_pos = captured.find("inspect")
     assert quickstart_pos != -1 and help_pos != -1 and inspect_pos != -1
     assert quickstart_pos < help_pos < inspect_pos
 
 
-def test_quickstart_help_is_a_user_journey(capsys):
-    code = main(["help", "quickstart"])
+def test_start_help_is_a_user_journey(capsys):
+    code = main(["help", "start"])
 
     captured = capsys.readouterr().out
     assert code == 0
-    assert "MTPLX quickstart" in captured
+    assert "MTPLX start" in captured
     # Help leads with the interactive onboarding (model/mode/where) instead
     # of the old browser/CLI bifurcation.
     assert "Interactive end-to-end setup" in captured
     assert "What gets asked" in captured
     assert "ThermalForge" in captured  # Max mode advertises auto-install
     # Power-user shortcuts still showcased.
-    assert "mtplx quickstart --fresh" in captured
-    assert "mtplx quickstart --max" in captured
-    assert "mtplx quickstart cli" in captured
-    assert "mtplx quickstart --download" in captured
+    assert "mtplx start --fresh" in captured
+    assert "mtplx start --max" in captured
+    assert "mtplx start cli" in captured
+    assert "mtplx start --download" in captured
     assert "/speed" in captured
     assert "Aliases:" in captured
     assert "openwebui" in captured
@@ -156,13 +156,13 @@ def test_unknown_command_is_targeted_not_argparse_dump(capsys):
     assert "usage: mtplx" not in captured
 
 
-def test_quickstart_dry_run_is_consumer_friendly(monkeypatch, tmp_path, capsys):
-    """The default quickstart now opens the browser chat; the terminal flow lives behind `cli`."""
+def test_start_dry_run_is_consumer_friendly(monkeypatch, tmp_path, capsys):
+    """The default start opens the browser chat; the terminal flow lives behind `cli`."""
     monkeypatch.setenv("MTPLX_CONFIG", str(tmp_path / "missing-config.toml"))
 
     code = main(
         [
-            "quickstart",
+            "start",
             "cli",
             "--dry-run",
             "--model",
@@ -173,14 +173,14 @@ def test_quickstart_dry_run_is_consumer_friendly(monkeypatch, tmp_path, capsys):
 
     captured = capsys.readouterr().out
     assert code == 0
-    assert "MTPLX quickstart" in captured
+    assert "MTPLX start" in captured
     assert "model: models/example" in captured
     assert "profile: performance-cold" in captured
     assert "then: load once -> chat in this terminal -> stream output -> show speed stats" in captured
 
 
-def test_quickstart_default_target_is_browser(monkeypatch, tmp_path):
-    """`mtplx quickstart` (no target) must dry-run as the openwebui browser path."""
+def test_start_default_target_is_browser(monkeypatch, tmp_path):
+    """`mtplx start` (no target) must dry-run as the openwebui browser path."""
     monkeypatch.setenv("MTPLX_CONFIG", str(tmp_path / "missing-config.toml"))
     args = SimpleNamespace(
         target=None,
@@ -202,12 +202,12 @@ def test_quickstart_default_target_is_browser(monkeypatch, tmp_path):
     assert code == 0
 
 
-def test_quickstart_target_aliases_route_correctly(monkeypatch, tmp_path, capsys):
+def test_start_target_aliases_route_correctly(monkeypatch, tmp_path, capsys):
     """`web`, `openwebui`, `open-webui` -> openwebui; `cli`, `terminal` -> terminal."""
     monkeypatch.setenv("MTPLX_CONFIG", str(tmp_path / "missing-config.toml"))
 
     def run(target: str | None) -> dict:
-        argv = ["quickstart"]
+        argv = ["start"]
         if target:
             argv.append(target)
         argv += ["--dry-run", "--json", "--model", "models/example", "--yes"]
@@ -341,26 +341,26 @@ def test_one_shot_max_uses_verified_max_session(monkeypatch):
     assert calls == ["start", "stop"]
 
 
-def test_quickstart_parser_accepts_new_target_choices():
+def test_start_parser_accepts_target_choices():
     """Parser must accept the new `web` and `cli` target literals."""
     parser = build_parser()
     for target in ("web", "cli", "openwebui", "open-webui", "terminal"):
-        args = parser.parse_args(["quickstart", target, "--dry-run"])
+        args = parser.parse_args(["start", target, "--dry-run"])
         assert args.target == target
     # Default target (no positional) is now None — the absence of an explicit
     # target is what tells the handler to run the interactive onboarding flow
     # (or fall back to "web" when non-interactive). The `--fresh` flag is also
     # accepted for forcing the full onboarding.
-    args_default = parser.parse_args(["quickstart", "--dry-run"])
+    args_default = parser.parse_args(["start", "--dry-run"])
     assert args_default.target is None
-    args_fresh = parser.parse_args(["quickstart", "--fresh", "--dry-run"])
+    args_fresh = parser.parse_args(["start", "--fresh", "--dry-run"])
     assert args_fresh.fresh is True
 
 
 def test_cli_response_cap_defaults_to_remaining_context():
     parser = build_parser()
 
-    quickstart = parser.parse_args(["quickstart", "cli", "--dry-run"])
+    quickstart = parser.parse_args(["start", "cli", "--dry-run"])
     ask = parser.parse_args(["ask", "hello"])
     run = parser.parse_args(["run", "hello"])
     chat = parser.parse_args(["chat", "--prompt", "hello"])
@@ -374,7 +374,7 @@ def test_cli_response_cap_defaults_to_remaining_context():
 def test_cli_reasoning_flags_parse_without_being_chat_text():
     parser = build_parser()
 
-    quickstart = parser.parse_args(["quickstart", "cli", "--reasoning", "on"])
+    quickstart = parser.parse_args(["start", "cli", "--reasoning", "on"])
     run = parser.parse_args(["run", "hello", "--reasoning", "off"])
     serve = parser.parse_args(["serve", "--reasoning", "auto"])
 
@@ -383,13 +383,14 @@ def test_cli_reasoning_flags_parse_without_being_chat_text():
     assert serve.reasoning == "auto"
 
 
-def test_quickstart_missing_model_suggests_download(monkeypatch, capsys):
+def test_start_missing_model_suggests_download(monkeypatch, capsys):
     monkeypatch.setattr(
         public,
         "_resolve_runtime_model_path",
         lambda model, cache_dir=None: (None, {"detail": "not cached"}),
     )
     args = SimpleNamespace(
+        command="start",
         model="mtplx/example",
         cache_dir="/tmp/mtplx-models",
         download=False,
@@ -406,11 +407,11 @@ def test_quickstart_missing_model_suggests_download(monkeypatch, capsys):
 
     captured = capsys.readouterr().out
     assert code == 1
-    assert "MTPLX quickstart" in captured
+    assert "MTPLX start" in captured
     assert "model is not available locally" in captured
     assert "detail: not cached" in captured
-    assert "try: mtplx quickstart --download" in captured
-    assert "try: mtplx quickstart --model /path/to/model" in captured
+    assert "try: mtplx start --download" in captured
+    assert "try: mtplx start --model /path/to/model" in captured
 
 
 def test_quickstart_short_reply_reports_decode_tps():
@@ -650,7 +651,7 @@ def test_quickstart_openwebui_dry_run_json(monkeypatch, tmp_path, capsys):
 
     code = main(
         [
-            "quickstart",
+            "start",
             "openwebui",
             "--dry-run",
             "--json",
@@ -1072,17 +1073,18 @@ def test_chat_and_serve_default_to_performance_cold_mode():
 def test_product_helper_commands_parse():
     parser = build_parser()
 
-    quickstart = parser.parse_args(
-        ["quickstart", "--prompt", "hello", "--max-tokens", "16", "--no-stats"]
+    start = parser.parse_args(
+        ["start", "--prompt", "hello", "--max-tokens", "16", "--no-stats"]
     )
-    quickstart_openwebui = parser.parse_args(["quickstart", "openwebui", "--port", "18012"])
-    quickstart_openwebui_strict = parser.parse_args(["quickstart", "openwebui", "--strict-fast-path"])
-    quickstart_alias = parser.parse_args(["quick-start", "--dry-run"])
+    start_openwebui = parser.parse_args(["start", "openwebui", "--port", "18012"])
+    start_openwebui_strict = parser.parse_args(["start", "openwebui", "--strict-fast-path"])
+    quickstart = parser.parse_args(["quickstart", "--port", "18012"])
+    quickstart_alias = parser.parse_args(["quick-start", "--port", "18013"])
     setup = parser.parse_args(["setup", "--dry-run"])
     pull_default = parser.parse_args(["pull"])
     ask = parser.parse_args(["ask", "hello"])
     ask_stats = parser.parse_args(["ask", "hello", "--stats"])
-    start = parser.parse_args(["start", "--port", "18012"])
+    serve_start = parser.parse_args(["serve", "--port", "18012"])
     status = parser.parse_args(["status", "--deep"])
     connect = parser.parse_args(["connect", "openwebui", "--port", "18012"])
     models = parser.parse_args(["models", "--json"])
@@ -1101,16 +1103,18 @@ def test_product_helper_commands_parse():
     config = parser.parse_args(["config", "set", "profile", "exact", "--dry-run"])
     attribution = parser.parse_args(["profile", "eval-attribution", "--dry-run"])
 
+    assert start.command == "start"
+    assert start.prompt == "hello"
+    assert start.max_tokens == 16
+    assert start.show_stats is False
+    assert start_openwebui.target == "openwebui"
+    assert start_openwebui.port == 18012
+    assert start_openwebui.strict_fast_path is False
+    assert start_openwebui_strict.strict_fast_path is True
     assert quickstart.command == "quickstart"
-    assert quickstart.prompt == "hello"
-    assert quickstart.max_tokens == 16
-    assert quickstart.show_stats is False
-    assert quickstart_openwebui.target == "openwebui"
-    assert quickstart_openwebui.port == 18012
-    assert quickstart_openwebui.strict_fast_path is False
-    assert quickstart_openwebui_strict.strict_fast_path is True
+    assert quickstart.port == 18012
     assert quickstart_alias.command == "quick-start"
-    assert quickstart_alias.dry_run is True
+    assert quickstart_alias.port == 18013
     assert setup.command == "setup"
     assert setup.dry_run is True
     assert pull_default.command == "pull"
@@ -1119,9 +1123,9 @@ def test_product_helper_commands_parse():
     assert ask.prompt_arg == "hello"
     assert ask.quiet is True
     assert ask_stats.quiet is False
-    assert start.command == "start"
-    assert start.port == 18012
-    assert start.stats_footer is False
+    assert serve_start.command == "serve"
+    assert serve_start.port == 18012
+    assert serve_start.stats_footer is True
     assert status.command == "status"
     assert status.deep is True
     assert connect.command == "connect"
@@ -1440,8 +1444,8 @@ def test_serve_reports_busy_port_before_model_resolution(monkeypatch, capsys):
     assert "MTPLX" in captured
     assert "0.1.0-preview" in captured
     assert "error: port 8000 is already in use" in captured
-    assert "stop the old mtplx start terminal with Ctrl-C" in captured
-    assert "try: mtplx start --port 8001" in captured
+    assert "stop the old mtplx quickstart terminal with Ctrl-C" in captured
+    assert "try: mtplx quickstart --port 8001" in captured
 
 
 def test_quickstart_openwebui_reuses_existing_server(monkeypatch, capsys):
