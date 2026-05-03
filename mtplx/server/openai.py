@@ -47,7 +47,9 @@ from mtplx.cache_state import snapshot_cache
 from mtplx.mtp_patch import MTPContract
 from mtplx.sampling import SamplerConfig
 from mtplx.profiles import (
+    DEFAULT_HF_MODEL_ID,
     DEFAULT_PROFILE_NAME,
+    DEFAULT_PUBLIC_MODEL_ID,
     PROFILE_CHOICES,
     apply_profile_env,
     get_profile,
@@ -2948,10 +2950,16 @@ def _chat_ui_html(*, model_id: str, server_url: str, api_key_required: bool) -> 
       statsEl.hidden = parts.length === 0;
     }
     function renderLiveStats(state) {
-      const tps = state.tokens > 0 && state.elapsed > 0 ? (state.tokens / state.elapsed) : null;
+      const finalStats = state.finalStats || null;
+      const tps = finalStats
+        ? Number(finalStats.decode_tok_s ?? finalStats.request_tok_s)
+        : (state.tokens > 0 && state.elapsed > 0 ? (state.tokens / state.elapsed) : null);
+      const tokenCount = finalStats
+        ? Number(finalStats.completion_tokens ?? finalStats.generated_tokens ?? state.tokens)
+        : state.tokens;
       const parts = [];
-      if (tps !== null) parts.push('<span class="tps">' + tps.toFixed(1) + ' tok/s</span>');
-      if (state.tokens > 0) parts.push(state.tokens + ' tokens');
+      if (Number.isFinite(tps)) parts.push('<span class="tps">' + tps.toFixed(1) + ' tok/s</span>');
+      if (Number.isFinite(tokenCount) && tokenCount > 0) parts.push(tokenCount + ' tokens');
       liveStatsEl.innerHTML = parts.length ? '· ' + parts.join(' · ') : '';
     }
 
@@ -3083,6 +3091,15 @@ def _chat_ui_html(*, model_id: str, server_url: str, api_key_required: bool) -> 
             if (payload.mtplx_stats) {
               finalStats = payload.mtplx_stats;
               renderStats(turn.stats, finalStats);
+              renderLiveStats({finalStats, tokens: liveState.tokens, elapsed: liveState.elapsed});
+            }
+            if (payload.mtplx_live) {
+              const streamedTokens = Number(payload.mtplx_live.stream_tokens || 0);
+              if (Number.isFinite(streamedTokens) && streamedTokens > 0) {
+                liveState.tokens += streamedTokens;
+                liveState.elapsed = Number(payload.mtplx_live.decode_elapsed_s || 0);
+                renderLiveStats(liveState);
+              }
             }
             const delta = payload.choices?.[0]?.delta || {};
             const reasoningPiece = delta.reasoning_content || "";
@@ -3100,9 +3117,7 @@ def _chat_ui_html(*, model_id: str, server_url: str, api_key_required: bool) -> 
               if (firstTokenAt === null) firstTokenAt = performance.now();
               assistantText += answerPiece;
               turn.answerBody.textContent = assistantText;
-              liveState.tokens += 1;
-              liveState.elapsed = (performance.now() - startedAt) / 1000;
-              renderLiveStats(liveState);
+              if (liveState.tokens <= 0) renderLiveStats(liveState);
               setStatus("Streaming", "streaming");
               // Auto-collapse the reasoning block once the answer starts (still expandable).
               if (!turn.reasoningBlock.hidden) {
@@ -3126,7 +3141,7 @@ def _chat_ui_html(*, model_id: str, server_url: str, api_key_required: bool) -> 
         if (finalStats) renderStats(turn.stats, finalStats);
         history.push({role: "assistant", content: assistantText});
         setStatus("Ready", "ready");
-        renderLiveStats(liveState);
+        renderLiveStats(finalStats ? {finalStats, tokens: liveState.tokens, elapsed: liveState.elapsed} : liveState);
       } catch (err) {
         const aborted = err && (err.name === "AbortError" || /aborted/i.test(String(err.message || "")));
         const stalled =
@@ -3725,7 +3740,13 @@ def create_app(state: ServerState) -> FastAPI:
 
                 generation_future = state.generation_executor.submit(worker)
 
-                def delta_chunk(field: str, text: str) -> str:
+                stream_started_at = time.perf_counter()
+                stream_token_count = 0
+
+                def delta_chunk(field: str, text: str, *, stream_tokens: int = 0) -> str:
+                    nonlocal stream_token_count
+                    stream_tokens = max(0, int(stream_tokens or 0))
+                    stream_token_count += stream_tokens
                     payload = {
                         "id": response_id,
                         "object": "chat.completion.chunk",
@@ -3739,6 +3760,16 @@ def create_app(state: ServerState) -> FastAPI:
                                 }
                         ],
                     }
+                    if stream_tokens:
+                        elapsed = max(0.0, time.perf_counter() - stream_started_at)
+                        payload["mtplx_live"] = {
+                            "stream_tokens": stream_tokens,
+                            "completion_tokens_so_far": stream_token_count,
+                            "decode_elapsed_s": elapsed,
+                            "live_decode_tok_s": (
+                                stream_token_count / elapsed if elapsed > 0.0 else None
+                            ),
+                        }
                     return f"data: {json.dumps(payload)}\n\n"
 
                 def error_chunk(exc: BaseException) -> str:
@@ -3780,7 +3811,7 @@ def create_app(state: ServerState) -> FastAPI:
                     force: bool = False,
                 ) -> list[tuple[str, str]]:
                     pending_stream_tokens.extend(tokens)
-                    chunks: list[tuple[str, str]] = []
+                    chunks: list[tuple[str, str, int]] = []
                     while pending_stream_tokens and (
                         force or len(pending_stream_tokens) >= stream_interval
                     ):
@@ -3788,11 +3819,9 @@ def create_app(state: ServerState) -> FastAPI:
                         batch = pending_stream_tokens[:batch_size]
                         del pending_stream_tokens[:batch_size]
                         delta = decoder.feed(batch)
-                        chunks.extend(
-                            (field, text)
-                            for field, text in splitter.feed(delta)
-                            if text
-                        )
+                        emitted = [(field, text) for field, text in splitter.feed(delta) if text]
+                        for index, (field, text) in enumerate(emitted):
+                            chunks.append((field, text, len(batch) if index == 0 else 0))
                     return chunks
 
                 def streamed_history_content() -> str:
@@ -3830,14 +3859,14 @@ def create_app(state: ServerState) -> FastAPI:
                                 return
                             continue
                         if kind == "tokens":
-                            for field, text in drain_stream_tokens(item):
+                            for field, text, stream_tokens in drain_stream_tokens(item):
                                 remember_stream_chunk(field, text)
-                                yield delta_chunk(field, text)
+                                yield delta_chunk(field, text, stream_tokens=stream_tokens)
                         elif kind == "done":
                             generated = item
-                            for field, text in drain_stream_tokens([], force=True):
+                            for field, text, stream_tokens in drain_stream_tokens([], force=True):
                                 remember_stream_chunk(field, text)
-                                yield delta_chunk(field, text)
+                                yield delta_chunk(field, text, stream_tokens=stream_tokens)
                             tail = decoder.finish()
                             if tail:
                                 for field, text in splitter.feed(tail):
@@ -4142,8 +4171,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     postcommit_default = os.environ.get("MTPLX_SESSION_POSTCOMMIT_MODE", "inline")
     if postcommit_default not in {"inline", "async"}:
         postcommit_default = "inline"
-    parser.add_argument("--model", default="models/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP")
-    parser.add_argument("--model-id", default="mtplx-qwen36-27b-native-mtp")
+    parser.add_argument("--model", default=DEFAULT_HF_MODEL_ID)
+    parser.add_argument("--model-id", default=DEFAULT_PUBLIC_MODEL_ID)
     parser.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)

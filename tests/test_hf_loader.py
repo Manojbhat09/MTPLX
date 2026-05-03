@@ -10,6 +10,7 @@ from mtplx.hf_loader import (
     repo_id_from_model_ref,
     resolve_model_path,
     safe_model_name,
+    validate_mtplx_model_files,
 )
 
 
@@ -44,6 +45,7 @@ def test_resolve_model_path_reports_missing_cache(tmp_path: Path):
 
 
 def test_list_and_remove_cached_models(tmp_path: Path):
+    (tmp_path / ".tmp").mkdir()
     model = tmp_path / "mtplx--example"
     model.mkdir()
     (model / "config.json").write_text("{}\n", encoding="utf-8")
@@ -56,6 +58,8 @@ def test_list_and_remove_cached_models(tmp_path: Path):
     assert rows[0].repo_id == "mtplx/example"
     assert rows[0].has_config is True
     assert rows[0].has_runtime_contract is True
+    assert rows[0].validation["missing_files"]
+    assert rows[0].to_dict()["recommended_profile"] is None
     assert rows[0].size_bytes >= 4
 
     removed = remove_cached_model("mtplx/example", cache_dir=tmp_path)
@@ -74,3 +78,23 @@ def test_hf_cache_report_is_no_network(tmp_path: Path, monkeypatch):
     assert report["cache_exists"] is False
     assert report["cached_models"] == 0
     assert "token_present" in report
+    assert "disk_free_bytes" in report
+
+
+def test_validate_mtplx_model_files_reports_required_payload(tmp_path: Path):
+    model = tmp_path / "model"
+    model.mkdir()
+    for name in (
+        "config.json",
+        "tokenizer.json",
+        "model.safetensors.index.json",
+        "mtp.safetensors",
+    ):
+        (model / name).write_text("{}\n", encoding="utf-8")
+    (model / "mtplx_runtime.json").write_text('{"arch_id": "qwen3-next-mtp"}\n', encoding="utf-8")
+
+    validation = validate_mtplx_model_files(model)
+
+    assert validation["ok"] is True
+    assert validation["missing_files"] == []
+    assert validation["contract_arch_id"] == "qwen3-next-mtp"

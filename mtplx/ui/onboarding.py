@@ -16,8 +16,9 @@ import os
 from pathlib import Path
 from typing import Any
 
+from mtplx.profiles import DEFAULT_HF_MODEL_ID
 
-DEFAULT_HF_MODEL = "mtplx/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP"
+DEFAULT_HF_MODEL = DEFAULT_HF_MODEL_ID
 STATE_PATH = Path("~/.mtplx/quickstart.json").expanduser()
 
 
@@ -355,8 +356,8 @@ def screen_mode() -> tuple[str, bool]:
 
     Three modes laid out on two axes — runtime path × fan control:
 
-      Stable : conservative MTP path,  no fan control     ~37 tok/s, holds steady
       Fast : aggressive cold-speed path, no fan control   ~60 tok/s start, decays
+      Stable : conservative MTP path,  no fan control     ~37 tok/s, holds steady
       Max  : aggressive cold-speed path, fans pinned 100% for better sustained throughput (loud)
 
     The user-visible difference between Stable and Fast is *which decoding path*
@@ -371,13 +372,13 @@ def screen_mode() -> tuple[str, bool]:
         options=[
             (
                 "1",
-                "Stable  ·  ~37 tok/s steady, no fan boost",
-                "Conservative MTP path. Slower but the speed barely changes between a 50-token reply and a 5000-token reply. Best for long answers.",
+                "Fast  ·  ~60 tok/s on short replies, slows down on long ones",
+                "Aggressive cold-speed path. Snappy at first; throughput drops on long-context generation because fans stay on Apple's default curve.",
             ),
             (
                 "2",
-                "Fast  ·  ~60 tok/s on short replies, slows down on long ones",
-                "Aggressive cold-speed path. Snappy at first; throughput drops on long-context generation because fans stay on Apple's default curve.",
+                "Stable  ·  ~37 tok/s steady, no fan boost",
+                "Conservative MTP path. Slower but the speed barely changes between a 50-token reply and a 5000-token reply. Best for long answers.",
             ),
             (
                 "3",
@@ -387,7 +388,7 @@ def screen_mode() -> tuple[str, bool]:
         ],
     )
     choice = _prompt_choice("Select", ["1", "2", "3"], default="1")
-    if choice == "2":
+    if choice == "1":
         return "performance-cold", False
     if choice == "3":
         return "performance-cold", True

@@ -13,8 +13,8 @@ license-files = ["LICENSE"]
 authors = [{name = "Youssof A.", email = "business@youssofal.com"}]
 dependencies = [
   "huggingface-hub>=0.36",
-  "mlx>=0.31,<0.32",
-  "mlx-lm>=0.31,<0.32",
+  "mlx>=0.31,<0.32; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "mlx-lm>=0.31,<0.32; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "numpy>=2",
   "safetensors>=0.6",
 ]

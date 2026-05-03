@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from mtplx.artifacts import _hf_repo_id_from_ref
+from mtplx.profiles import DEFAULT_PROFILE_NAME
 
 
 DEFAULT_MODEL_CACHE = Path("~/.mtplx/models").expanduser()
+REQUIRED_MTPLX_MODEL_FILES = (
+    "config.json",
+    "tokenizer.json",
+    "model.safetensors.index.json",
+    "mtp.safetensors",
+    "mtplx_runtime.json",
+)
 
 
 def model_cache_dir(value: str | Path | None = None) -> Path:
@@ -50,6 +60,27 @@ def resolve_model_path(model_ref: str, *, cache_dir: str | Path | None = None) -
     )
 
 
+def validate_mtplx_model_files(path: Path) -> dict[str, Any]:
+    missing = [name for name in REQUIRED_MTPLX_MODEL_FILES if not (path / name).exists()]
+    contract: dict[str, Any] | None = None
+    contract_error: str | None = None
+    contract_path = path / "mtplx_runtime.json"
+    if contract_path.exists():
+        try:
+            loaded = json.loads(contract_path.read_text(encoding="utf-8"))
+            contract = loaded if isinstance(loaded, dict) else None
+        except Exception as exc:
+            contract_error = str(exc)
+    return {
+        "ok": not missing and contract_error is None,
+        "required_files": list(REQUIRED_MTPLX_MODEL_FILES),
+        "missing_files": missing,
+        "contract_present": contract_path.exists(),
+        "contract_arch_id": contract.get("arch_id") if isinstance(contract, dict) else None,
+        "contract_error": contract_error,
+    }
+
+
 def directory_size_bytes(path: Path) -> int:
     total = 0
     if not path.exists():
@@ -70,6 +101,7 @@ class CachedModel:
     size_bytes: int
     has_runtime_contract: bool
     has_config: bool
+    validation: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +111,9 @@ class CachedModel:
             "size_gb": round(self.size_bytes / 1_000_000_000, 3),
             "has_runtime_contract": self.has_runtime_contract,
             "has_config": self.has_config,
+            "validation": self.validation,
+            "recommended_profile": DEFAULT_PROFILE_NAME if self.validation.get("ok") else None,
+            "delete_command": f"mtplx remove {self.repo_id}",
         }
 
 
@@ -88,7 +123,7 @@ def list_cached_models(*, cache_dir: str | Path | None = None) -> list[CachedMod
         return []
     rows: list[CachedModel] = []
     for child in sorted(root.iterdir()):
-        if not child.is_dir():
+        if not child.is_dir() or child.name.startswith("."):
             continue
         repo_id = child.name.replace("--", "/")
         rows.append(
@@ -98,6 +133,7 @@ def list_cached_models(*, cache_dir: str | Path | None = None) -> list[CachedMod
                 size_bytes=directory_size_bytes(child),
                 has_runtime_contract=(child / "mtplx_runtime.json").exists(),
                 has_config=(child / "config.json").exists(),
+                validation=validate_mtplx_model_files(child),
             )
         )
     return rows
@@ -115,28 +151,55 @@ def pull_model(
     root = model_cache_dir(cache_dir)
     root.mkdir(parents=True, exist_ok=True)
     destination = cached_model_path(repo_id, cache_dir=root)
-    destination.mkdir(parents=True, exist_ok=True)
 
     try:
         from huggingface_hub import snapshot_download
     except Exception as exc:
         raise RuntimeError(f"huggingface_hub is required for mtplx pull: {exc}") from exc
 
-    path = snapshot_download(
-        repo_id=repo_id,
-        repo_type="model",
-        revision=revision,
-        local_dir=str(destination),
-    )
-    resolved = Path(path)
+    if destination.exists():
+        resolved = destination
+        reused_existing = True
+        validation = validate_mtplx_model_files(resolved)
+        if repo_id.lower().startswith("youssofal/qwen3.6-27b-mtplx") and not validation["ok"]:
+            raise RuntimeError(
+                "cached MTPLX model is incomplete: "
+                + ", ".join(validation["missing_files"] or [str(validation.get("contract_error"))])
+            )
+    else:
+        reused_existing = False
+        tmp_parent = root / ".tmp"
+        tmp_parent.mkdir(parents=True, exist_ok=True)
+        tmp_dir = Path(tempfile.mkdtemp(prefix=safe_model_name(repo_id) + "-", dir=str(tmp_parent)))
+        try:
+            path = snapshot_download(
+                repo_id=repo_id,
+                repo_type="model",
+                revision=revision,
+                local_dir=str(tmp_dir),
+            )
+            resolved_tmp = Path(path)
+            validation = validate_mtplx_model_files(resolved_tmp)
+            if repo_id.lower().startswith("youssofal/qwen3.6-27b-mtplx") and not validation["ok"]:
+                raise RuntimeError(
+                    "downloaded MTPLX model is incomplete: "
+                    + ", ".join(validation["missing_files"] or [str(validation.get("contract_error"))])
+                )
+            resolved_tmp.replace(destination)
+            resolved = destination
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
     return {
         "repo_id": repo_id,
         "path": str(resolved),
         "cache_dir": str(root),
         "revision": revision,
+        "reused_existing": reused_existing,
         "size_bytes": directory_size_bytes(resolved),
         "has_runtime_contract": (resolved / "mtplx_runtime.json").exists(),
         "has_config": (resolved / "config.json").exists(),
+        "validation": validate_mtplx_model_files(resolved),
     }
 
 
@@ -167,10 +230,17 @@ def hf_cache_report(*, cache_dir: str | Path | None = None) -> dict[str, Any]:
             token_source = "huggingface_hub" if token_present else None
         except Exception:
             token_present = False
+    try:
+        usage = shutil.disk_usage(root if root.exists() else root.parent)
+        free_bytes: int | None = usage.free
+    except OSError:
+        free_bytes = None
     return {
         "cache_dir": str(root),
         "cache_exists": root.exists(),
         "cache_writable": os.access(root if root.exists() else root.parent, os.W_OK),
+        "disk_free_bytes": free_bytes,
+        "disk_free_gb": round(free_bytes / 1_000_000_000, 3) if free_bytes is not None else None,
         "cached_models": len(list_cached_models(cache_dir=root)),
         "token_present": token_present,
         "token_source": token_source,

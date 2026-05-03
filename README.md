@@ -36,7 +36,7 @@ bash install_preview_global.sh ./mtplx-0.1.0rc1-py3-none-any.whl
 mtplx quickstart       # interactive: pick model → mode → web/CLI, then chat
 ```
 
-That's it. The wizard handles model selection, runtime mode, and surface (browser chat at `127.0.0.1:8000` or terminal chat) on first run. On every subsequent run it asks "same as last time?" so you're one keypress from chatting.
+That's it. The wizard handles the default speed model (`Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed`), runtime mode, and surface (browser chat at `127.0.0.1:8000/` or terminal chat) on first run. On every subsequent run it asks "same as last time?" so you're one keypress from chatting.
 
 ---
 
@@ -49,8 +49,8 @@ That's it. The wizard handles model selection, runtime mode, and surface (browse
 - **In-browser chat UI** with auto-detected model context (256k for Qwen3.6), live tokens-per-second, markdown rendering, code-block copy buttons, a stop button, and a settings sidebar that persists per-machine.
 - **Interactive quickstart wizard.** Pick model, mode, and surface in three numbered prompts. Returning users get "same as last time?". No flag-soup required.
 - **Honest profile names that tell you what they do.**
-  - `Safe` — conservative MTP path, no fan changes, predictable on long replies.
-  - `Fast` — opt-in cold-speed path, snappy on short replies, decays on long contexts.
+  - `Fast` — default first-run path (`performance-cold`), snappy on short replies, decays on long contexts.
+  - `Stable` — conservative compatibility alias, no fan changes, predictable on long replies.
   - `Max` — Fast + ThermalForge fans pinned at 100%, sustained max throughput. Auto-installs ThermalForge with one prompt and one sudo password if you opt in.
 - **Crash-safe fan control.** When Max is on, MTPLX spawns a detached watchdog that restores fans to auto if the parent dies for any reason — including `kill -9` and "I closed the terminal". Verified live on hardware.
 - **Idle-aware Max mode.** Server tracks request activity; after 15 minutes of no chat, fans drop to auto, then ramp back up on the next message.
@@ -86,6 +86,7 @@ mtplx quickstart --fresh                    # re-run the wizard from scratch
 mtplx quickstart cli                        # terminal chat directly
 mtplx quickstart --max                      # browser chat with fan boost
 mtplx quickstart --model /path/to/model     # use a specific local or HF model
+mtplx pull Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed
 mtplx start --port 8000                     # API server only, no chat
 ```
 
@@ -141,8 +142,8 @@ Picked by the quickstart wizard, or set explicitly via `--profile`. Every mode p
 
 | Mode | Profile | Fan control | Cold | Sustained | Best for |
 |---|---|---|---|---|---|
-| **Safe** | `safe` | None (Apple defaults) | ~37 tok/s | ~37 tok/s, holds steady | Long answers, predictable speed |
-| **Fast** | `performance-cold` | None | ~60 tok/s | Decays on long contexts | Short replies, snappy chat |
+| **Fast** | `performance-cold` | None | ~60 tok/s | Decays on long contexts | Default first run, short replies, snappy chat |
+| **Stable** | `stable` / `safe` | None (Apple defaults) | ~37 tok/s | ~37 tok/s, holds steady | Long answers, predictable speed |
 | **Max** | `performance-cold` + `--max` | ThermalForge pinned to 100% | ~60 tok/s | ~60 tok/s, no decay | Sustained workloads, you don't mind fans |
 
 `Max` requires ThermalForge. `mtplx max --install` installs it from source into `~/.mtplx/bin/thermalforge`, sets up a passwordless sudoers rule scoped to that one binary, and verifies fans actually ramp before declaring success. One sudo prompt, end-to-end. Crash safety covers SIGINT, SIGTERM, SIGHUP, terminal close, and `kill -9` via a detached sidecar process.
@@ -162,7 +163,21 @@ mtplx inspect <model-path-or-hf-repo> --json
 | **Incompatible architecture** | MTP exists but not Qwen3-Next | Clear error, roadmap pointer |
 | **No MTP** | No MTP head detected | Clear error, no garbage runs |
 
-v0.1 ships verified Qwen3.6-27B (`mtplx/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP`). The compatibility registry already detects DeepSeek V3 / V3.2, GLM-4 MoE / MoE-Lite, MiMo, and MiniMax M2 — they currently report as "architecture-compatible, backend pending" and run when v0.2 lands those backends.
+v0.1 ships verified Qwen3.6-27B via `Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed`, with public served model id `mtplx-qwen36-27b-optimized-speed`. The compatibility registry already detects DeepSeek V3 / V3.2, GLM-4 MoE / MoE-Lite, MiMo, and MiniMax M2 — unsupported runtime families stay behind explicit compatibility gates rather than silently running.
+
+### Support matrix
+
+| Area | Preview support |
+|---|---|
+| Mac | Apple Silicon only (`arm64`) |
+| macOS | 14.0+; Sequoia is supported |
+| Python | native arm64 Python 3.10+ |
+| MLX | `python3 -m pip install mlx` in the same native environment |
+| Memory | dynamic preflight; warns below 48 GiB, fails when the selected model/profile estimate exceeds 80% of unified memory |
+| Storage | first download requires `max(model_size * 2.5, model_size + 20 GiB)` free on the model-cache filesystem |
+| Docker/Open WebUI | Docker Desktop current plus previous two macOS major releases |
+
+Run `mtplx doctor --summary`, `mtplx doctor --deep --json`, or `mtplx doctor --bundle` before filing a bug. Bundles are redacted by default under `~/.mtplx/reports/`.
 
 ---
 
@@ -175,10 +190,13 @@ mtplx doctor                # install + model + integration health
 mtplx inspect <model>       # four-tier compatibility report
 mtplx init                  # write ~/.mtplx/config.toml
 mtplx setup                 # download verified model, prepare cache
+mtplx pull                  # download the default HF model safely
+mtplx models                # cached models, validation, size, delete command
 mtplx run "..."             # one-shot ask
 mtplx chat                  # terminal chat
 mtplx start                 # OpenAI/Anthropic-compatible server
 mtplx connect openwebui     # paste settings for Open WebUI
+mtplx openwebui docker-command
 mtplx bench run --suite cold-long-code-192
 mtplx max --install         # install ThermalForge for Max mode
 mtplx max --status          # fan / thermal state

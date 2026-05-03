@@ -14,11 +14,12 @@ from typing import Mapping, MutableMapping
 
 ProfileName = str
 
-DEFAULT_PROFILE_NAME = "stable"
+DEFAULT_PROFILE_NAME = "performance-cold"
 PROFILE_CHOICES = ("stable", "performance-cold", "exact", "max-diagnostic")
 
-DEFAULT_MODEL_ID = "models/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP"
-DEFAULT_HF_MODEL_ID = "mtplx/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP"
+DEFAULT_HF_MODEL_ID = "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed"
+DEFAULT_MODEL_ID = DEFAULT_HF_MODEL_ID
+DEFAULT_PUBLIC_MODEL_ID = "mtplx-qwen36-27b-optimized-speed"
 NATIVE_MTP_60_MLX_FORK_COMMIT = "2377a99f"
 NATIVE_MTP_60_MLX_FORK_FRAGMENT = "mlx-mtplx-0.31.2-qmm"
 
@@ -134,8 +135,8 @@ STABLE_PROFILE = RuntimeProfile(
     name="stable",
     runtime_profile="long_response_exact_staged",
     summary=(
-        "Default no-fan profile selected for predictable preview behavior; "
-        "it is honest about the current sustained-throughput gap."
+        "Conservative no-fan profile kept as the compatibility alias; it is "
+        "honest about the current sustained-throughput gap."
     ),
     env=_merge_env(EXACT_PAGED_ATTENTION_ENV, LONG_RESPONSE_STAGED_ENV),
     benchmark_ids=(
@@ -152,8 +153,8 @@ PERFORMANCE_COLD_PROFILE = RuntimeProfile(
     name="performance-cold",
     runtime_profile="native_mtp_60_cold",
     summary=(
-        "Opt-in cold-throughput path; preserves the 60+ tok/s long-code-192 "
-        "result and may decay on long-context generation."
+        "Default first-run cold-throughput path; preserves the fast coding "
+        "demo path and may decay on long-context generation."
     ),
     env=_items(NATIVE_MTP_60_FAST_PATH_ENV),
     benchmark_ids=(
@@ -202,7 +203,7 @@ PROFILES: dict[ProfileName, RuntimeProfile] = {
 }
 
 PROFILE_ALIASES = {
-    "default": "stable",
+    "default": "performance-cold",
     "safe": "stable",
     "native-mtp-60": "performance-cold",
     "native_mtp_60": "performance-cold",

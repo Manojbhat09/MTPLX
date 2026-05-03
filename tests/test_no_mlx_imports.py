@@ -94,6 +94,13 @@ def test_doctor_json_reports_missing_mlx_without_traceback(tmp_path: Path) -> No
     assert "blocked mlx_lm" in mlx_info["mlx_lm_error"]
     assert "huggingface" in payload
     assert "cache_dir" in payload["huggingface"]
+    assert payload["diagnostics"]["support_matrix"]["supported"]["default_model"] == (
+        "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed"
+    )
+    check_ids = {check["id"] for check in payload["diagnostics"]["checks"]}
+    assert "resource.memory" in check_ids
+    assert "resource.model_cache_disk" in check_ids
+    assert "model.default_repo" in check_ids
 
 
 def test_inspect_local_non_mtp_model_without_mlx(tmp_path: Path) -> None:
@@ -164,7 +171,7 @@ def test_run_reports_uncached_hf_model_without_importing_mlx(tmp_path: Path) -> 
         ],
     )
 
-    assert proc.returncode == 1, proc.stderr
+    assert proc.returncode == 6, proc.stderr
     assert "Traceback" not in proc.stderr
     payload = json.loads(proc.stdout)
     assert payload["error"] == "model is not available locally"
@@ -187,7 +194,7 @@ def test_run_uses_config_model_without_importing_mlx(tmp_path: Path) -> None:
         env_extra={"MTPLX_CONFIG": str(config)},
     )
 
-    assert proc.returncode == 1, proc.stderr
+    assert proc.returncode == 6, proc.stderr
     assert "Traceback" not in proc.stderr
     payload = json.loads(proc.stdout)
     assert payload["model"] == "mtplx/example"
@@ -218,9 +225,9 @@ def test_init_dry_run_without_mlx_does_not_write_config(tmp_path: Path) -> None:
     assert payload["status"] == "ready_for_init"
     assert payload["dry_run"] is True
     assert payload["wrote_config"] is False
-    assert payload["model"].startswith("mtplx/")
+    assert payload["model"] == "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed"
     assert payload["model_dir"] == str(model_dir)
-    assert payload["profile"]["name"] == "stable"
+    assert payload["profile"]["name"] == "performance-cold"
     assert payload["hardware"]["system"]
     assert payload["commands"]["pull"].startswith("mtplx pull ")
     assert not config.exists()
@@ -267,7 +274,7 @@ def test_profiles_without_mlx(tmp_path: Path) -> None:
 
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
-    assert payload["default"] == "stable"
+    assert payload["default"] == "performance-cold"
     assert [profile["name"] for profile in payload["profiles"]] == [
         "stable",
         "performance-cold",

@@ -15,6 +15,7 @@ from .profiles import (
     DEFAULT_HF_MODEL_ID,
     DEFAULT_MODEL_ID,
     DEFAULT_PROFILE_NAME,
+    DEFAULT_PUBLIC_MODEL_ID,
     PROFILE_CHOICES,
     get_profile,
     list_profiles,
@@ -69,6 +70,7 @@ PUBLIC_COMMANDS = (
     ("status", "Check install, model, and integration health"),
     ("inspect", "Check whether a model is MTPLX-compatible"),
     ("models", "List models in the local MTPLX cache"),
+    ("report", "Create a redacted support bundle"),
 )
 
 ADVANCED_COMMANDS = {
@@ -277,8 +279,9 @@ def _format_verbose_help() -> str:
   mtplx quickstart --download       Pull the verified model from Hugging Face
   mtplx start --port 8000           Run the OpenAI/Anthropic server only
   mtplx connect openwebui           Print Open WebUI integration settings
+  mtplx report                      Create a redacted support bundle
   mtplx ask "Write a tiny FastAPI app"
-  mtplx inspect mtplx/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP
+  mtplx inspect Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed
 
 {_heading("Help subtopics")}
 
@@ -559,6 +562,12 @@ def cmd_debug_public(args: argparse.Namespace) -> int:
     return handler(args)
 
 
+def cmd_openwebui_public(args: argparse.Namespace) -> int:
+    from .commands.public import cmd_openwebui_public as handler
+
+    return handler(args)
+
+
 def cmd_metrics_public(args: argparse.Namespace) -> int:
     from .commands.public import cmd_metrics_public as handler
 
@@ -630,6 +639,7 @@ def _cmd_inspect_model(args: argparse.Namespace) -> int:
 def _cmd_init(args: argparse.Namespace) -> int:
     from .hf_loader import model_cache_dir, pull_model
     from .thermal import detect_thermal_control
+    from .diagnostics import host_report, required_download_free_bytes, estimate_runtime_memory_bytes
 
     config_path = Path(args.config).expanduser()
     model_dir = model_cache_dir(args.model_dir)
@@ -643,6 +653,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "is_macos": platform.system() == "Darwin",
         "is_apple_silicon": platform.system() == "Darwin" and platform.machine() == "arm64",
     }
+    host = host_report(model_cache=model_dir)
     profile = get_profile(args.profile)
     commands = {
         "doctor": "mtplx doctor --json",
@@ -659,6 +670,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "model_dir": str(model_dir),
         "profile": profile.to_dict(),
         "hardware": hardware,
+        "host": host,
+        "resources": {
+            "estimated_runtime_memory_bytes": estimate_runtime_memory_bytes(profile=profile.name),
+            "required_download_free_bytes": required_download_free_bytes(),
+        },
         "thermal_control": {
             "requested": args.thermal_control,
             "detected": thermal_tool,
@@ -1455,7 +1471,7 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"mtplx {DISPLAY_VERSION} ({__version__})",
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    default_model = str(DEFAULT_RUNTIME_MODEL_DIR)
+    default_model = DEFAULT_HF_MODEL_ID
 
     help_p = sub.add_parser("help", help=argparse.SUPPRESS)
     help_p.add_argument("topic", nargs="?")
@@ -1511,7 +1527,7 @@ def build_parser() -> argparse.ArgumentParser:
     quickstart_p.add_argument("--no-stats", action="store_false", dest="show_stats", default=True, help="Hide speed stats after responses")
     quickstart_p.add_argument("--host", default="127.0.0.1", help="Open WebUI server host for `mtplx quickstart openwebui`")
     quickstart_p.add_argument("--port", type=int, default=8000, help="Open WebUI server port for `mtplx quickstart openwebui`")
-    quickstart_p.add_argument("--model-id", default="mtplx-qwen36-27b-native-mtp", help="Model id to select in Open WebUI")
+    quickstart_p.add_argument("--model-id", default=DEFAULT_PUBLIC_MODEL_ID, help="Model id to select in Open WebUI")
     quickstart_p.add_argument("--api-key", help="Optional API key for non-localhost Open WebUI serving")
     quickstart_p.add_argument("--warmup-tokens", type=int, default=16, help="Warmup tokens for Open WebUI server startup")
     quickstart_p.add_argument("--stream-interval", type=int, default=1, help="Streaming chunk size for Open WebUI server")
@@ -1554,6 +1570,7 @@ def build_parser() -> argparse.ArgumentParser:
     status_p.add_argument("--model-cache")
     status_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     status_p.add_argument("--deep", action="store_true", help="Include launchers, config, staging, release, and integration checks")
+    status_p.add_argument("--summary", action="store_true", help="Print a compact check summary")
     status_p.set_defaults(func=cmd_doctor)
 
     ask_p = sub.add_parser("ask", help="Ask the verified local MTPLX model one question")
@@ -1637,12 +1654,26 @@ def build_parser() -> argparse.ArgumentParser:
     connect_p.add_argument("integration", nargs="?", choices=["openwebui", "claude-code"])
     connect_p.add_argument("--host", default="127.0.0.1")
     connect_p.add_argument("--port", type=int, default=8000)
-    connect_p.add_argument("--model-id", default="mtplx-qwen36-27b-native-mtp")
+    connect_p.add_argument("--model-id", default=DEFAULT_PUBLIC_MODEL_ID)
     connect_p.add_argument("--api-key-env", default="MTPLX_AUTH")
+    connect_p.add_argument("--docker", action="store_true", help="Include the Dockerized Open WebUI host.docker.internal command")
+    connect_p.add_argument("--webui-port", type=int, default=3000)
+    connect_p.add_argument("--single-user", action="store_true", help="Emit WEBUI_AUTH=False for a new single-user Open WebUI data volume")
+    connect_p.add_argument("--api-key", default="mtplx-local", help="OpenAI-compatible API key value for generated Docker command")
     connect_p.add_argument("--smoke", action="store_true")
     connect_p.add_argument("--timeout", type=float, default=5.0)
     connect_p.add_argument("--json", action="store_true")
     connect_p.set_defaults(func=_cmd_connect)
+
+    openwebui_p = sub.add_parser("openwebui", help="Open WebUI integration helpers")
+    openwebui_sub = openwebui_p.add_subparsers(dest="openwebui_action", required=True)
+    openwebui_docker_p = openwebui_sub.add_parser("docker-command", help="Print the production Open WebUI Docker command")
+    openwebui_docker_p.add_argument("--mtplx-port", type=int, default=8000)
+    openwebui_docker_p.add_argument("--webui-port", type=int, default=3000)
+    openwebui_docker_p.add_argument("--single-user", action="store_true", help="Add WEBUI_AUTH=False for a fresh single-user volume")
+    openwebui_docker_p.add_argument("--api-key", default="mtplx-local")
+    openwebui_docker_p.add_argument("--json", action="store_true")
+    openwebui_docker_p.set_defaults(func=cmd_openwebui_public)
 
     models_p = sub.add_parser("models", help="List locally cached MTPLX models")
     models_p.add_argument("--cache-dir")
@@ -1660,7 +1691,23 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_p.add_argument("--model-cache")
     doctor_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     doctor_p.add_argument("--deep", action="store_true", help="Include launchers, config, staging, release, and integration checks")
+    doctor_p.add_argument("--summary", action="store_true", help="Print a compact check summary")
+    doctor_p.add_argument("--bundle", action="store_true", help="Write a redacted doctor bundle under ~/.mtplx/reports")
+    doctor_p.add_argument("--output-dir", help="Directory for --bundle output")
+    doctor_p.add_argument("--include-paths", action="store_true", help="Keep local paths in --bundle output")
     doctor_p.set_defaults(func=cmd_doctor)
+
+    report_p = sub.add_parser("report", help="Create a redacted MTPLX support bundle")
+    report_p.add_argument("--project-root", default=".")
+    report_p.add_argument("--smc-path", default=os.environ.get("MTPLX_SMC_PATH") or shutil.which("smc") or "")
+    report_p.add_argument("--sovereign-path", default=os.environ.get("MTPLX_SOVEREIGN_PATH") or shutil.which("sovereign") or "")
+    report_p.add_argument("--model-cache")
+    report_p.add_argument("--output-dir", help="Directory for the report bundle")
+    report_p.add_argument("--include-paths", action="store_true", help="Keep local paths in the report")
+    report_p.add_argument("--deep", action="store_true", default=True, help="Include deep integration checks")
+    report_p.add_argument("--summary", action="store_true", help="Print compact check summary instead of JSON")
+    report_p.add_argument("--json", action="store_true", default=True, help="Emit machine-readable JSON")
+    report_p.set_defaults(func=cmd_doctor, bundle=True)
 
     inspect_public_p = sub.add_parser("inspect", help="Inspect a model and auto-check MTP support")
     inspect_public_p.add_argument(
@@ -1698,7 +1745,12 @@ def build_parser() -> argparse.ArgumentParser:
     profiles_p.set_defaults(func=_cmd_profiles)
 
     pull_p = sub.add_parser("pull", help="Download a Hugging Face model into the MTPLX cache")
-    pull_p.add_argument("model", help="Hugging Face repo id or URL")
+    pull_p.add_argument(
+        "model",
+        nargs="?",
+        default=DEFAULT_HF_MODEL_ID,
+        help="Hugging Face repo id or URL. Defaults to the preview speed model.",
+    )
     pull_p.add_argument("--cache-dir")
     pull_p.add_argument("--revision")
     pull_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
@@ -1862,7 +1914,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         choices=(*PROFILE_CHOICES, "native-mtp-60"),
         help=(
-            "Runtime profile for product benchmark actions. Defaults to stable; "
+            "Runtime profile for product benchmark actions. Defaults to performance-cold; "
             "native-mtp-60 is a legacy alias for performance-cold."
         ),
     )
@@ -1910,7 +1962,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench_p.add_argument("--exactness-partition-size", type=int, default=512)
     bench_p.add_argument("--models", nargs="+")
     bench_p.add_argument("--record-champion", action="store_true")
-    bench_p.add_argument("--champion", default="models/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP")
+    bench_p.add_argument("--champion", default=DEFAULT_HF_MODEL_ID)
     bench_p.add_argument("--references", nargs="+", default=["stock_mlx_lm", "llama_cpp"])
     bench_p.add_argument("--url", default="http://127.0.0.1:8000")
     bench_p.add_argument("--port", type=int, default=8041)
@@ -2111,8 +2163,12 @@ def build_parser() -> argparse.ArgumentParser:
         integration_p = integrate_sub.add_parser(integration_name)
         integration_p.add_argument("--host", default="127.0.0.1")
         integration_p.add_argument("--port", type=int, default=8000)
-        integration_p.add_argument("--model-id", default="mtplx-qwen36-27b-native-mtp")
+        integration_p.add_argument("--model-id", default=DEFAULT_PUBLIC_MODEL_ID)
         integration_p.add_argument("--api-key-env", default="MTPLX_AUTH")
+        integration_p.add_argument("--docker", action="store_true", help="Include Dockerized Open WebUI command")
+        integration_p.add_argument("--webui-port", type=int, default=3000)
+        integration_p.add_argument("--single-user", action="store_true")
+        integration_p.add_argument("--api-key", default="mtplx-local")
         integration_p.add_argument("--smoke", action="store_true")
         integration_p.add_argument("--timeout", type=float, default=5.0)
         integration_p.add_argument("--json", action="store_true")
@@ -2138,7 +2194,7 @@ def build_parser() -> argparse.ArgumentParser:
     publish_check_p = model_sub.add_parser("publish-check", help="Validate HF staging readiness without upload")
     publish_check_p.add_argument(
         "--staging-dir",
-        default="hf-staging/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP",
+        default="hf-staging/Qwen3.6-27B-MTPLX-Optimized-Speed",
     )
     publish_check_p.add_argument("--repo-id")
     publish_check_p.set_defaults(func=cmd_model_public)
@@ -2716,8 +2772,41 @@ def main(argv: list[str] | None = None) -> int:
     args._cli_flags = _explicit_cli_flags(raw_args)
     from .config import apply_user_config
 
-    apply_user_config(args)
-    return int(args.func(args))
+    try:
+        apply_user_config(args)
+        return int(args.func(args))
+    except ModuleNotFoundError as exc:
+        if str(getattr(exc, "name", "")).startswith("mlx"):
+            from .errors import MissingMLXError
+
+            return _print_cli_error(MissingMLXError(detail=str(exc)), json_mode="--json" in raw_args)
+        raise
+    except Exception as exc:
+        from .errors import MTPLXError
+
+        if isinstance(exc, MTPLXError):
+            return _print_cli_error(exc, json_mode="--json" in raw_args)
+        raise
+
+
+def _print_cli_error(exc: Exception, *, json_mode: bool) -> int:
+    from .errors import MTPLXError
+
+    if isinstance(exc, MTPLXError):
+        payload = exc.to_dict()
+        code = exc.code
+    else:
+        payload = {"error": exc.__class__.__name__, "message": str(exc), "exit_code": 1}
+        code = 1
+    if json_mode:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"error: {payload['message']}", file=sys.stderr)
+        if payload.get("fix"):
+            print(f"fix: {payload['fix']}", file=sys.stderr)
+        if payload.get("command"):
+            print(f"try: {payload['command']}", file=sys.stderr)
+    return int(code)
 
 
 def _explicit_cli_flags(raw_args: list[str]) -> set[str]:

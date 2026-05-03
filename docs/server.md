@@ -30,6 +30,12 @@ For Open WebUI, set the OpenAI-compatible base URL to:
 http://127.0.0.1:8000/v1
 ```
 
+For Dockerized Open WebUI, the container must use the host gateway URL, not the host's loopback URL:
+
+```bash
+mtplx openwebui docker-command
+```
+
 For Anthropic Messages-compatible clients, point the client base URL at the
 same local server root:
 

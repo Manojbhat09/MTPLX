@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from mtplx.constants import DEFAULT_RUNTIME_MODEL_DIR
-from mtplx.profiles import DEFAULT_PROFILE_NAME, resolve_profile_name
+from mtplx.profiles import DEFAULT_HF_MODEL_ID, DEFAULT_PROFILE_NAME, resolve_profile_name
 
 
 DEFAULT_CONFIG_PATH = Path("~/.mtplx/config.toml").expanduser()
@@ -92,7 +92,7 @@ def apply_user_config(args: Any, *, config_path: str | Path | None = None) -> Us
 
 def _apply_model_default(args: Any, config: UserConfig) -> None:
     current = getattr(args, "model", None)
-    if config.model and current == str(DEFAULT_RUNTIME_MODEL_DIR):
+    if config.model and current in {str(DEFAULT_RUNTIME_MODEL_DIR), DEFAULT_HF_MODEL_ID}:
         args.model = config.model
 
 
@@ -102,6 +102,8 @@ def _apply_cache_default(args: Any, config: UserConfig) -> None:
 
 
 def _apply_profile_default(args: Any, config: UserConfig) -> None:
+    if "profile" in getattr(args, "_cli_flags", set()):
+        return
     current = getattr(args, "profile", None)
     if config.profile and current == DEFAULT_PROFILE_NAME:
         args.profile = config.profile

@@ -447,9 +447,45 @@ def test_restore_thermal_profile_verified_rejects_auto_with_max_target(monkeypat
 
     monkeypatch.setattr(thermal, "_run_probe", fake_run)
 
-    result = thermal.restore_thermal_profile_verified()
+    result = thermal.restore_thermal_profile_verified(settle_timeout_s=0)
 
     assert result["ok"] is False
+    thermal.detect_thermal_control.cache_clear()
+
+
+def test_restore_thermal_profile_verified_waits_for_auto_target_to_settle(monkeypatch):
+    thermal.detect_thermal_control.cache_clear()
+    monkeypatch.setattr(thermal, "_find_thermalforge", lambda: "/usr/local/bin/thermalforge")
+    snapshots = [
+        (
+            '{"fans": ['
+            '{"actual_rpm": 7400, "target_rpm": 7826, "max_rpm": 7826, "mode": "auto", "index": 0}'
+            ']}'
+        ),
+        (
+            '{"fans": ['
+            '{"actual_rpm": 2400, "target_rpm": 2318, "max_rpm": 7826, "mode": "auto", "index": 0}'
+            ']}'
+        ),
+    ]
+
+    def fake_run(command, *, timeout_s=None, cwd=None):
+        if command and command[-1] == "status":
+            stdout = snapshots.pop(0) if snapshots else (
+                '{"fans": ['
+                '{"actual_rpm": 2400, "target_rpm": 2318, "max_rpm": 7826, "mode": "auto", "index": 0}'
+                ']}'
+            )
+            return {"command": command, "returncode": 0, "ok": True, "stdout": stdout, "stderr": ""}
+        return {"command": command, "returncode": 0, "ok": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(thermal, "_run_probe", fake_run)
+    monkeypatch.setattr(thermal.time, "sleep", lambda _seconds: None)
+
+    result = thermal.restore_thermal_profile_verified(settle_timeout_s=2, poll_interval_s=0.1)
+
+    assert result["ok"] is True
+    assert result["message"] == "fan profile restored"
     thermal.detect_thermal_control.cache_clear()
 
 

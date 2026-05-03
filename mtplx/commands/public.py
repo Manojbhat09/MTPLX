@@ -52,10 +52,17 @@ from mtplx.backends.registry import (
     TIER_ARCH_COMPATIBLE_UNVERIFIED,
     architecture_catalog,
 )
-from mtplx.profiles import DEFAULT_HF_MODEL_ID, DEFAULT_MODEL_ID, DEFAULT_PROFILE_NAME, apply_profile_env, get_profile
+from mtplx.profiles import (
+    DEFAULT_HF_MODEL_ID,
+    DEFAULT_MODEL_ID,
+    DEFAULT_PROFILE_NAME,
+    DEFAULT_PUBLIC_MODEL_ID,
+    apply_profile_env,
+    get_profile,
+)
 
 
-DEFAULT_CHAMPION = "models/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP"
+DEFAULT_CHAMPION = DEFAULT_HF_MODEL_ID
 QUICKSTART_SPEED_MIN_TOKENS = 64
 QUICKSTART_SPEED_MAX_TOKENS = 192
 QUICKSTART_SPEED_PROMPT = (
@@ -303,7 +310,7 @@ def _deep_doctor_report(args: Any, base: dict[str, Any]) -> dict[str, Any]:
     from mtplx.config import load_user_config
 
     config = load_user_config()
-    default_model = config.model or DEFAULT_CHAMPION
+    default_model = config.model or DEFAULT_HF_MODEL_ID
     model_report: dict[str, Any]
     try:
         model_report = _compact_model_summary(inspect_model(default_model).to_dict())
@@ -314,7 +321,7 @@ def _deep_doctor_report(args: Any, base: dict[str, Any]) -> dict[str, Any]:
             "error": str(exc),
         }
     release_repo = repo_root()
-    staging_dir = Path("hf-staging/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP")
+    staging_dir = Path("hf-staging/Qwen3.6-27B-MTPLX-Optimized-Speed")
     manifest = staging_dir / "MTPLX_PUBLISH_MANIFEST.json"
     server_deps = {
         name: importlib.util.find_spec(name) is not None
@@ -359,6 +366,8 @@ def _deep_doctor_report(args: Any, base: dict[str, Any]) -> dict[str, Any]:
         },
         "product_policy": {
             "fanmax_counts_for_product_gate": False,
+            "default_hf_model_id": DEFAULT_HF_MODEL_ID,
+            "default_profile": DEFAULT_PROFILE_NAME,
             "safe_mode_drops_per_cycle_events": os.environ.get("MTPLX_DROP_EVENTS") == "1",
         },
     }
@@ -392,10 +401,17 @@ def _resolve_runtime_model_path(model: str, *, cache_dir: str | None = None) -> 
     try:
         return str(resolve_model_path(model, cache_dir=cache_dir)), None
     except Exception as exc:
+        from mtplx.hf_loader import repo_id_from_model_ref
+
+        repo_id = repo_id_from_model_ref(model)
+        command = f"mtplx pull {repo_id}" if repo_id else None
         return model, {
             "error": "model is not available locally",
             "model": model,
             "detail": str(exc),
+            "exit_code": 6,
+            "fix": "Download the model or choose an existing local model folder.",
+            "command": command,
         }
 
 
@@ -470,15 +486,21 @@ def cmd_doctor(args: Any) -> int:
     env = collect_environment(args.project_root).to_dict()
     from mtplx.hf_loader import hf_cache_report
     from mtplx.thermal import detect_thermal_control
+    from mtplx.diagnostics import build_diagnostics_payload, write_doctor_bundle
 
     smc_path_raw = getattr(args, "smc_path", None) or shutil.which("smc") or ""
     sovereign_path_raw = getattr(args, "sovereign_path", None) or shutil.which("sovereign") or ""
     smc_path = Path(smc_path_raw) if smc_path_raw else None
     sovereign_path = Path(sovereign_path_raw) if sovereign_path_raw else None
+    thermal_control = detect_thermal_control()
+    server_deps = {
+        name: importlib.util.find_spec(name) is not None
+        for name in ("fastapi", "uvicorn")
+    }
     report = {
         "environment": env,
         "huggingface": hf_cache_report(cache_dir=getattr(args, "model_cache", None)),
-        "thermal_control": detect_thermal_control(),
+        "thermal_control": thermal_control,
         "tools": {
             "python": sys.executable,
             "powermetrics": shutil.which("powermetrics"),
@@ -493,9 +515,36 @@ def cmd_doctor(args: Any) -> int:
             "benchmark_exactness_smoke_context": 2048,
         },
     }
+    report["diagnostics"] = build_diagnostics_payload(
+        model_cache=getattr(args, "model_cache", None),
+        deep=bool(getattr(args, "deep", False)),
+        mlx_info=env.get("mlx") if isinstance(env.get("mlx"), dict) else None,
+        thermal_control=thermal_control,
+        server_dependencies=server_deps if getattr(args, "deep", False) else None,
+    )
     if getattr(args, "deep", False):
         report = _deep_doctor_report(args, report)
-    _print(report)
+    if getattr(args, "bundle", False):
+        report["bundle"] = write_doctor_bundle(
+            report=report,
+            output_dir=getattr(args, "output_dir", None),
+            include_paths=bool(getattr(args, "include_paths", False)),
+        )
+    if getattr(args, "json", False):
+        _print(report)
+    elif getattr(args, "summary", False):
+        diagnostics = report["diagnostics"]
+        print(f"MTPLX doctor: {diagnostics['overall']}")
+        for check in diagnostics["checks"]:
+            marker = check["status"].upper()
+            print(f"{marker:4} {check['id']}: {check['observed']}")
+            if check.get("fix") and check["status"] != "pass":
+                print(f"     fix: {check['fix']}")
+        if report.get("bundle"):
+            print(f"bundle: {report['bundle']['bundle_dir']}")
+            print(f"zip: {report['bundle']['bundle_zip']}")
+    else:
+        _print(report)
     return 0
 
 
@@ -666,7 +715,7 @@ def _cmd_bench_run(args: Any) -> int:
     )
     if resolve_error is not None:
         _print(resolve_error)
-        return 1
+        return int(resolve_error.get("exit_code", 1))
     inspection, gate_exit = _model_gate(
         runtime_model,
         unsafe_force_unverified=bool(getattr(args, "unsafe_force_unverified", False)),
@@ -2395,8 +2444,57 @@ def _server_url(host: str, port: int) -> str:
     return f"http://{display_host}:{int(port)}"
 
 
+def _api_base_url(host: str, port: int) -> str:
+    return _server_url(host, port).rstrip("/") + "/v1"
+
+
 def _chat_url(host: str, port: int) -> str:
     return _server_url(host, port) + "/"
+
+
+def _openwebui_docker_api_base_url(port: int) -> str:
+    return f"http://host.docker.internal:{int(port)}/v1"
+
+
+def _openwebui_docker_command(
+    *,
+    mtplx_port: int,
+    webui_port: int = 3000,
+    single_user: bool = False,
+    api_key: str = "mtplx-local",
+) -> list[str]:
+    command = [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        "open-webui",
+        "--restart",
+        "unless-stopped",
+        "-p",
+        f"{int(webui_port)}:8080",
+        "--add-host=host.docker.internal:host-gateway",
+        "-e",
+        "ENABLE_OPENAI_API=True",
+        "-e",
+        f"OPENAI_API_BASE_URL={_openwebui_docker_api_base_url(mtplx_port)}",
+        "-e",
+        f"OPENAI_API_KEY={api_key}",
+    ]
+    if single_user:
+        command.extend(["-e", "WEBUI_AUTH=False"])
+    command.extend(
+        [
+            "-v",
+            "open-webui:/app/backend/data",
+            "ghcr.io/open-webui/open-webui:main",
+        ]
+    )
+    return command
+
+
+def _shell_join(command: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in command)
 
 
 def _open_browser_url(url: str) -> None:
@@ -2474,8 +2572,8 @@ def _print_serve_start_line(text: str = "") -> None:
 
 
 _PROFILE_SHORT_SUMMARIES = {
-    "stable": "default no-fan path",
-    "performance-cold": "cold-speed path",
+    "stable": "conservative no-fan path",
+    "performance-cold": "default cold-speed path",
     "exact": "QA-only exact paged verifier",
     "max-diagnostic": "fan-controlled diagnostic",
 }
@@ -2490,7 +2588,7 @@ def _print_serve_start_banner(args: Any) -> None:
     profile_name = getattr(args, "profile", None) or DEFAULT_PROFILE_NAME
     warmup_tokens = int(getattr(args, "warmup_tokens", 16) or 0)
     mode_label = "Fast MTP" if profile_name == "performance-cold" else profile_name
-    model_label = getattr(args, "model_id", None) or "mtplx-qwen36-27b-native-mtp"
+    model_label = getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
     runtime_model = getattr(args, "model", DEFAULT_RUNTIME_MODEL_DIR)
     api_url = f"{_server_url(host, port)}/v1"
     chat_url = _chat_url(host, port)
@@ -2540,11 +2638,11 @@ def cmd_serve_public(args: Any) -> int:
             base = _server_url(str(getattr(args, "host", "127.0.0.1")), int(getattr(args, "port", 8000)))
             health = _http_json(base + "/health", timeout=1.5)
             if health.get("ok"):
-                model_id = health.get("model") or getattr(args, "model_id", None) or "mtplx-qwen36-27b-native-mtp"
+                model_id = health.get("model") or getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
                 chat_url = _chat_url(str(getattr(args, "host", "127.0.0.1")), int(getattr(args, "port", 8000)))
                 _print_serve_start_line("MTPLX is already running.")
                 _print_serve_start_line(f"Chat URL: {chat_url}")
-                _print_serve_start_line(f"OpenAI API Base URL: {base}/v1")
+                _print_serve_start_line(f"OpenAI API Base URL: {_api_base_url(str(getattr(args, 'host', '127.0.0.1')), int(getattr(args, 'port', 8000)))}")
                 _print_serve_start_line(f"Model: {model_id}")
                 _print_serve_start_line("API key: leave blank for localhost")
                 _print_serve_start_line("Opening chat UI in your browser...")
@@ -2563,7 +2661,7 @@ def cmd_serve_public(args: Any) -> int:
     )
     if resolve_error is not None:
         _print(resolve_error)
-        return 1
+        return int(resolve_error.get("exit_code", 1))
     inspection, gate_exit = _model_gate(
         runtime_model,
         unsafe_force_unverified=bool(getattr(args, "unsafe_force_unverified", False)),
@@ -2625,7 +2723,7 @@ def cmd_serve_public(args: Any) -> int:
         "--warmup-tokens",
         str(getattr(args, "warmup_tokens", 16)),
         "--model-id",
-        str(getattr(args, "model_id", None) or "mtplx-qwen36-27b-native-mtp"),
+        str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID),
     ]
     if bool(getattr(args, "open_browser", False)):
         cmd.append("--open-browser")
@@ -2774,7 +2872,7 @@ def _generate_one_shot_public(args: Any, *, command: str) -> tuple[int, dict[str
         cache_dir=getattr(args, "cache_dir", None),
     )
     if resolve_error is not None:
-        return 1, resolve_error, []
+        return int(resolve_error.get("exit_code", 1)), resolve_error, []
     inspection, gate_exit = _model_gate(
         runtime_model,
         unsafe_force_unverified=bool(getattr(args, "unsafe_force_unverified", False)),
@@ -3280,18 +3378,15 @@ def _quickstart_stats_line(payload: dict[str, Any]) -> str:
         decode_tok_s, decode_elapsed_s = _quickstart_decode_timing(stats)
     verify_ms = stats.get("verify_ms_per_call")
     verify_text = f"{verify_ms:.1f} ms/verify" if isinstance(verify_ms, (int, float)) else "verify n/a"
-    prefer_stream_tps = stream_tok_s is not None and generated_tokens >= 8
-    if prefer_stream_tps:
-        speed_text = f"{stream_tok_s:.2f} tok/s"
-        if decode_tok_s is not None and abs(stream_tok_s - decode_tok_s) >= 0.1:
-            speed_text = f"{speed_text} | decode={decode_tok_s:.2f}"
-        if total_tok_s is not None and abs(stream_tok_s - total_tok_s) >= 0.1:
-            speed_text = f"{speed_text} | total={total_tok_s:.2f}"
-    elif decode_tok_s is not None:
+    if decode_tok_s is not None:
         speed_text = f"{decode_tok_s:.2f} tok/s"
         if stream_tok_s is not None and abs(decode_tok_s - stream_tok_s) >= 0.1:
-            speed_text = f"{speed_text} | stream={stream_tok_s:.2f}"
+            speed_text = f"{speed_text} | live_window={stream_tok_s:.2f}"
         if total_tok_s is not None and abs(decode_tok_s - total_tok_s) >= 0.1:
+            speed_text = f"{speed_text} | total={total_tok_s:.2f}"
+    elif stream_tok_s is not None and generated_tokens >= 8:
+        speed_text = f"{stream_tok_s:.2f} live-window tok/s"
+        if total_tok_s is not None and abs(stream_tok_s - total_tok_s) >= 0.1:
             speed_text = f"{speed_text} | total={total_tok_s:.2f}"
     elif total_tok_s is not None:
         speed_text = f"{total_tok_s:.2f} total tok/s"
@@ -3452,12 +3547,15 @@ def _quickstart_generate(
 def _quickstart_openwebui_payload(args: Any) -> dict[str, Any]:
     host = str(getattr(args, "host", "127.0.0.1"))
     port = int(getattr(args, "port", 8000))
-    model_id = str(getattr(args, "model_id", None) or "mtplx-qwen36-27b-native-mtp")
-    base = f"http://{_connect_host_for_bind(host)}:{port}"
+    model_id = str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID)
+    server_url = f"http://{_connect_host_for_bind(host)}:{port}"
+    api_base_url = server_url + "/v1"
     return {
         "integration": "openwebui",
-        "base_url": base,
-        "chat_url": base + "/",
+        "server_url": server_url,
+        "base_url": api_base_url,
+        "api_base_url": api_base_url,
+        "chat_url": server_url + "/",
         "model_id": model_id,
         "api_key": "not required for localhost",
         "server_command": (
@@ -3466,8 +3564,8 @@ def _quickstart_openwebui_payload(args: Any) -> dict[str, Any]:
             "--no-stats-footer --open-browser"
         ),
         "openwebui_steps": [
-            f"Open chat UI: {base}/",
-            f"OpenAI-compatible API base URL: {base}/v1",
+            f"Open chat UI: {server_url}/",
+            f"OpenAI-compatible API base URL: {api_base_url}",
             f"Model: {model_id}",
         ],
     }
@@ -3489,7 +3587,7 @@ def _quickstart_run_openwebui(args: Any, *, runtime_model: str, inspection: dict
         model=runtime_model,
         cache_dir=getattr(args, "cache_dir", None),
         profile=getattr(args, "profile", None) or "performance-cold",
-        model_id=getattr(args, "model_id", None) or "mtplx-qwen36-27b-native-mtp",
+        model_id=getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID,
         unsafe_force_unverified=bool(getattr(args, "unsafe_force_unverified", False)),
         yes=True,
         host=str(getattr(args, "host", "127.0.0.1")),
@@ -3932,33 +4030,52 @@ def cmd_metrics_public(args: Any) -> int:
 
 def cmd_integrate_public(args: Any) -> int:
     action = args.integration
-    base = f"http://{args.host}:{args.port}"
-    model_id = getattr(args, "model_id", None) or "mtplx-qwen36-27b-native-mtp"
+    server_url = f"http://{args.host}:{args.port}"
+    api_base_url = server_url.rstrip("/") + "/v1"
+    model_id = getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
     if action == "openwebui":
+        docker_command = _openwebui_docker_command(
+            mtplx_port=int(args.port),
+            webui_port=int(getattr(args, "webui_port", 3000) or 3000),
+            single_user=bool(getattr(args, "single_user", False)),
+            api_key=str(getattr(args, "api_key", None) or "mtplx-local"),
+        )
         payload = {
             "integration": "openwebui",
-            "base_url": base,
+            "server_url": server_url,
+            "base_url": api_base_url,
+            "api_base_url": api_base_url,
+            "docker_api_base_url": _openwebui_docker_api_base_url(int(args.port)),
             "model_id": model_id,
             "server_command": (
                 f"mtplx serve --host {args.host} --port {args.port} "
                 "--no-stats-footer"
+            ),
+            "docker_command": _shell_join(docker_command),
+            "docker_command_argv": docker_command,
+            "single_user_warning": (
+                "WEBUI_AUTH=False creates a single-user Open WebUI instance and "
+                "cannot be safely toggled on an existing shared data volume."
+                if getattr(args, "single_user", False)
+                else None
             ),
             "api_key": {
                 "required_for_localhost": False,
                 "env": args.api_key_env,
             },
             "notes": [
-                "Use the base URL as the OpenAI-compatible endpoint.",
+                "Use the /v1 base URL as the OpenAI-compatible endpoint.",
+                "Dockerized Open WebUI must use host.docker.internal, not 127.0.0.1, to reach MTPLX on the Mac host.",
                 "Keep --no-stats-footer enabled for UI clients.",
             ],
         }
     elif action == "claude-code":
         payload = {
             "integration": "claude-code",
-            "base_url": base,
+            "base_url": server_url,
             "model_id": model_id,
             "environment": {
-                "ANTHROPIC_BASE_URL": base,
+                "ANTHROPIC_BASE_URL": server_url,
                 "ANTHROPIC_API_KEY": f"${args.api_key_env}",
             },
             "server_command": (
@@ -3966,22 +4083,56 @@ def cmd_integrate_public(args: Any) -> int:
                 "--no-stats-footer"
             ),
             "smoke": {
-                "root_probe": f"curl {base}/",
-                "messages": f"curl {base}/v1/messages",
+                "root_probe": f"curl {server_url}/",
+                "messages": f"curl {server_url}/v1/messages",
             },
         }
     else:
         raise SystemExit(f"unknown integration: {action}")
     if getattr(args, "smoke", False):
         payload["smoke_result"] = {
-            "health": _http_json(base + "/health", timeout=float(args.timeout)),
-            "models": _http_json(base + "/v1/models", timeout=float(args.timeout)),
+            "health": _http_json(server_url + "/health", timeout=float(args.timeout)),
+            "models": _http_json(api_base_url + "/models", timeout=float(args.timeout)),
         }
     if getattr(args, "json", False):
         _print(payload)
     else:
         for key, value in payload.items():
             print(f"{key}: {value}")
+    return 0
+
+
+def cmd_openwebui_public(args: Any) -> int:
+    if args.openwebui_action != "docker-command":
+        raise SystemExit(f"unknown openwebui action: {args.openwebui_action}")
+    command = _openwebui_docker_command(
+        mtplx_port=int(getattr(args, "mtplx_port", 8000)),
+        webui_port=int(getattr(args, "webui_port", 3000)),
+        single_user=bool(getattr(args, "single_user", False)),
+        api_key=str(getattr(args, "api_key", None) or "mtplx-local"),
+    )
+    payload = {
+        "action": "openwebui docker-command",
+        "docker_command": _shell_join(command),
+        "docker_command_argv": command,
+        "openwebui_url": f"http://127.0.0.1:{int(getattr(args, 'webui_port', 3000))}",
+        "mtplx_api_base_url_for_container": _openwebui_docker_api_base_url(
+            int(getattr(args, "mtplx_port", 8000))
+        ),
+        "single_user_warning": (
+            "WEBUI_AUTH=False creates a single-user Open WebUI instance and cannot be safely toggled on an existing shared data volume."
+            if getattr(args, "single_user", False)
+            else None
+        ),
+    }
+    if getattr(args, "json", False):
+        _print(payload)
+    else:
+        print(payload["docker_command"])
+        print(f"Open WebUI: {payload['openwebui_url']}")
+        print(f"MTPLX API from container: {payload['mtplx_api_base_url_for_container']}")
+        if payload["single_user_warning"]:
+            print(f"warning: {payload['single_user_warning']}")
     return 0
 
 

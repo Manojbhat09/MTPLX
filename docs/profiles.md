@@ -2,8 +2,8 @@
 
 | Profile | Purpose |
 |---|---|
-| `stable` | Default profile. Chosen for predictable first-run behavior. |
-| `performance-cold` | Opt-in cold throughput path. Preserves the verified 60+ tok/s short/cold result. |
+| `performance-cold` | Default first-run profile. Preserves the verified 60 tok/s class for short/cold replies without fan control. |
+| `stable` | Public conservative alias for predictable long replies and compatibility fallback. |
 | `exact` | QA and release exactness checks. |
 | `max-diagnostic` | Fan-controlled diagnostics only. Not a product headline mode. |
 

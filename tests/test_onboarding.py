@@ -26,7 +26,7 @@ def test_state_round_trip(tmp_path, monkeypatch):
 
     onboarding.save_state(
         {
-            "model": "mtplx/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP",
+            "model": "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed",
             "profile": "performance-cold",
             "max": True,
             "target": "openwebui",
@@ -34,7 +34,7 @@ def test_state_round_trip(tmp_path, monkeypatch):
     )
     loaded = onboarding.load_state()
     assert loaded is not None
-    assert loaded["model"] == "mtplx/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP"
+    assert loaded["model"] == "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed"
     assert loaded["profile"] == "performance-cold"
     assert loaded["max"] is True
     assert loaded["target"] == "openwebui"
@@ -66,7 +66,7 @@ def test_interface_label_covers_all_targets():
 
 def test_run_onboarding_screens_with_stubbed_input(monkeypatch, capsys):
     """Walk all three screens with stubbed ``input`` answers."""
-    answers = iter(["1", "2", "1"])
+    answers = iter(["1", "1", "1"])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
     state = onboarding.run_onboarding_screens()
     assert state["model"] == onboarding.DEFAULT_HF_MODEL
@@ -271,7 +271,7 @@ def test_run_quickstart_flow_returning_user_says_no(tmp_path, monkeypatch):
             "target": "terminal",
         }
     )
-    answers = iter(["n", "1", "2", "1"])  # 'n' → walk onboarding again
+    answers = iter(["n", "1", "1", "1"])  # 'n' → walk onboarding again
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
     state = onboarding.run_quickstart_flow(fresh=False)
     assert state is not None
