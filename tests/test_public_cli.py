@@ -34,6 +34,27 @@ def test_empty_cli_shows_friendly_consumer_help(capsys):
     assert "capture-commit-equivalence" not in captured
 
 
+def test_shell_banner_env_suppresses_compact_help_ascii(monkeypatch, capsys):
+    monkeypatch.setenv("MTPLX_SHELL_BANNER_SHOWN", "1")
+
+    code = main([])
+
+    captured = capsys.readouterr().out
+    assert code == 0
+    assert "███╗" not in captured
+    assert "Commands" in captured
+    assert "mtplx start" in captured
+
+
+def test_render_banner_respects_shell_banner_env(monkeypatch, capsys):
+    from mtplx.ui.banner import render_banner
+
+    monkeypatch.setenv("MTPLX_SHELL_BANNER_SHOWN", "1")
+    render_banner(no_color=True)
+
+    assert capsys.readouterr().out == ""
+
+
 def test_top_level_help_is_friendly(capsys):
     code = main(["--help"])
 

@@ -46,6 +46,8 @@ fi
 venv="${MTPLX_PREVIEW_VENV:-$HOME/.mtplx/preview-venv}"
 user_bin="${MTPLX_USER_BIN:-$HOME/.local/bin}"
 launcher="$user_bin/mtplx"
+shell_dir="$HOME/.mtplx/shell"
+shell_hook="$shell_dir/once-banner.zsh"
 install_target="${wheel}[server]"
 python_bin="${MTPLX_PYTHON:-}"
 
@@ -81,6 +83,54 @@ exec "$venv/bin/mtplx" "\$@"
 EOF
 chmod 755 "$launcher"
 
+mkdir -p "$shell_dir"
+cat > "$shell_hook" <<'EOF'
+# MTPLX once-per-terminal banner for interactive zsh sessions.
+# Sourced from ~/.zshrc by scripts/install_preview_global.sh.
+
+_mtplx_once_banner_print() {
+  printf '%s\n' \
+'  ███╗   ███╗ ████████╗ ██████╗  ██╗      ██╗  ██╗' \
+'  ████╗ ████║ ╚══██╔══╝ ██╔══██╗ ██║      ╚██╗██╔╝' \
+'  ██╔████╔██║    ██║    ██████╔╝ ██║       ╚███╔╝ ' \
+'  ██║╚██╔╝██║    ██║    ██╔═══╝  ██║       ██╔██╗ ' \
+'  ██║ ╚═╝ ██║    ██║    ██║      ███████╗ ██╔╝ ██╗' \
+'  ╚═╝     ╚═╝    ╚═╝    ╚═╝      ╚══════╝ ╚═╝  ╚═╝' \
+'' \
+'  Native MTP speculative decoding · Apple Silicon' \
+''
+}
+
+_mtplx_once_banner_preexec() {
+  emulate -L zsh
+  local cmd="${1:-}"
+  [[ -n "$cmd" ]] || return 0
+  [[ "${MTPLX_DISABLE_SHELL_BANNER:-0}" == "1" ]] && return 0
+  [[ "${MTPLX_SHELL_BANNER_SHOWN:-0}" == "1" ]] && return 0
+  local lower="${cmd:l}"
+  case "$cmd" in
+    *MTPLX_DISABLE_SHELL_BANNER=1*) return 0 ;;
+  esac
+  case "$lower" in
+    *mtplx*)
+      export MTPLX_SHELL_BANNER_SHOWN=1
+      _mtplx_once_banner_print
+      ;;
+  esac
+}
+
+if [[ -n "${ZSH_VERSION:-}" ]]; then
+  autoload -Uz add-zsh-hook 2>/dev/null || true
+  if (( $+functions[add-zsh-hook] )); then
+    add-zsh-hook -d preexec _mtplx_once_banner_preexec 2>/dev/null || true
+    add-zsh-hook preexec _mtplx_once_banner_preexec
+  elif [[ -z "${preexec_functions[(r)_mtplx_once_banner_preexec]:-}" ]]; then
+    preexec_functions+=(_mtplx_once_banner_preexec)
+  fi
+fi
+EOF
+chmod 644 "$shell_hook"
+
 homebrew_launcher_installed=0
 if [ "${MTPLX_SKIP_HOMEBREW_LAUNCHER:-0}" != "1" ] && [ -d /opt/homebrew/bin ] && [ -w /opt/homebrew/bin ]; then
   cp "$launcher" /opt/homebrew/bin/mtplx
@@ -103,11 +153,24 @@ for rcfile in "$HOME/.zprofile" "$HOME/.zshrc"; do
   fi
 done
 
+shell_snippet='
+# MTPLX once-per-terminal banner
+if [ -r "$HOME/.mtplx/shell/once-banner.zsh" ]; then
+  source "$HOME/.mtplx/shell/once-banner.zsh"
+fi
+'
+
+touch "$HOME/.zshrc"
+if ! grep -q 'MTPLX once-per-terminal banner' "$HOME/.zshrc"; then
+  printf '%s\n' "$shell_snippet" >> "$HOME/.zshrc"
+fi
+
 "$launcher" --version
 "$launcher" help >/dev/null
 
 echo "MTPLX preview CLI installed:"
 echo "  $launcher"
+echo "  $shell_hook"
 if [ "$homebrew_launcher_installed" -eq 1 ]; then
   echo "  /opt/homebrew/bin/mtplx"
 fi

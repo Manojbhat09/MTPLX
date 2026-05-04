@@ -147,6 +147,17 @@ def _ascii_banner() -> str:
     return "\n".join("  " + _paint(line, "1;36") for line in rows)
 
 
+def _shell_banner_already_shown() -> bool:
+    value = os.environ.get("MTPLX_SHELL_BANNER_SHOWN") or os.environ.get("MTPLX_NO_BANNER")
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _help_banner_prefix() -> str:
+    if _shell_banner_already_shown():
+        return ""
+    return f"{_ascii_banner()}\n\n"
+
+
 def _format_public_help() -> str:
     command_lines = "\n".join(
         f"  {_command_cell(name, 12)} {summary}" for name, summary in PUBLIC_COMMANDS
@@ -155,9 +166,7 @@ def _format_public_help() -> str:
     footer = _muted(
         "more: `mtplx help <command>` · `mtplx help advanced` · `mtplx --help` · `mtplx --version`"
     )
-    return f"""{_ascii_banner()}
-
-  {version_line}
+    return f"""{_help_banner_prefix()}  {version_line}
 
 {_heading("Commands")}
 {command_lines}
@@ -247,9 +256,7 @@ def _format_verbose_help() -> str:
     public_lines = "\n".join(
         f"  {_command_cell(name, 12)} {summary}" for name, summary in PUBLIC_COMMANDS
     )
-    return f"""{_ascii_banner()}
-
-  {_muted(f"v{DISPLAY_VERSION}  ·  Native MTP speculative decoding on Apple Silicon")}
+    return f"""{_help_banner_prefix()}  {_muted(f"v{DISPLAY_VERSION}  ·  Native MTP speculative decoding on Apple Silicon")}
 
 {_heading("Overview")}
 
