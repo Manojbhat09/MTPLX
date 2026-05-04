@@ -329,6 +329,55 @@ def test_screen_model_no_configured_uses_three_options(monkeypatch):
     assert chosen == onboarding.DEFAULT_HF_MODEL
 
 
+def test_custom_hf_repo_rejects_pasted_terminal_output(monkeypatch, capsys):
+    answers = iter(
+        [
+            "2",
+            "Last login: Mon May  4 00:55:41 on ttys000",
+            "trevon/Qwen3.5-27B-MLX-MTP",
+        ]
+    )
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+
+    chosen = onboarding.screen_model(configured=None)
+
+    captured = capsys.readouterr().out
+    assert chosen == "trevon/Qwen3.5-27B-MLX-MTP"
+    assert "not a Hugging Face repo id" in captured
+
+
+def test_custom_hf_repo_blank_after_invalid_does_not_accept_default(monkeypatch, capsys):
+    answers = iter(
+        [
+            "2",
+            "Last login: Mon May  4 00:55:41 on ttys000",
+            "",
+            "trevon/Qwen3.5-27B-MLX-MTP",
+        ]
+    )
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+
+    chosen = onboarding.screen_model(configured=None)
+
+    captured = capsys.readouterr().out
+    assert chosen == "trevon/Qwen3.5-27B-MLX-MTP"
+    assert captured.count("Example: trevon/Qwen3.5-27B-MLX-MTP") == 2
+
+
+def test_custom_hf_repo_accepts_huggingface_url(monkeypatch):
+    answers = iter(
+        [
+            "2",
+            "https://huggingface.co/trevon/Qwen3.5-27B-MLX-MTP/tree/main",
+        ]
+    )
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+
+    chosen = onboarding.screen_model(configured=None)
+
+    assert chosen == "trevon/Qwen3.5-27B-MLX-MTP"
+
+
 def test_run_quickstart_flow_fresh_skips_returning_prompt(tmp_path, monkeypatch):
     monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(tmp_path / "fresh.json"))
     onboarding.save_state(

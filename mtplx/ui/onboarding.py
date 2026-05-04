@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,7 @@ DEFAULT_HF_MODEL = DEFAULT_HF_MODEL_ID
 STATE_PATH = Path("~/.mtplx/quickstart.json").expanduser()
 LOCAL_SCAN_TIMEOUT_S = 3.0
 LOCAL_SCAN_CLASSIFY_TIMEOUT_S = 4.0
+_HF_REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _TIER_RANK: dict[str, int] = {
     "verified": 0,
     "arch-compatible": 1,
@@ -472,6 +474,60 @@ def _prompt_text(prompt: str, *, default: str | None = None) -> str:
     return answer
 
 
+def _normalize_hf_repo_id(value: str) -> str:
+    text = str(value or "").strip()
+    prefix = "https://huggingface.co/"
+    if text.startswith(prefix):
+        text = text[len(prefix) :]
+        text = text.split("?", 1)[0].split("#", 1)[0]
+        for marker in ("/tree/", "/blob/", "/resolve/"):
+            if marker in text:
+                text = text.split(marker, 1)[0]
+                break
+    return text.strip("/")
+
+
+def _hf_repo_id_error(value: str) -> str | None:
+    text = _normalize_hf_repo_id(value)
+    if not text:
+        return "Please enter a Hugging Face repo id like namespace/name."
+    if any(ch.isspace() for ch in text):
+        return "That has spaces, so it is not a Hugging Face repo id."
+    if ":" in text or text.startswith(("╭", "│", "╰")):
+        return "That looks like pasted terminal output, not a Hugging Face repo id."
+    if "/" not in text:
+        return "Please include the namespace, for example trevon/Qwen3.5-27B-MLX-MTP."
+    if text.count("/") != 1:
+        return "Please enter only namespace/name, not a nested path."
+    namespace, name = text.split("/", 1)
+    if not namespace or not name:
+        return "Please enter a Hugging Face repo id like namespace/name."
+    if not _HF_REPO_ID_RE.fullmatch(text):
+        return "Repo ids can only use letters, numbers, dot, dash, and underscore."
+    if any(part.startswith(("-", ".")) or part.endswith(("-", ".")) for part in (namespace, name)):
+        return "Repo id parts cannot start or end with dot or dash."
+    if "--" in text or ".." in text:
+        return "Repo ids cannot contain consecutive dashes or dots."
+    return None
+
+
+def _prompt_hf_repo_id(*, default: str = DEFAULT_HF_MODEL) -> str:
+    saw_invalid = False
+    while True:
+        entered = _prompt_text(
+            "Hugging Face repo id (namespace/name)",
+            default=default if not saw_invalid else None,
+        )
+        candidate = _normalize_hf_repo_id(entered)
+        error = _hf_repo_id_error(candidate)
+        if error is None:
+            return candidate
+        saw_invalid = True
+        print(f"  {error}")
+        print("  Example: trevon/Qwen3.5-27B-MLX-MTP")
+        print()
+
+
 def _print_welcome() -> None:
     try:
         from rich.panel import Panel
@@ -618,16 +674,14 @@ def screen_model(*, configured: str | None = None) -> str:
         if choice == "2":
             return DEFAULT_HF_MODEL
         if choice == "3":
-            entered = _prompt_text("Hugging Face repo id (namespace/name)", default=DEFAULT_HF_MODEL)
-            return entered or DEFAULT_HF_MODEL
+            return _prompt_hf_repo_id(default=DEFAULT_HF_MODEL)
         # choice == "4"
         return _pick_local_model(default=str(configured))
 
     if choice == "1":
         return DEFAULT_HF_MODEL
     if choice == "2":
-        entered = _prompt_text("Hugging Face repo id (namespace/name)", default=DEFAULT_HF_MODEL)
-        return entered or DEFAULT_HF_MODEL
+        return _prompt_hf_repo_id(default=DEFAULT_HF_MODEL)
     # choice == "3"
     return _pick_local_model(default=None)
 
