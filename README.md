@@ -256,18 +256,6 @@ The CLI (`mtplx start` / `pull` / `doctor` / `inspect` / `max`) is the on-ramp t
 
 ---
 
-## Roadmap
-
-**v0.1.0-preview.1 (today).** Verified Qwen3-Next-MTP cold path, OpenAI/Anthropic-compatible serving, in-browser chat, interactive `mtplx start` wizard with local-folder model picker and one-line live download progress, four-tier compatibility, crash-safe Max mode, lazy-import CLI surface, 562-test suite green.
-
-**v0.2 — sustained throughput.** Diagnostic-gated kernel ladder targeting `last64/first64 ≥ 0.90` no-fan on 10k generations while preserving the **~2.24× multiplier** lane. Mechanism-driven: lazy-graph severance + output narrowing if graph history is the bottleneck; MLX-primitive-registered cache-update + `mx.compile` if dispatch tax dominates; an owned GDN+MLP verify-cycle kernel via `mx.fast.metal_kernel` only if the cheaper paths don't close the gap.
-
-**v0.3 — broader fleet.** DeepSeek V3 / V3.2 MTP backend (registered, runtime pending), GLM-4 MoE backend, MiMo backend, generic MTP backend behind `mtplx_runtime.json`. Optional Homebrew tap. Multi-session server concurrency.
-
-The kernel-ladder direction is grounded in a six-agent deep-research synthesis (Compass / GPT Pro / Gemini ×2 / Claude ×2 / final validation pass) plus a closed-branch failure ledger that's already 35+ entries deep. We don't ship benchmark theater.
-
----
-
 ## What MTPLX is *not*
 
 - It's not DFlash. DFlash uses greedy-argmax prefix matching and breaks the target distribution at T>0. MTPLX implements exact probability-ratio rejection sampling.
