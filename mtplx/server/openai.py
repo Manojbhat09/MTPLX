@@ -308,6 +308,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
+    depth: int | None = None
     seed: int | None = None
     enable_thinking: bool | None = None
     stream: bool = False
@@ -322,6 +323,7 @@ class CompletionRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
+    depth: int | None = None
     seed: int | None = None
     stream: bool = False
 
@@ -343,6 +345,7 @@ class AnthropicMessagesRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
+    depth: int | None = None
     stream: bool = False
 
 
@@ -428,7 +431,7 @@ class ServerState:
         self.foreground_active = 0
         self.rate_limiter = _RateLimiter(args.rate_limit)
         self.profile = get_profile(args.profile)
-        runtime_label = "Fast MTP" if self.profile.name == "performance-cold" else self.profile.name
+        runtime_label = "Medium MTP" if self.profile.name == "performance-cold" else self.profile.name
         _startup_line(f"[4/6] Preparing {runtime_label} runtime")
         if args.generation_mode == "mtp" and not args.load_mtp:
             raise ValueError("--generation-mode mtp requires --load-mtp")
@@ -489,6 +492,15 @@ class ServerState:
             )
             if self.runtime.mtp_enabled
             else {"installed": False, "reason": "mtp_disabled"}
+        )
+        self.draft_sampler = (
+            SamplerConfig(
+                temperature=float(args.draft_temperature),
+                top_p=float(args.draft_top_p),
+                top_k=int(args.draft_top_k),
+            )
+            if args.draft_temperature is not None
+            else None
         )
         self.draft_head_identity = _draft_head_identity(self.runtime)
         self.template_hash = _template_hash(self.runtime.tokenizer)
@@ -697,6 +709,7 @@ def _anthropic_to_chat_request(request: AnthropicMessagesRequest) -> ChatComplet
         temperature=request.temperature,
         top_p=request.top_p,
         top_k=request.top_k,
+        depth=request.depth,
         stream=False,
     )
 
@@ -1014,6 +1027,29 @@ def _request_metadata(model: BaseModel) -> dict[str, Any]:
     return metadata if isinstance(metadata, dict) else {}
 
 
+def _request_depth_value(request: BaseModel) -> Any:
+    for key in ("depth", "mtp_depth", "speculative_depth"):
+        value = getattr(request, key, None)
+        if value is None:
+            value = _request_extra(request, key)
+        if value is not None:
+            return value
+    return None
+
+
+def _request_depth_for_generation(state: ServerState, request: BaseModel) -> int:
+    value = _request_depth_value(request)
+    if value is None:
+        return int(getattr(state.args, "depth", 3))
+    try:
+        depth = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="depth must be an integer") from exc
+    if depth < 1 or depth > 3:
+        raise HTTPException(status_code=400, detail="depth must be between 1 and 3")
+    return depth
+
+
 def _token_window_rate(token_times: list[float], window: int) -> float | None:
     if len(token_times) < 2:
         return None
@@ -1129,6 +1165,29 @@ def _repair_streamed_generation_stats(
     return repaired
 
 
+def _stream_progress_payload(
+    *,
+    completion_tokens: int,
+    decode_started_s: float | None,
+    now_s: float,
+) -> dict[str, Any]:
+    decode_elapsed_s = (
+        max(0.0, float(now_s) - float(decode_started_s))
+        if decode_started_s is not None
+        else 0.0
+    )
+    decode_tok_s = (
+        float(completion_tokens) / decode_elapsed_s
+        if completion_tokens > 0 and decode_elapsed_s > 0.0
+        else None
+    )
+    return {
+        "completion_tokens": int(completion_tokens),
+        "decode_elapsed_s": decode_elapsed_s,
+        "decode_tok_s": decode_tok_s,
+    }
+
+
 PUBLIC_MTPLX_STATS_KEYS = (
     "mode",
     "generation_mode",
@@ -1222,6 +1281,7 @@ def _request_observability(
     headers: dict[str, str],
     metadata: dict[str, Any],
     session_source: str | None,
+    request_depth: int,
 ) -> dict[str, Any]:
     user_texts = [
         _content_to_text(message.content)
@@ -1249,6 +1309,7 @@ def _request_observability(
         "request_metadata_keys": sorted(metadata.keys()),
         "request_session_source": session_source,
         "request_session_candidate_headers": candidate_headers,
+        "request_depth": int(request_depth),
         "request_last_user_preview": user_texts[-1][:180] if user_texts else None,
         "request_last_user_chars": len(user_texts[-1]) if user_texts else 0,
     }
@@ -1258,8 +1319,10 @@ def _policy_fingerprint(
     state: ServerState,
     *,
     thinking_enabled: bool,
+    depth: int | None = None,
 ) -> str:
-    adaptive = _adaptive_config(state.args)
+    effective_depth = int(depth if depth is not None else getattr(state.args, "depth", 3))
+    adaptive = _adaptive_config(state.args, max_depth=effective_depth)
     proposal_cache = _proposal_cache_config(state.args)
     online_hidden = _online_hidden_config(state.args)
     return ";".join(
@@ -1268,6 +1331,7 @@ def _policy_fingerprint(
             f"thinking={int(bool(thinking_enabled))}",
             f"strip_reasoning={int(bool(state.args.strip_assistant_reasoning_history))}",
             f"generation_mode={getattr(state.args, 'generation_mode', 'mtp')}",
+            f"depth={effective_depth}",
             "hidden_variant=post_norm",
             "mtp_history_policy=committed",
             f"draft_head={state.draft_head_identity}",
@@ -1298,13 +1362,18 @@ def _online_hidden_config(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _adaptive_config(args: argparse.Namespace) -> dict[str, Any]:
+def _adaptive_config(
+    args: argparse.Namespace,
+    *,
+    max_depth: int | None = None,
+) -> dict[str, Any]:
     policy = str(getattr(args, "adaptive_policy", "none") or "none")
     if policy == "none":
         return {"policy": "none"}
+    effective_max_depth = int(max_depth if max_depth is not None else getattr(args, "depth", 3))
     config: dict[str, Any] = {
         "policy": policy,
-        "max_depth": int(args.depth),
+        "max_depth": effective_max_depth,
         "min_depth": int(args.adaptive_min_depth),
     }
     if policy == "streak":
@@ -1337,13 +1406,16 @@ def _adaptive_config(args: argparse.Namespace) -> dict[str, Any]:
 
 def _make_adaptive_policy(
     args: argparse.Namespace,
+    *,
+    max_depth: int | None = None,
 ) -> AdaptiveDepthPolicy | ExpectedValueDepthPolicy | None:
     policy = str(getattr(args, "adaptive_policy", "none") or "none")
     if policy == "none":
         return None
+    effective_max_depth = int(max_depth if max_depth is not None else getattr(args, "depth", 3))
     if policy == "streak":
         return AdaptiveDepthPolicy(
-            max_depth=int(args.depth),
+            max_depth=effective_max_depth,
             min_depth=int(args.adaptive_min_depth),
             start_depth=int(args.adaptive_start_depth),
             increase_after=int(args.adaptive_increase_after),
@@ -1351,7 +1423,7 @@ def _make_adaptive_policy(
         )
     if policy == "expected_value":
         return ExpectedValueDepthPolicy(
-            max_depth=int(args.depth),
+            max_depth=effective_max_depth,
             min_depth=int(args.adaptive_min_depth),
             base_depth=int(args.adaptive_ev_base_depth),
             accept_priors=tuple(float(v) for v in args.adaptive_ev_accept_priors),
@@ -1505,6 +1577,7 @@ def _run_generation(
     top_p: float | None,
     top_k: int | None,
     seed: int | None,
+    depth: int | None = None,
     token_callback: Callable[[list[int]], None] | None = None,
     session_id: str | None = None,
     session_cache_hit: bool = False,
@@ -1526,6 +1599,7 @@ def _run_generation(
         top_p=top_p,
         top_k=top_k,
     )
+    effective_depth = int(depth if depth is not None else getattr(state.args, "depth", 3))
     started = time.perf_counter()
     token_times: list[float] = []
     lock_wait_time_s = 0.0
@@ -1587,13 +1661,14 @@ def _run_generation(
                     trace_metadata=trace_metadata,
                 )
             else:
-                adaptive_policy = _make_adaptive_policy(state.args)
+                adaptive_policy = _make_adaptive_policy(state.args, max_depth=effective_depth)
                 out = generate_mtpk(
                     state.runtime,
                     prompt_ids,
                     max_tokens=response_max,
                     sampler=sampler,
-                    speculative_depth=state.args.depth,
+                    draft_sampler=state.draft_sampler,
+                    speculative_depth=effective_depth,
                     seed=generation_seed,
                     mtp_hidden_variant="post_norm",
                     mtp_cache_policy="persistent",
@@ -1698,7 +1773,7 @@ def _run_generation(
             session_cache_hit=session_cache_hit,
             cache_miss_reason=cache_miss_reason,
             session_restore_mode=session_restore_mode,
-            mtp_depth=state.args.depth if state.args.generation_mode == "mtp" else 0,
+            mtp_depth=effective_depth if state.args.generation_mode == "mtp" else 0,
             generation_limits=generation_limits,
         )
         if request_observability:
@@ -2564,7 +2639,7 @@ def _chat_ui_html(*, model_id: str, server_url: str, api_key_required: bool) -> 
       <p class="sb-title">Speculative</p>
       <div class="sb-row">
         <label for="ctl-depth">Draft depth <span class="v" id="val-depth">3</span></label>
-        <input id="ctl-depth" type="range" min="1" max="7" step="1" value="3">
+        <input id="ctl-depth" type="range" min="1" max="3" step="1" value="3">
         <p class="help">MTP draft tokens per verify cycle.</p>
       </div>
     </div>
@@ -2666,7 +2741,7 @@ def _chat_ui_html(*, model_id: str, server_url: str, api_key_required: bool) -> 
       temperature: {min: 0, max: 2},
       top_p: {min: 0, max: 1},
       top_k: {min: 0, max: 100},
-      depth: {min: 1, max: 7},
+      depth: {min: 1, max: 3},
       max_tokens: {min: 256, max: 32768}
     };
     const maxTokensHelpEl = document.getElementById("max-tokens-help");
@@ -2948,11 +3023,36 @@ def _chat_ui_html(*, model_id: str, server_url: str, api_key_required: bool) -> 
       statsEl.hidden = parts.length === 0;
     }
     function renderLiveStats(state) {
-      const tps = state.tokens > 0 && state.elapsed > 0 ? (state.tokens / state.elapsed) : null;
+      const explicitTps = Number(state.tps);
+      const tps = Number.isFinite(explicitTps)
+        ? explicitTps
+        : (state.tokens > 0 && state.elapsed > 0 ? (state.tokens / state.elapsed) : null);
       const parts = [];
       if (tps !== null) parts.push('<span class="tps">' + tps.toFixed(1) + ' tok/s</span>');
       if (state.tokens > 0) parts.push(state.tokens + ' tokens');
       liveStatsEl.innerHTML = parts.length ? '· ' + parts.join(' · ') : '';
+    }
+    function applyProgressToLiveState(liveState, progress) {
+      if (!progress) return;
+      const tokens = Number(progress.completion_tokens ?? progress.generated_tokens);
+      const elapsed = Number(progress.decode_elapsed_s ?? progress.elapsed_s);
+      const tps = Number(progress.decode_tok_s ?? progress.tok_s);
+      if (Number.isFinite(tokens) && tokens >= 0) liveState.tokens = tokens;
+      if (Number.isFinite(elapsed) && elapsed >= 0) liveState.elapsed = elapsed;
+      if (Number.isFinite(tps) && tps >= 0) liveState.tps = tps;
+      liveState.hasServerProgress = true;
+      renderLiveStats(liveState);
+    }
+    function applyFinalStatsToLiveState(liveState, stats) {
+      if (!stats) return;
+      const tokens = Number(stats.completion_tokens ?? stats.generated_tokens);
+      const elapsed = Number(stats.decode_elapsed_s ?? stats.request_elapsed_s ?? stats.elapsed_s);
+      const tps = Number(stats.decode_tok_s ?? stats.request_tok_s ?? stats.tok_s);
+      if (Number.isFinite(tokens) && tokens >= 0) liveState.tokens = tokens;
+      if (Number.isFinite(elapsed) && elapsed >= 0) liveState.elapsed = elapsed;
+      if (Number.isFinite(tps) && tps >= 0) liveState.tps = tps;
+      liveState.hasServerProgress = true;
+      renderLiveStats(liveState);
     }
 
     // ---------- streaming -----------------------------------------------------
@@ -3017,6 +3117,7 @@ def _chat_ui_html(*, model_id: str, server_url: str, api_key_required: bool) -> 
         stream: true,
         temperature: settingsNow.temperature,
         top_p: settingsNow.top_p,
+        depth: settingsNow.depth,
         max_tokens: settingsNow.max_tokens
       };
       if (settingsNow.top_k > 0) requestBody.top_k = settingsNow.top_k;
@@ -3029,7 +3130,7 @@ def _chat_ui_html(*, model_id: str, server_url: str, api_key_required: bool) -> 
       let finalStats = null;
       let firstTokenAt = null;
       const startedAt = performance.now();
-      const liveState = {tokens: 0, elapsed: 0};
+      const liveState = {tokens: 0, elapsed: 0, tps: null, hasServerProgress: false};
       // Stall watchdog: if no SSE chunk arrives within this window, abort
       // and surface a clear error instead of leaving the UI parked on
       // "Thinking" forever (the failure mode the user reported after a
@@ -3080,9 +3181,13 @@ def _chat_ui_html(*, model_id: str, server_url: str, api_key_required: bool) -> 
           buffer += decoder.decode(value, {stream: true});
           buffer = drainSse(buffer, (payload) => {
             if (payload.error) throw new Error(payload.error.message || "generation failed");
+            if (payload.mtplx_progress) {
+              applyProgressToLiveState(liveState, payload.mtplx_progress);
+            }
             if (payload.mtplx_stats) {
               finalStats = payload.mtplx_stats;
               renderStats(turn.stats, finalStats);
+              applyFinalStatsToLiveState(liveState, finalStats);
             }
             const delta = payload.choices?.[0]?.delta || {};
             const reasoningPiece = delta.reasoning_content || "";
@@ -3100,9 +3205,12 @@ def _chat_ui_html(*, model_id: str, server_url: str, api_key_required: bool) -> 
               if (firstTokenAt === null) firstTokenAt = performance.now();
               assistantText += answerPiece;
               turn.answerBody.textContent = assistantText;
-              liveState.tokens += 1;
-              liveState.elapsed = (performance.now() - startedAt) / 1000;
-              renderLiveStats(liveState);
+              if (!liveState.hasServerProgress) {
+                liveState.tokens += 1;
+                liveState.elapsed = (performance.now() - startedAt) / 1000;
+                liveState.tps = null;
+                renderLiveStats(liveState);
+              }
               setStatus("Streaming", "streaming");
               // Auto-collapse the reasoning block once the answer starts (still expandable).
               if (!turn.reasoningBlock.hidden) {
@@ -3346,6 +3454,11 @@ def create_app(state: ServerState) -> FastAPI:
             "reasoning_parser": state.args.reasoning_parser,
             "load_time_s": state.load_time_s,
             "draft_lm_head": state.draft_lm_head,
+            "draft_sampler": (
+                asdict(getattr(state, "draft_sampler", None))
+                if is_dataclass(getattr(state, "draft_sampler", None))
+                else None
+            ),
             "draft_head_identity": state.draft_head_identity,
             "tokenizer_template_hash": state.template_hash,
             "fast_path_env": state.fast_path_env_status,
@@ -3554,6 +3667,7 @@ def create_app(state: ServerState) -> FastAPI:
                 },
             )
         thinking_enabled = _thinking_enabled_for_request(state, request)
+        request_depth = _request_depth_for_generation(state, request)
         prompt_ids = _encode_messages(
             state.runtime.tokenizer,
             request.messages,
@@ -3575,6 +3689,7 @@ def create_app(state: ServerState) -> FastAPI:
         policy_fingerprint = _policy_fingerprint(
             state,
             thinking_enabled=thinking_enabled,
+            depth=request_depth,
         )
         if not background and not cache_bypass:
             requested_restore_mode = headers.get("x-mtplx-restore-mode", "reference_lease")
@@ -3600,6 +3715,7 @@ def create_app(state: ServerState) -> FastAPI:
             headers=headers,
             metadata=metadata,
             session_source=session_source,
+            request_depth=request_depth,
         )
         model = request.model or state.model_id
         response_id = f"chatcmpl-{uuid.uuid4().hex}"
@@ -3626,7 +3742,15 @@ def create_app(state: ServerState) -> FastAPI:
 
                 def on_tokens(new_tokens: list[int]) -> None:
                     _raise_if_stream_cancelled(cancel_event)
-                    queue.put(("tokens", list(new_tokens)))
+                    queue.put(
+                        (
+                            "tokens",
+                            {
+                                "tokens": list(new_tokens),
+                                "timestamp_s": time.perf_counter(),
+                            },
+                        )
+                    )
                     _raise_if_stream_cancelled(cancel_event)
 
                 def worker() -> None:
@@ -3641,6 +3765,7 @@ def create_app(state: ServerState) -> FastAPI:
                                 top_p=request.top_p,
                                 top_k=request.top_k,
                                 seed=request.seed,
+                                depth=request_depth,
                                 token_callback=on_tokens,
                                 session_id=session_id,
                                 cache_miss_reason=cache_miss_reason,
@@ -3662,6 +3787,7 @@ def create_app(state: ServerState) -> FastAPI:
                                     top_p=request.top_p,
                                     top_k=request.top_k,
                                     seed=request.seed,
+                                    depth=request_depth,
                                     token_callback=on_tokens,
                                     session_id=session_id,
                                     cache_miss_reason=cache_miss_reason,
@@ -3741,6 +3867,23 @@ def create_app(state: ServerState) -> FastAPI:
                     }
                     return f"data: {json.dumps(payload)}\n\n"
 
+                def progress_chunk(progress: dict[str, Any]) -> str:
+                    payload = {
+                        "id": response_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": None,
+                            }
+                        ],
+                        "mtplx_progress": _json_safe(progress),
+                    }
+                    return f"data: {json.dumps(payload)}\n\n"
+
                 def error_chunk(exc: BaseException) -> str:
                     if isinstance(exc, HTTPException):
                         message = str(exc.detail)
@@ -3767,6 +3910,8 @@ def create_app(state: ServerState) -> FastAPI:
                 generated: dict[str, Any] | None = None
                 history_reasoning_chunks: list[str] = []
                 history_content_chunks: list[str] = []
+                streamed_progress_tokens = 0
+                streamed_decode_started_s: float | None = None
 
                 def remember_stream_chunk(field: str, text: str) -> None:
                     if field == "reasoning_content":
@@ -3830,7 +3975,26 @@ def create_app(state: ServerState) -> FastAPI:
                                 return
                             continue
                         if kind == "tokens":
-                            for field, text in drain_stream_tokens(item):
+                            if isinstance(item, dict):
+                                stream_tokens = list(item.get("tokens") or [])
+                                token_timestamp_s = float(
+                                    item.get("timestamp_s") or time.perf_counter()
+                                )
+                            else:
+                                stream_tokens = list(item or [])
+                                token_timestamp_s = time.perf_counter()
+                            if stream_tokens:
+                                if streamed_decode_started_s is None:
+                                    streamed_decode_started_s = token_timestamp_s
+                                streamed_progress_tokens += len(stream_tokens)
+                                yield progress_chunk(
+                                    _stream_progress_payload(
+                                        completion_tokens=streamed_progress_tokens,
+                                        decode_started_s=streamed_decode_started_s,
+                                        now_s=token_timestamp_s,
+                                    )
+                                )
+                            for field, text in drain_stream_tokens(stream_tokens):
                                 remember_stream_chunk(field, text)
                                 yield delta_chunk(field, text)
                         elif kind == "done":
@@ -3945,6 +4109,7 @@ def create_app(state: ServerState) -> FastAPI:
                     top_p=request.top_p,
                     top_k=request.top_k,
                     seed=request.seed,
+                    depth=request_depth,
                     session_id=session_id,
                     cache_miss_reason=cache_miss_reason,
                     session_restore_mode=session_restore_mode,
@@ -3964,6 +4129,7 @@ def create_app(state: ServerState) -> FastAPI:
                     top_p=request.top_p,
                     top_k=request.top_k,
                     seed=request.seed,
+                    depth=request_depth,
                     session_id=session_id,
                     cache_miss_reason=cache_miss_reason,
                     session_restore_mode=session_restore_mode,
@@ -4080,6 +4246,7 @@ def create_app(state: ServerState) -> FastAPI:
     @app.post("/v1/completions")
     async def completions(request: CompletionRequest) -> Any:
         prompt_ids = _encode_prompt(state.runtime.tokenizer, request.prompt)
+        request_depth = _request_depth_for_generation(state, request)
         generated = _run_generation(
             state,
             prompt_ids,
@@ -4088,6 +4255,7 @@ def create_app(state: ServerState) -> FastAPI:
             top_p=request.top_p,
             top_k=request.top_k,
             seed=request.seed,
+            depth=request_depth,
         )
         model = request.model or state.model_id
         response_id = f"cmpl-{uuid.uuid4().hex}"
@@ -4142,7 +4310,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     postcommit_default = os.environ.get("MTPLX_SESSION_POSTCOMMIT_MODE", "inline")
     if postcommit_default not in {"inline", "async"}:
         postcommit_default = "inline"
-    parser.add_argument("--model", default="models/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP")
+    parser.add_argument("--model", default="models/Qwen3.6-27B-MTPLX-Flat4-CyanKiwiMTP")
     parser.add_argument("--model-id", default="mtplx-qwen36-27b-native-mtp")
     parser.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
     parser.add_argument("--host", default="127.0.0.1")
@@ -4337,6 +4505,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--draft-lm-head-bits", type=int, default=4)
     parser.add_argument("--draft-lm-head-group-size", type=int, default=64)
     parser.add_argument("--draft-lm-head-mode", default="affine")
+    parser.add_argument("--draft-temperature", type=float)
+    parser.add_argument("--draft-top-p", type=float, default=0.95)
+    parser.add_argument("--draft-top-k", type=int, default=20)
     parser.add_argument(
         "--mlx-cache-limit",
         help=(
@@ -4381,7 +4552,7 @@ def main(argv: list[str] | None = None) -> None:
         if str(exc).startswith("Patched MLX qmv fork is not active:"):
             _startup_line("error: fast MLX fork is not active")
             _startup_line(str(exc))
-            _startup_line("try: mtplx start --profile stable")
+            _startup_line("try: mtplx start --profile safe")
             _startup_line("try: mtplx start --profile performance-cold")
             _startup_line("     (public start disables the strict fork assert when the fork is missing)")
             raise SystemExit(2) from None

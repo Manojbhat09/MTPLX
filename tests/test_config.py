@@ -4,6 +4,7 @@ import argparse
 
 from mtplx.config import apply_user_config, load_user_config
 from mtplx.constants import DEFAULT_RUNTIME_MODEL_DIR
+from mtplx.profiles import DEFAULT_PROFILE_NAME
 
 
 def test_load_user_config_reads_runtime_defaults(tmp_path):
@@ -38,7 +39,8 @@ def test_apply_user_config_fills_runtime_defaults(tmp_path):
         command="run",
         model=str(DEFAULT_RUNTIME_MODEL_DIR),
         cache_dir=None,
-        profile="stable",
+        profile=DEFAULT_PROFILE_NAME,
+        _cli_flags=set(),
     )
 
     loaded = apply_user_config(args, config_path=config)
@@ -63,6 +65,7 @@ def test_apply_user_config_preserves_explicit_runtime_values(tmp_path):
         model="models/local",
         cache_dir="/tmp/explicit-cache",
         profile="performance-cold",
+        _cli_flags={"model", "cache-dir", "profile"},
     )
 
     apply_user_config(args, config_path=config)

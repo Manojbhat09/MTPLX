@@ -15,6 +15,7 @@ from .profiles import (
     DEFAULT_HF_MODEL_ID,
     DEFAULT_MODEL_ID,
     DEFAULT_PROFILE_NAME,
+    DEFAULT_PUBLIC_MODEL_ID,
     PROFILE_CHOICES,
     get_profile,
     list_profiles,
@@ -60,10 +61,10 @@ NATIVE_MTP_60_MODEL = DEFAULT_MODEL_ID
 
 
 PUBLIC_COMMANDS = (
-    ("quickstart", "Interactive setup → chat (model · mode · web/CLI)"),
+    ("start", "Interactive setup → chat (model · mode · web/CLI)"),
     ("help", "Detailed help; `help commands` / `help flags` / `help <name>`"),
     ("setup", "Prepare config and the model cache"),
-    ("start", "Run the local OpenAI/Anthropic server"),
+    ("quickstart", "Run the local OpenAI/Anthropic server"),
     ("connect", "Copy settings for Open WebUI or Claude Code"),
     ("ask", "Ask the verified local model once"),
     ("status", "Check install, model, and integration health"),
@@ -146,6 +147,17 @@ def _ascii_banner() -> str:
     return "\n".join("  " + _paint(line, "1;36") for line in rows)
 
 
+def _shell_banner_already_shown() -> bool:
+    value = os.environ.get("MTPLX_SHELL_BANNER_SHOWN") or os.environ.get("MTPLX_NO_BANNER")
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _help_banner_prefix() -> str:
+    if _shell_banner_already_shown():
+        return ""
+    return f"{_ascii_banner()}\n\n"
+
+
 def _format_public_help() -> str:
     command_lines = "\n".join(
         f"  {_command_cell(name, 12)} {summary}" for name, summary in PUBLIC_COMMANDS
@@ -154,17 +166,15 @@ def _format_public_help() -> str:
     footer = _muted(
         "more: `mtplx help <command>` · `mtplx help advanced` · `mtplx --help` · `mtplx --version`"
     )
-    return f"""{_ascii_banner()}
-
-  {version_line}
+    return f"""{_help_banner_prefix()}  {version_line}
 
 {_heading("Commands")}
 {command_lines}
 
 {_heading("Examples")}
-  mtplx quickstart                  Interactive setup, then chat
-  mtplx quickstart --fresh          Re-run the onboarding (new model/mode/surface)
-  mtplx start --max --port 8000     Server with ThermalForge fan boost (Max)
+  mtplx start                       Interactive setup, then chat
+  mtplx start --fresh               Re-run the onboarding (new model/mode/surface)
+  mtplx quickstart --max --port 8000  Server with ThermalForge fan boost (Max)
 
   {footer}
 """
@@ -182,7 +192,7 @@ def _format_advanced_help() -> str:
 Usage: mtplx <command> [options]
 
 Commands suffixed with * have subcommands. Run `mtplx help <command>` for details.
-The everyday path is quickstart first. Servers, integrations, QA, and kernels live here when needed.
+The everyday path is start first. Servers, integrations, QA, and kernels live here when needed.
 
 """ + "\n".join(sections) + """
 
@@ -196,8 +206,8 @@ Docs: README.md
 """
 
 
-def _format_quickstart_help() -> str:
-    return f"""{_heading("MTPLX quickstart")}
+def _format_start_help() -> str:
+    return f"""{_heading("MTPLX start")}
 
 Interactive end-to-end setup. On first run MTPLX walks you through three
 quick choices: model, runtime mode, and where to chat (browser or terminal).
@@ -205,21 +215,21 @@ On later runs it offers "same as last time?" so the chat is one keypress away.
 
 What gets asked:
   1. Model — your configured model, the verified default, custom HF, or local
-  2. Mode  — Stable, Cold-Speed, or Max (Max auto-installs ThermalForge)
+  2. Mode  — Medium or Max (Stable remains available via --profile safe)
   3. Where — Web UI (default) or terminal CLI
 
 Power-user shortcuts (any of these skip the onboarding wizard):
-  mtplx quickstart --fresh            Walk the onboarding again from scratch
-  mtplx quickstart cli                Skip onboarding; terminal chat directly
-  mtplx quickstart --max              Run with ThermalForge fan boost on
-  mtplx quickstart --download         Pull the verified model from HF first
-  mtplx quickstart --model /path/...  Use a specific local or HF model
-  mtplx quickstart --prompt "hi"      One-shot ask and exit (non-interactive)
+  mtplx start --fresh                 Walk the onboarding again from scratch
+  mtplx start cli                     Skip onboarding; terminal chat directly
+  mtplx start --max                   Run with ThermalForge fan boost on
+  mtplx start --download              Pull the verified model from HF first
+  mtplx start --model /path/...       Use a specific local or HF model
+  mtplx start --prompt "hi"           One-shot ask and exit (non-interactive)
 
 Useful controls:
   --download       Download the selected/default model if missing
   --model PATH     Use a local model folder or HF repo id
-  --profile stable Use the conservative long-response profile
+  --profile safe   Use the conservative long-response profile
   --prompt TEXT    (cli) Ask once and exit instead of opening chat
   --max-tokens N   (cli) Optional response cap; default uses remaining context
   --no-stats       Hide the TPS footer
@@ -246,9 +256,7 @@ def _format_verbose_help() -> str:
     public_lines = "\n".join(
         f"  {_command_cell(name, 12)} {summary}" for name, summary in PUBLIC_COMMANDS
     )
-    return f"""{_ascii_banner()}
-
-  {_muted(f"v{DISPLAY_VERSION}  ·  Native MTP speculative decoding on Apple Silicon")}
+    return f"""{_help_banner_prefix()}  {_muted(f"v{DISPLAY_VERSION}  ·  Native MTP speculative decoding on Apple Silicon")}
 
 {_heading("Overview")}
 
@@ -272,13 +280,13 @@ def _format_verbose_help() -> str:
 
 {_heading("Examples")}
 
-  mtplx quickstart                  Open the local chat in your browser
-  mtplx quickstart cli              Chat in this terminal instead
-  mtplx quickstart --download       Pull the verified model from Hugging Face
-  mtplx start --port 8000           Run the OpenAI/Anthropic server only
+  mtplx start                       Open the local chat in your browser
+  mtplx start cli                   Chat in this terminal instead
+  mtplx start --download            Pull the verified model from Hugging Face
+  mtplx quickstart --port 8000      Run the OpenAI/Anthropic server only
   mtplx connect openwebui           Print Open WebUI integration settings
   mtplx ask "Write a tiny FastAPI app"
-  mtplx inspect mtplx/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP
+  mtplx inspect Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed
 
 {_heading("Help subtopics")}
 
@@ -286,7 +294,7 @@ def _format_verbose_help() -> str:
   mtplx help flags            Every flag, grouped by command
   mtplx help advanced         Benchmarks, QA, publishing, and kernel tools
   mtplx help <command>        Detailed flags for one command (argparse view)
-  mtplx help quickstart       The quickstart user journey
+  mtplx help start            The start user journey
 
   Docs: README.md
 """
@@ -403,8 +411,8 @@ def _print_help_topic(topic: str | None, parser: argparse.ArgumentParser) -> int
     if topic in ("flags", "options", "all-flags"):
         print(_format_flags_help())
         return 0
-    if topic in ("quickstart", "quick-start"):
-        print(_format_quickstart_help())
+    if topic == "start":
+        print(_format_start_help())
         return 0
     if topic in ("advanced", "expert", "lab"):
         print(_format_advanced_help())
@@ -559,6 +567,12 @@ def cmd_debug_public(args: argparse.Namespace) -> int:
     return handler(args)
 
 
+def cmd_openwebui_public(args: argparse.Namespace) -> int:
+    from .commands.public import cmd_openwebui_public as handler
+
+    return handler(args)
+
+
 def cmd_metrics_public(args: argparse.Namespace) -> int:
     from .commands.public import cmd_metrics_public as handler
 
@@ -683,7 +697,16 @@ def _cmd_init(args: argparse.Namespace) -> int:
         report["wrote_config"] = True
     if args.download and not args.dry_run:
         try:
-            report["download_result"] = pull_model(args.model, cache_dir=model_dir)
+            progress_callback = None
+            if not args.json:
+                from .commands.public import _download_progress_callback
+
+                progress_callback = _download_progress_callback()
+            report["download_result"] = pull_model(
+                args.model,
+                cache_dir=model_dir,
+                progress_callback=progress_callback,
+            )
         except Exception as exc:
             report["download_error"] = str(exc)
             if args.json:
@@ -723,7 +746,8 @@ def _cmd_profiles(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
-    print(f"default: {DEFAULT_PROFILE_NAME}")
+    print(f"library default: {DEFAULT_PROFILE_NAME}")
+    print("start default: performance-cold (Medium)")
     for profile in payload["profiles"]:
         print(f"{profile['name']}: {profile['summary']}")
     return 0
@@ -738,7 +762,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             "config_path": str(config_path),
             "next_steps": [
                 "mtplx status",
-                "mtplx start --port 8000",
+                "mtplx quickstart --port 8000",
                 "mtplx connect openwebui",
             ],
         }
@@ -748,7 +772,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             print("MTPLX setup")
             print(f"config already exists: {config_path}")
             print("next: mtplx status")
-            print("next: mtplx start --port 8000")
+            print("next: mtplx quickstart --port 8000")
             print("Use --force to rewrite the config.")
         return 0
     args.write = True
@@ -757,6 +781,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
 
 def _cmd_connect(args: argparse.Namespace) -> int:
     if not args.integration:
+        server_command = f"mtplx quickstart --host {args.host} --port {args.port}"
         payload = {
             "action": "connect",
             "integrations": [
@@ -771,13 +796,13 @@ def _cmd_connect(args: argparse.Namespace) -> int:
                     "purpose": "Use MTPLX through the Anthropic-compatible Claude Code path.",
                 },
             ],
-            "server": "mtplx start --port 8000",
+            "server": server_command,
         }
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
             print("Connect MTPLX")
-            print("1. Start the server: mtplx start --port 8000")
+            print(f"1. Start the server: {server_command}")
             print("2. Pick a client:")
             print("   mtplx connect openwebui")
             print("   mtplx connect claude-code")
@@ -831,6 +856,9 @@ def _cmd_bench_profile(args: argparse.Namespace) -> int:
     from .benchmarks.runners.mtp_depth_sweep import run_mtp_depth_sweep, write_depth_sweep
     from .benchmarks.runners.preflight import run_preflight
     from .benchmarks.schema import now_run_id
+    from .artifacts import inspect_model
+    from .draft_lm_head import draft_lm_head_spec_from_runtime_contract
+    from .draft_sampling import draft_sampler_spec_from_runtime_contract
 
     profile = get_profile(args.profile)
     if profile.name != "performance-cold":
@@ -849,8 +877,29 @@ def _cmd_bench_profile(args: argparse.Namespace) -> int:
             return 2
     prompts = _suite_to_prompts(args.suite, args.prompts)
     out = Path(args.output) if args.output else Path("outputs") / f"{now_run_id(profile.name)}.json"
+    model_arg = NATIVE_MTP_60_MODEL if args.model == str(DEFAULT_RUNTIME_MODEL_DIR) else args.model
+    fallback_draft_lm_head = (
+        None
+        if profile.draft_lm_head is None
+        else {
+            "bits": profile.draft_lm_head.bits,
+            "group_size": profile.draft_lm_head.group_size,
+            "mode": profile.draft_lm_head.mode,
+        }
+    )
+    try:
+        compatibility = inspect_model(model_arg).to_dict().get("compatibility") or {}
+        runtime_contract = compatibility.get("runtime_contract")
+        draft_lm_head = draft_lm_head_spec_from_runtime_contract(
+            runtime_contract,
+            fallback=fallback_draft_lm_head,
+        )
+        draft_sampler = draft_sampler_spec_from_runtime_contract(runtime_contract)
+    except Exception:
+        draft_lm_head = fallback_draft_lm_head
+        draft_sampler = None
     result = run_mtp_depth_sweep(
-        NATIVE_MTP_60_MODEL if args.model == str(DEFAULT_RUNTIME_MODEL_DIR) else args.model,
+        model_arg,
         prompts,
         depths="3",
         temperature=0.6,
@@ -859,7 +908,7 @@ def _cmd_bench_profile(args: argparse.Namespace) -> int:
         max_tokens=192 if args.max_tokens == 128 else args.max_tokens,
         seed=0,
         limit=args.limit,
-        enable_thinking=False if args.disable_thinking else None,
+        enable_thinking=False,
         compare_ar=False,
         mtp_hidden_variant="post_norm",
         mtp_cache_policy="persistent",
@@ -867,18 +916,26 @@ def _cmd_bench_profile(args: argparse.Namespace) -> int:
         min_speculative_depth=1,
         verify_strategy="capture_commit",
         verify_core="linear-gdn-from-conv-tape",
-        draft_lm_head_bits=4,
-        draft_lm_head_group_size=64,
-        draft_lm_head_mode="affine",
+        draft_lm_head_bits=(None if draft_lm_head is None else int(draft_lm_head["bits"])),
+        draft_lm_head_group_size=(64 if draft_lm_head is None else int(draft_lm_head["group_size"])),
+        draft_lm_head_mode=("affine" if draft_lm_head is None else str(draft_lm_head["mode"])),
+        draft_temperature=(
+            None if draft_sampler is None else float(draft_sampler["temperature"])
+        ),
+        draft_top_p=None if draft_sampler is None else float(draft_sampler["top_p"]),
+        draft_top_k=None if draft_sampler is None else int(draft_sampler["top_k"]),
     )
     result["profile"] = {
         **profile.to_dict(),
         "fast_path_env": profile.env_dict(),
-        "model": NATIVE_MTP_60_MODEL,
+        "model": model_arg,
+        "model_id": model_arg,
         "depth": 3,
         "verify_strategy": "capture_commit",
         "verify_core": "linear-gdn-from-conv-tape",
-        "draft_lm_head": {"bits": 4, "group_size": 64, "mode": "affine"},
+        "draft_lm_head": draft_lm_head,
+        "draft_sampler": draft_sampler,
+        "enable_thinking": False,
         "expected_mlx_qmv_fork_commit": profile.required_mlx_fork_commit,
         "strict_preflight": bool(args.strict),
         "preflight": preflight,
@@ -1464,76 +1521,75 @@ def build_parser() -> argparse.ArgumentParser:
     advanced_p = sub.add_parser("advanced", help=argparse.SUPPRESS)
     advanced_p.set_defaults(func=lambda _args: (print(_format_advanced_help()) or 0))
 
-    quickstart_p = sub.add_parser(
-        "quickstart",
-        aliases=["quick-start"],
+    start_flow_p = sub.add_parser(
+        "start",
         help="Interactive setup → chat (model · mode · web/CLI)",
-        usage="mtplx quickstart [cli|web] [--fresh] [--max] [--model PATH_OR_REPO] [--prompt TEXT]",
-        description="Walk through model / mode / surface in three quick steps, then chat. Returning users get a 'same as last time?' prompt. Use --fresh to redo the onboarding, or pass any of --model / --max / cli|web to skip it entirely.",
+        usage="mtplx start [cli|web] [--fresh] [--max] [--profile safe] [--model PATH_OR_REPO] [--prompt TEXT]",
+        description="Walk through model / mode / surface in three quick steps, then chat. Returning users get a 'same as last time?' prompt. Use --fresh to redo the onboarding, or pass any of --model / --profile / --max / cli|web to skip it entirely.",
     )
-    quickstart_p.add_argument(
+    start_flow_p.add_argument(
         "target",
         nargs="?",
         choices=["web", "openwebui", "open-webui", "cli", "terminal"],
         default=None,
         help="Web chat or terminal chat. Without this argument, MTPLX runs an interactive onboarding (or the 'same as last time?' prompt) on first run.",
     )
-    quickstart_p.add_argument(
+    start_flow_p.add_argument(
         "--fresh",
         action="store_true",
         help="Skip the 'same as last time?' prompt and walk through the full onboarding again",
     )
-    quickstart_p.add_argument("--model", help="Verified model path or Hugging Face repo id")
-    quickstart_p.add_argument("--cache-dir")
-    quickstart_p.add_argument(
+    start_flow_p.add_argument("--model", help="Verified model path or Hugging Face repo id")
+    start_flow_p.add_argument("--cache-dir")
+    start_flow_p.add_argument(
         "--profile",
         choices=PROFILE_CHOICES,
         default="performance-cold",
-        help="Runtime profile; quickstart defaults to the fast cold-speed demo path",
+        help="Runtime profile; start defaults to Medium. Use safe for the hidden Stable path.",
     )
-    quickstart_p.add_argument("--download", action="store_true", help="Download the selected/default model if it is missing")
-    quickstart_p.add_argument("--yes", action="store_true", help="Use defaults without interactive model prompts")
-    quickstart_p.add_argument("--unsafe-force-unverified", action="store_true")
-    quickstart_p.add_argument("--prompt", help="Run one prompt and exit instead of entering the chat loop")
-    quickstart_p.add_argument("--system", help="Optional system prompt")
-    quickstart_p.add_argument(
+    start_flow_p.add_argument("--download", action="store_true", help="Download the selected/default model if it is missing")
+    start_flow_p.add_argument("--yes", action="store_true", help="Use defaults without interactive model prompts")
+    start_flow_p.add_argument("--unsafe-force-unverified", action="store_true")
+    start_flow_p.add_argument("--prompt", help="Run one prompt and exit instead of entering the chat loop")
+    start_flow_p.add_argument("--system", help="Optional system prompt")
+    start_flow_p.add_argument(
         "--max-tokens",
         type=_positive_int,
         default=None,
         help="Terminal response-token cap. Omit to use the model's remaining context.",
     )
-    quickstart_p.add_argument("--temperature", type=float, default=0.6)
-    quickstart_p.add_argument("--top-p", type=float, default=0.95)
-    quickstart_p.add_argument("--top-k", type=int, default=20)
-    quickstart_p.add_argument("--depth", type=int, default=3)
-    quickstart_p.add_argument("--seed", type=int, default=0)
-    _add_reasoning_arg(quickstart_p)
-    quickstart_p.add_argument("--no-stats", action="store_false", dest="show_stats", default=True, help="Hide speed stats after responses")
-    quickstart_p.add_argument("--host", default="127.0.0.1", help="Open WebUI server host for `mtplx quickstart openwebui`")
-    quickstart_p.add_argument("--port", type=int, default=8000, help="Open WebUI server port for `mtplx quickstart openwebui`")
-    quickstart_p.add_argument("--model-id", default="mtplx-qwen36-27b-native-mtp", help="Model id to select in Open WebUI")
-    quickstart_p.add_argument("--api-key", help="Optional API key for non-localhost Open WebUI serving")
-    quickstart_p.add_argument("--warmup-tokens", type=int, default=16, help="Warmup tokens for Open WebUI server startup")
-    quickstart_p.add_argument("--stream-interval", type=int, default=1, help="Streaming chunk size for Open WebUI server")
-    quickstart_p.add_argument("--rate-limit", type=int, default=0, help="Server request rate limit for Open WebUI path")
-    quickstart_p.add_argument("--max-response-tokens", type=int, help="Server response token cap for Open WebUI path")
-    quickstart_p.add_argument("--reasoning-parser", default="qwen3", help="Reasoning parser for Open WebUI server streaming")
-    quickstart_p.add_argument("--strict-warmup", action="store_true", help="Fail Open WebUI startup if warmup fails")
-    quickstart_p.add_argument(
+    start_flow_p.add_argument("--temperature", type=float, default=0.6)
+    start_flow_p.add_argument("--top-p", type=float, default=0.95)
+    start_flow_p.add_argument("--top-k", type=int, default=20)
+    start_flow_p.add_argument("--depth", type=int, default=3)
+    start_flow_p.add_argument("--seed", type=int, default=0)
+    _add_reasoning_arg(start_flow_p)
+    start_flow_p.add_argument("--no-stats", action="store_false", dest="show_stats", default=True, help="Hide speed stats after responses")
+    start_flow_p.add_argument("--host", default="127.0.0.1", help="Open WebUI server host for `mtplx start openwebui`")
+    start_flow_p.add_argument("--port", type=int, default=8000, help="Open WebUI server port for `mtplx start openwebui`")
+    start_flow_p.add_argument("--model-id", default=DEFAULT_PUBLIC_MODEL_ID, help="Model id to select in Open WebUI")
+    start_flow_p.add_argument("--api-key", help="Optional API key for non-localhost Open WebUI serving")
+    start_flow_p.add_argument("--warmup-tokens", type=int, default=16, help="Warmup tokens for Open WebUI server startup")
+    start_flow_p.add_argument("--stream-interval", type=int, default=1, help="Streaming chunk size for Open WebUI server")
+    start_flow_p.add_argument("--rate-limit", type=int, default=0, help="Server request rate limit for Open WebUI path")
+    start_flow_p.add_argument("--max-response-tokens", type=int, help="Server response token cap for Open WebUI path")
+    start_flow_p.add_argument("--reasoning-parser", default="qwen3", help="Reasoning parser for Open WebUI server streaming")
+    start_flow_p.add_argument("--strict-warmup", action="store_true", help="Fail Open WebUI startup if warmup fails")
+    start_flow_p.add_argument(
         "--strict-fast-path",
         action="store_true",
         help="Fail Open WebUI startup if the optional fast MLX fork is not active",
     )
-    quickstart_p.add_argument("--max", action="store_true", help="Opt into ThermalForge/TG Pro performance fan profile for Open WebUI server")
-    quickstart_p.add_argument(
+    start_flow_p.add_argument("--max", action="store_true", help="Opt into ThermalForge/TG Pro performance fan profile for Open WebUI server")
+    start_flow_p.add_argument(
         "--max-idle-min",
         type=int,
         default=15,
         help="Minutes of chat inactivity before --max drops fans back to auto (default: 15; ramps back up on next request)",
     )
-    quickstart_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON for --dry-run")
-    quickstart_p.add_argument("--dry-run", action="store_true", help="Show what quickstart will do without loading MLX")
-    quickstart_p.set_defaults(func=cmd_quickstart_public)
+    start_flow_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON for --dry-run")
+    start_flow_p.add_argument("--dry-run", action="store_true", help="Show what start will do without loading MLX")
+    start_flow_p.set_defaults(func=cmd_quickstart_public)
 
     setup_p = sub.add_parser("setup", help="Set up MTPLX with a friendly guided default")
     setup_p.add_argument("--config", default="~/.mtplx/config.toml")
@@ -1549,8 +1605,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_p = sub.add_parser("status", help="Check whether MTPLX is ready to run")
     status_p.add_argument("--project-root", default=".")
-    status_p.add_argument("--smc-path", default=os.environ.get("MTPLX_SMC_PATH") or shutil.which("smc") or "")
-    status_p.add_argument("--sovereign-path", default=os.environ.get("MTPLX_SOVEREIGN_PATH") or shutil.which("sovereign") or "")
     status_p.add_argument("--model-cache")
     status_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     status_p.add_argument("--deep", action="store_true", help="Include launchers, config, staging, release, and integration checks")
@@ -1583,66 +1637,90 @@ def build_parser() -> argparse.ArgumentParser:
     ask_p.add_argument("--max", action="store_true", help="Opt into ThermalForge/TG Pro performance fan profile for this run")
     ask_p.set_defaults(func=cmd_run_public)
 
-    start_p = sub.add_parser("start", help="Start the local MTPLX server")
-    start_p.add_argument("--model", default=default_model)
-    start_p.add_argument("--cache-dir")
-    start_p.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
-    start_p.add_argument("--unsafe-force-unverified", action="store_true")
-    start_p.add_argument("--yes", action="store_true", help="Confirm unsafe non-interactive actions")
-    start_p.add_argument("--host", default="127.0.0.1")
-    start_p.add_argument("--port", type=int, default=8000)
-    start_p.add_argument("--depth", type=int, default=3)
-    start_p.add_argument(
+    quickstart_server_p = sub.add_parser(
+        "quickstart",
+        aliases=["quick-start"],
+        help="Start the local MTPLX server",
+    )
+    quickstart_server_p.add_argument("--model", default=default_model)
+    quickstart_server_p.add_argument("--cache-dir")
+    quickstart_server_p.add_argument(
+        "--download",
+        action="store_true",
+        help="Download a Hugging Face model before starting if it is not cached",
+    )
+    quickstart_server_p.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
+    quickstart_server_p.add_argument("--unsafe-force-unverified", action="store_true")
+    quickstart_server_p.add_argument("--yes", action="store_true", help="Confirm unsafe non-interactive actions")
+    quickstart_server_p.add_argument("--host", default="127.0.0.1")
+    quickstart_server_p.add_argument("--port", type=int, default=8000)
+    quickstart_server_p.add_argument("--depth", type=int, default=3)
+    quickstart_server_p.add_argument(
         "--api-key",
         default=os.environ.get("MTPLX_AUTH"),
         help="Require Bearer or X-API-Key auth. Required for non-localhost binds.",
     )
-    start_p.add_argument("--rate-limit", type=int, default=0, help="Requests per minute per client/API key. Use 0 to disable.")
-    start_p.add_argument("--stream-interval", type=int, default=1, help="Committed-token batch size per chat SSE chunk.")
-    start_p.add_argument("--max-tokens", dest="max_response_tokens", type=int, help="Default server-side response-token ceiling.")
-    start_p.add_argument("--default-temperature", dest="temperature", type=float, default=0.6)
-    start_p.add_argument("--default-top-p", dest="top_p", type=float, default=0.95)
-    _add_reasoning_arg(start_p)
-    start_p.add_argument("--reasoning-parser", choices=["qwen3", "none"], default="qwen3")
-    start_p.add_argument(
+    quickstart_server_p.add_argument("--rate-limit", type=int, default=0, help="Requests per minute per client/API key. Use 0 to disable.")
+    quickstart_server_p.add_argument("--stream-interval", type=int, default=1, help="Committed-token batch size per chat SSE chunk.")
+    quickstart_server_p.add_argument("--max-tokens", dest="max_response_tokens", type=int, help="Default server-side response-token ceiling.")
+    quickstart_server_p.add_argument("--default-temperature", dest="temperature", type=float, default=0.6)
+    quickstart_server_p.add_argument("--default-top-p", dest="top_p", type=float, default=0.95)
+    _add_reasoning_arg(quickstart_server_p)
+    quickstart_server_p.add_argument("--reasoning-parser", choices=["qwen3", "none"], default="qwen3")
+    quickstart_server_p.add_argument(
         "--stats-footer",
         action="store_true",
         dest="stats_footer",
         default=False,
         help="Append visible MTPLX speed stats to returned text.",
     )
-    start_p.add_argument(
+    quickstart_server_p.add_argument(
         "--no-stats-footer",
         action="store_false",
         dest="stats_footer",
-        help="Keep returned text clean for UI clients. This is the default for start.",
+        help="Keep returned text clean for UI clients. This is the default for quickstart.",
     )
-    start_p.add_argument("--max", action="store_true", help="Opt into ThermalForge/TG Pro performance fan profile for the server lifetime")
-    start_p.add_argument(
+    quickstart_server_p.add_argument("--max", action="store_true", help="Opt into ThermalForge/TG Pro performance fan profile for the server lifetime")
+    quickstart_server_p.add_argument("--open-browser", action="store_true", help="Open the local browser chat after the server starts")
+    quickstart_server_p.add_argument(
         "--max-idle-min",
         type=int,
         default=15,
         help="Minutes of chat inactivity before --max drops fans back to auto (default: 15; ramps back up on next request)",
     )
-    start_p.add_argument("--warmup-tokens", type=int, default=16, help="Startup warmup generation length. Use 0 to disable.")
-    start_p.add_argument("--strict-warmup", action="store_true", help="Fail server startup if the warmup pass fails.")
-    start_p.add_argument(
+    quickstart_server_p.add_argument("--warmup-tokens", type=int, default=16, help="Startup warmup generation length. Use 0 to disable.")
+    quickstart_server_p.add_argument("--strict-warmup", action="store_true", help="Fail server startup if the warmup pass fails.")
+    quickstart_server_p.add_argument(
         "--strict-fast-path",
         action="store_true",
         help="Fail startup if performance-cold needs the optional fast MLX fork and it is not active.",
     )
-    start_p.set_defaults(func=cmd_serve_public)
+    quickstart_server_p.set_defaults(func=cmd_serve_public)
 
     connect_p = sub.add_parser("connect", help="Show client setup for Open WebUI or Claude Code")
     connect_p.add_argument("integration", nargs="?", choices=["openwebui", "claude-code"])
     connect_p.add_argument("--host", default="127.0.0.1")
     connect_p.add_argument("--port", type=int, default=8000)
-    connect_p.add_argument("--model-id", default="mtplx-qwen36-27b-native-mtp")
+    connect_p.add_argument("--model-id", default=DEFAULT_PUBLIC_MODEL_ID)
     connect_p.add_argument("--api-key-env", default="MTPLX_AUTH")
+    connect_p.add_argument("--docker", action="store_true", help="Include the Dockerized Open WebUI host.docker.internal command")
+    connect_p.add_argument("--webui-port", type=int, default=3000)
+    connect_p.add_argument("--single-user", action="store_true", help="Emit WEBUI_AUTH=False for a new single-user Open WebUI data volume")
+    connect_p.add_argument("--api-key", default="mtplx-local", help="OpenAI-compatible API key value for generated Docker command")
     connect_p.add_argument("--smoke", action="store_true")
     connect_p.add_argument("--timeout", type=float, default=5.0)
     connect_p.add_argument("--json", action="store_true")
     connect_p.set_defaults(func=_cmd_connect)
+
+    openwebui_p = sub.add_parser("openwebui", help="Open WebUI integration helpers")
+    openwebui_sub = openwebui_p.add_subparsers(dest="openwebui_action", required=True)
+    openwebui_docker_p = openwebui_sub.add_parser("docker-command", help="Print the production Open WebUI Docker command")
+    openwebui_docker_p.add_argument("--mtplx-port", type=int, default=8000)
+    openwebui_docker_p.add_argument("--webui-port", type=int, default=3000)
+    openwebui_docker_p.add_argument("--single-user", action="store_true", help="Add WEBUI_AUTH=False for a fresh single-user volume")
+    openwebui_docker_p.add_argument("--api-key", default="mtplx-local")
+    openwebui_docker_p.add_argument("--json", action="store_true")
+    openwebui_docker_p.set_defaults(func=cmd_openwebui_public)
 
     models_p = sub.add_parser("models", help="List locally cached MTPLX models")
     models_p.add_argument("--cache-dir")
@@ -1660,7 +1738,23 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_p.add_argument("--model-cache")
     doctor_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     doctor_p.add_argument("--deep", action="store_true", help="Include launchers, config, staging, release, and integration checks")
+    doctor_p.add_argument("--summary", action="store_true", help="Print a compact check summary")
+    doctor_p.add_argument("--bundle", action="store_true", help="Write a redacted doctor bundle under ~/.mtplx/reports")
+    doctor_p.add_argument("--output-dir", help="Directory for --bundle output")
+    doctor_p.add_argument("--include-paths", action="store_true", help="Keep local paths in --bundle output")
     doctor_p.set_defaults(func=cmd_doctor)
+
+    report_p = sub.add_parser("report", help="Create a redacted MTPLX support bundle")
+    report_p.add_argument("--project-root", default=".")
+    report_p.add_argument("--smc-path", default=os.environ.get("MTPLX_SMC_PATH") or shutil.which("smc") or "")
+    report_p.add_argument("--sovereign-path", default=os.environ.get("MTPLX_SOVEREIGN_PATH") or shutil.which("sovereign") or "")
+    report_p.add_argument("--model-cache")
+    report_p.add_argument("--output-dir", help="Directory for the report bundle")
+    report_p.add_argument("--include-paths", action="store_true", help="Keep local paths in the report")
+    report_p.add_argument("--deep", action="store_true", default=True, help="Include deep integration checks")
+    report_p.add_argument("--summary", action="store_true", help="Print compact check summary instead of JSON")
+    report_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    report_p.set_defaults(func=cmd_doctor, bundle=True)
 
     inspect_public_p = sub.add_parser("inspect", help="Inspect a model and auto-check MTP support")
     inspect_public_p.add_argument(
@@ -1698,7 +1792,12 @@ def build_parser() -> argparse.ArgumentParser:
     profiles_p.set_defaults(func=_cmd_profiles)
 
     pull_p = sub.add_parser("pull", help="Download a Hugging Face model into the MTPLX cache")
-    pull_p.add_argument("model", help="Hugging Face repo id or URL")
+    pull_p.add_argument(
+        "model",
+        nargs="?",
+        default=DEFAULT_HF_MODEL_ID,
+        help="Hugging Face repo id or URL. Defaults to the preview speed model.",
+    )
     pull_p.add_argument("--cache-dir")
     pull_p.add_argument("--revision")
     pull_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
@@ -1762,13 +1861,19 @@ def build_parser() -> argparse.ArgumentParser:
     chat_p.add_argument("--depth", type=int, default=3)
     chat_p.add_argument("--seed", type=int, default=0)
     _add_reasoning_arg(chat_p)
+    chat_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     chat_p.add_argument("--expect-python", action="store_true")
     chat_p.add_argument("--max", action="store_true", help="Opt into ThermalForge/TG Pro performance fan profile for this run")
     chat_p.set_defaults(func=cmd_chat_public)
 
-    serve_p = sub.add_parser("serve", help="Start the OpenAI-compatible MTPLX server")
+    serve_p = sub.add_parser("serve", help="Choose model/mode, then start the OpenAI-compatible MTPLX server")
     serve_p.add_argument("--model", default=default_model)
     serve_p.add_argument("--cache-dir")
+    serve_p.add_argument(
+        "--download",
+        action="store_true",
+        help="Download a Hugging Face model before starting if it is not cached",
+    )
     serve_p.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
     serve_p.add_argument("--unsafe-force-unverified", action="store_true")
     serve_p.add_argument("--yes", action="store_true", help="Confirm unsafe non-interactive actions")
@@ -1810,6 +1915,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not append the visible MTPLX TPS footer to returned text.",
     )
     serve_p.add_argument("--max", action="store_true", help="Opt into ThermalForge/TG Pro performance fan profile for the server lifetime")
+    serve_p.add_argument("--open-browser", action="store_true", help="Open the local browser chat after the server starts")
     serve_p.add_argument(
         "--warmup-tokens",
         type=int,
@@ -1862,7 +1968,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         choices=(*PROFILE_CHOICES, "native-mtp-60"),
         help=(
-            "Runtime profile for product benchmark actions. Defaults to stable; "
+            "Runtime profile for product benchmark actions. Defaults to safe; "
             "native-mtp-60 is a legacy alias for performance-cold."
         ),
     )
@@ -1910,7 +2016,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench_p.add_argument("--exactness-partition-size", type=int, default=512)
     bench_p.add_argument("--models", nargs="+")
     bench_p.add_argument("--record-champion", action="store_true")
-    bench_p.add_argument("--champion", default="models/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP")
+    bench_p.add_argument("--champion", default="models/Qwen3.6-27B-MTPLX-Flat4-CyanKiwiMTP")
     bench_p.add_argument("--references", nargs="+", default=["stock_mlx_lm", "llama_cpp"])
     bench_p.add_argument("--url", default="http://127.0.0.1:8000")
     bench_p.add_argument("--port", type=int, default=8041)
@@ -2088,8 +2194,6 @@ def build_parser() -> argparse.ArgumentParser:
     debug_bundle_p.add_argument("--project-root", default=".")
     debug_bundle_p.add_argument("--model-cache")
     debug_bundle_p.add_argument("--url", default="http://127.0.0.1:8000")
-    debug_bundle_p.add_argument("--smc-path", default=os.environ.get("MTPLX_SMC_PATH") or shutil.which("smc") or "")
-    debug_bundle_p.add_argument("--sovereign-path", default=os.environ.get("MTPLX_SOVEREIGN_PATH") or shutil.which("sovereign") or "")
     debug_bundle_p.set_defaults(func=cmd_debug_public)
     debug_hotpath_p = debug_sub.add_parser("hotpath", help="Audit verifier hot-path kernel and sync boundaries")
     debug_hotpath_p.add_argument("--output")
@@ -2111,8 +2215,12 @@ def build_parser() -> argparse.ArgumentParser:
         integration_p = integrate_sub.add_parser(integration_name)
         integration_p.add_argument("--host", default="127.0.0.1")
         integration_p.add_argument("--port", type=int, default=8000)
-        integration_p.add_argument("--model-id", default="mtplx-qwen36-27b-native-mtp")
+        integration_p.add_argument("--model-id", default=DEFAULT_PUBLIC_MODEL_ID)
         integration_p.add_argument("--api-key-env", default="MTPLX_AUTH")
+        integration_p.add_argument("--docker", action="store_true", help="Include Dockerized Open WebUI command")
+        integration_p.add_argument("--webui-port", type=int, default=3000)
+        integration_p.add_argument("--single-user", action="store_true")
+        integration_p.add_argument("--api-key", default="mtplx-local")
         integration_p.add_argument("--smoke", action="store_true")
         integration_p.add_argument("--timeout", type=float, default=5.0)
         integration_p.add_argument("--json", action="store_true")
@@ -2138,7 +2246,7 @@ def build_parser() -> argparse.ArgumentParser:
     publish_check_p = model_sub.add_parser("publish-check", help="Validate HF staging readiness without upload")
     publish_check_p.add_argument(
         "--staging-dir",
-        default="hf-staging/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP",
+        default="hf-staging/Qwen3.6-27B-MTPLX-Optimized-Speed",
     )
     publish_check_p.add_argument("--repo-id")
     publish_check_p.set_defaults(func=cmd_model_public)

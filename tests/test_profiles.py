@@ -14,9 +14,9 @@ from mtplx.profiles import (
 def test_profile_registry_default_is_stable() -> None:
     profile = get_profile()
 
-    assert DEFAULT_PROFILE_NAME == "stable"
-    assert profile.name == "stable"
-    assert profile.runtime_profile == "long_response_exact_staged"
+    assert DEFAULT_PROFILE_NAME == "performance-cold"
+    assert profile.name == "performance-cold"
+    assert profile.runtime_profile == "native_mtp_60_cold"
     assert profile.product_claim_eligible is True
 
 

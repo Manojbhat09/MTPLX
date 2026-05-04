@@ -9,12 +9,17 @@ from pathlib import Path
 from typing import Any
 
 from mtplx.constants import DEFAULT_RUNTIME_MODEL_DIR
-from mtplx.profiles import DEFAULT_PROFILE_NAME, resolve_profile_name
+from mtplx.profiles import DEFAULT_HF_MODEL_ID, DEFAULT_MODEL_ID, DEFAULT_PROFILE_NAME, resolve_profile_name
 
 
 DEFAULT_CONFIG_PATH = Path("~/.mtplx/config.toml").expanduser()
-RUNTIME_MODEL_COMMANDS = {"run", "chat", "serve"}
-CACHE_COMMANDS = {"pull", "list", "remove"}
+RUNTIME_MODEL_COMMANDS = {"ask", "run", "chat", "start", "serve", "quickstart", "quick-start"}
+CACHE_COMMANDS = {"pull", "list", "models", "remove"}
+LEGACY_DEFAULT_MODEL_REFS = {
+    "models/Qwen3.6-27B-MTPLX-GDN8-Speed4",
+    "models/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP",
+    "Youssofal/Qwen3.6-27B-MTPLX-Optimized",
+}
 
 
 @dataclass(frozen=True)
@@ -92,8 +97,21 @@ def apply_user_config(args: Any, *, config_path: str | Path | None = None) -> Us
 
 def _apply_model_default(args: Any, config: UserConfig) -> None:
     current = getattr(args, "model", None)
-    if config.model and current == str(DEFAULT_RUNTIME_MODEL_DIR):
+    default_refs = {None, str(DEFAULT_RUNTIME_MODEL_DIR), DEFAULT_HF_MODEL_ID, DEFAULT_MODEL_ID}
+    if (
+        config.model
+        and current in default_refs
+        and not _is_legacy_default_model_ref(config.model)
+    ):
         args.model = config.model
+
+
+def _is_legacy_default_model_ref(model: str) -> bool:
+    normalized = str(Path(model).expanduser()) if model.startswith(("~", "/")) else model
+    return any(
+        normalized == ref or normalized.endswith("/" + ref)
+        for ref in LEGACY_DEFAULT_MODEL_REFS
+    )
 
 
 def _apply_cache_default(args: Any, config: UserConfig) -> None:
@@ -102,6 +120,8 @@ def _apply_cache_default(args: Any, config: UserConfig) -> None:
 
 
 def _apply_profile_default(args: Any, config: UserConfig) -> None:
+    if "profile" in getattr(args, "_cli_flags", set()):
+        return
     current = getattr(args, "profile", None)
     if config.profile and current == DEFAULT_PROFILE_NAME:
         args.profile = config.profile

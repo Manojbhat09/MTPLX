@@ -7,6 +7,7 @@ to plain stdlib ``print`` so the CLI works without ``rich`` installed.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 
@@ -22,6 +23,13 @@ _MTPLX_BANNER = [
 ]
 
 _TAGLINE = "Native MTP speculative decoding · Apple Silicon"
+
+
+def shell_banner_already_shown() -> bool:
+    """Return whether the shell hook already printed the session banner."""
+
+    value = os.environ.get("MTPLX_SHELL_BANNER_SHOWN") or os.environ.get("MTPLX_NO_BANNER")
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def banner_text(*, indent: int = 2) -> str:
@@ -43,6 +51,9 @@ def render_banner(*, console: Any | None = None, no_color: bool = False) -> None
     Falls back to plain text when ``rich`` is not importable or when
     ``no_color`` is set, so the CLI banner survives without dependencies.
     """
+
+    if shell_banner_already_shown():
+        return
 
     if no_color:
         print(banner_text())

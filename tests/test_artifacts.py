@@ -67,6 +67,10 @@ def test_inspect_model_reads_qwen_mtp_config_without_weights(tmp_path):
     assert result.mtp.exists is False
     assert result.compatibility["tier"] == "architecture-compatible-but-unverified"
     assert result.compatibility["exit_code"] == 3
+    assert result.compatibility["runtime_compatibility"] == "missing-mtp-weights"
+    assert result.compatibility["unsafe_force_required"] is False
+    assert "mtplx_runtime.json is optional metadata" in result.compatibility["message"]
+    assert "missing MTP weights" in result.compatibility["message"]
 
 
 def test_qwen3_5_text_subtype_can_pass_primary_gate_when_mtp_is_valid(monkeypatch, tmp_path):
@@ -142,7 +146,7 @@ def test_prequantized_mtp_sidecar_accepts_mlx_affine_scale_bias_tensors(tmp_path
     assert result.compatibility["recommended_profile"] == "performance-cold"
 
 
-def test_qwen_mtp_without_runtime_contract_is_unverified(monkeypatch, tmp_path):
+def test_qwen_mtp_without_runtime_contract_is_family_runnable(monkeypatch, tmp_path):
     from mtplx import artifacts
     from mtplx.artifacts import MTPInspection
 
@@ -172,9 +176,12 @@ def test_qwen_mtp_without_runtime_contract_is_unverified(monkeypatch, tmp_path):
 
     result = inspect_model(tmp_path)
 
-    assert result.passes_primary_gate is False
-    assert result.compatibility["tier"] == "architecture-compatible-but-unverified"
-    assert result.compatibility["unsafe_force_required"] is True
+    assert result.passes_primary_gate is True
+    assert result.compatibility["tier"] == "family-compatible-unverified"
+    assert result.compatibility["can_run"] is True
+    assert result.compatibility["exit_code"] == 0
+    assert result.compatibility["unsafe_force_required"] is False
+    assert result.compatibility["runtime_compatibility"] == "native-family-gated"
 
 
 def test_qwen3_next_architecture_without_mtp_sidecar_is_unverified(tmp_path):
@@ -192,7 +199,7 @@ def test_qwen3_next_architecture_without_mtp_sidecar_is_unverified(tmp_path):
 
     assert result.compatibility["tier"] == "architecture-compatible-but-unverified"
     assert result.compatibility["exit_code"] == 3
-    assert result.compatibility["runtime_compatibility"] == "needs-grafting"
+    assert result.compatibility["runtime_compatibility"] == "missing-mtp-weights"
 
 
 def test_architecture_catalog_tracks_main_mtp_families():
@@ -243,7 +250,13 @@ def test_deepseek_mtp_with_runtime_contract_and_model_file_is_verified(tmp_path)
         ),
         encoding="utf-8",
     )
-    save_file({"model.layers.61.enorm.weight": np.ones((1,), dtype=np.float32)}, tmp_path / "model.safetensors")
+    save_file(
+        {
+            "model.layers.61.enorm.weight": np.ones((1,), dtype=np.float32),
+            "model.layers.62.enorm.weight": np.ones((1,), dtype=np.float32),
+        },
+        tmp_path / "model.safetensors",
+    )
     _write_runtime_contract(tmp_path, arch_id="deepseek-v3-mtp")
 
     result = inspect_model(tmp_path)
@@ -355,7 +368,13 @@ def test_glm_moe_dsa_mtp_with_runtime_contract_and_model_file_is_verified(tmp_pa
         ),
         encoding="utf-8",
     )
-    save_file({"model.layers.61.enorm.weight": np.ones((1,), dtype=np.float32)}, tmp_path / "model.safetensors")
+    save_file(
+        {
+            "model.layers.61.enorm.weight": np.ones((1,), dtype=np.float32),
+            "model.layers.62.enorm.weight": np.ones((1,), dtype=np.float32),
+        },
+        tmp_path / "model.safetensors",
+    )
     _write_runtime_contract(tmp_path, arch_id="glm-moe-dsa-mtp")
 
     result = inspect_model(tmp_path)
@@ -510,10 +529,11 @@ def test_big_mtp_architecture_markers_are_recognized_backend_pending(
         in {
             "deepseek-v3-mtp",
             "glm-moe-dsa-mtp",
-            "glm4-moe-mtp",
-            "glm4-moe-lite-mtp",
-            "mimo-mtp",
-        }
+                "glm4-moe-mtp",
+                "glm4-moe-lite-mtp",
+                "mimo-mtp",
+                "nemotron-h-mtp",
+            }
         else "recognized-backend-pending"
     )
     assert result.compatibility["runtime_compatibility"] == expected_runtime
@@ -555,7 +575,7 @@ def test_llama_without_mtp_is_no_mtp(tmp_path):
     assert result.compatibility["exit_code"] == 2
 
 
-def test_hf_qwen_mtp_without_runtime_contract_is_unverified(monkeypatch):
+def test_hf_qwen_mtp_without_runtime_contract_is_family_runnable(monkeypatch):
     from mtplx import artifacts
 
     calls = []
@@ -592,9 +612,33 @@ def test_hf_qwen_mtp_without_runtime_contract_is_unverified(monkeypatch):
     assert result.source == "hf"
     assert result.mtp is not None
     assert result.mtp.metadata_only is True
-    assert result.compatibility["tier"] == "architecture-compatible-but-unverified"
-    assert result.compatibility["exit_code"] == 3
+    assert result.compatibility["tier"] == "family-compatible-unverified"
+    assert result.compatibility["can_run"] is True
+    assert result.compatibility["exit_code"] == 0
     assert calls == [("Qwen/Qwen3-Next-80B-A3B-Instruct", "mtp.safetensors")]
+
+
+def test_qwen_runtime_loader_reads_bf16_embedded_mtp_weights(tmp_path):
+    import mlx.core as mx
+    from mtplx.mtp_patch import _load_embedded_mtp_weights
+
+    mx.save_safetensors(
+        str(tmp_path / "model.safetensors"),
+        {
+            **{key: mx.ones((1,), dtype=mx.bfloat16) for key in EXPECTED_MTP_KEYS},
+            "model.language_model.layers.0.mlp.down_proj.weight": mx.ones(
+                (1,), dtype=mx.bfloat16
+            ),
+        },
+    )
+
+    weights = _load_embedded_mtp_weights(
+        tmp_path,
+        {"model_type": "qwen3_5", "mtp_num_hidden_layers": 1},
+    )
+
+    assert sorted(weights) == sorted(key.removeprefix("mtp.") for key in EXPECTED_MTP_KEYS)
+    assert weights["fc.weight"].dtype == mx.bfloat16
 
 
 def test_hf_verified_contract_passes_metadata_gate(monkeypatch):

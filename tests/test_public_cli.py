@@ -34,6 +34,27 @@ def test_empty_cli_shows_friendly_consumer_help(capsys):
     assert "capture-commit-equivalence" not in captured
 
 
+def test_shell_banner_env_suppresses_compact_help_ascii(monkeypatch, capsys):
+    monkeypatch.setenv("MTPLX_SHELL_BANNER_SHOWN", "1")
+
+    code = main([])
+
+    captured = capsys.readouterr().out
+    assert code == 0
+    assert "███╗" not in captured
+    assert "Commands" in captured
+    assert "mtplx start" in captured
+
+
+def test_render_banner_respects_shell_banner_env(monkeypatch, capsys):
+    from mtplx.ui.banner import render_banner
+
+    monkeypatch.setenv("MTPLX_SHELL_BANNER_SHOWN", "1")
+    render_banner(no_color=True)
+
+    assert capsys.readouterr().out == ""
+
+
 def test_top_level_help_is_friendly(capsys):
     code = main(["--help"])
 
@@ -117,29 +138,29 @@ def test_main_menu_advertises_help_command(capsys):
     # `help` appears in the Commands section, not just as part of the footer.
     assert "  help " in captured or "help         " in captured
     # Listed near the top: must come before the lab-only commands.
-    quickstart_pos = captured.find("quickstart")
+    quickstart_pos = captured.find("start")
     help_pos = captured.find("\n  help")
     inspect_pos = captured.find("inspect")
     assert quickstart_pos != -1 and help_pos != -1 and inspect_pos != -1
     assert quickstart_pos < help_pos < inspect_pos
 
 
-def test_quickstart_help_is_a_user_journey(capsys):
-    code = main(["help", "quickstart"])
+def test_start_help_is_a_user_journey(capsys):
+    code = main(["help", "start"])
 
     captured = capsys.readouterr().out
     assert code == 0
-    assert "MTPLX quickstart" in captured
+    assert "MTPLX start" in captured
     # Help leads with the interactive onboarding (model/mode/where) instead
     # of the old browser/CLI bifurcation.
     assert "Interactive end-to-end setup" in captured
     assert "What gets asked" in captured
     assert "ThermalForge" in captured  # Max mode advertises auto-install
     # Power-user shortcuts still showcased.
-    assert "mtplx quickstart --fresh" in captured
-    assert "mtplx quickstart --max" in captured
-    assert "mtplx quickstart cli" in captured
-    assert "mtplx quickstart --download" in captured
+    assert "mtplx start --fresh" in captured
+    assert "mtplx start --max" in captured
+    assert "mtplx start cli" in captured
+    assert "mtplx start --download" in captured
     assert "/speed" in captured
     assert "Aliases:" in captured
     assert "openwebui" in captured
@@ -156,13 +177,13 @@ def test_unknown_command_is_targeted_not_argparse_dump(capsys):
     assert "usage: mtplx" not in captured
 
 
-def test_quickstart_dry_run_is_consumer_friendly(monkeypatch, tmp_path, capsys):
-    """The default quickstart now opens the browser chat; the terminal flow lives behind `cli`."""
+def test_start_dry_run_is_consumer_friendly(monkeypatch, tmp_path, capsys):
+    """The default start opens the browser chat; the terminal flow lives behind `cli`."""
     monkeypatch.setenv("MTPLX_CONFIG", str(tmp_path / "missing-config.toml"))
 
     code = main(
         [
-            "quickstart",
+            "start",
             "cli",
             "--dry-run",
             "--model",
@@ -173,14 +194,14 @@ def test_quickstart_dry_run_is_consumer_friendly(monkeypatch, tmp_path, capsys):
 
     captured = capsys.readouterr().out
     assert code == 0
-    assert "MTPLX quickstart" in captured
+    assert "MTPLX start" in captured
     assert "model: models/example" in captured
     assert "profile: performance-cold" in captured
     assert "then: load once -> chat in this terminal -> stream output -> show speed stats" in captured
 
 
-def test_quickstart_default_target_is_browser(monkeypatch, tmp_path):
-    """`mtplx quickstart` (no target) must dry-run as the openwebui browser path."""
+def test_start_default_target_is_browser(monkeypatch, tmp_path):
+    """`mtplx start` (no target) must dry-run as the openwebui browser path."""
     monkeypatch.setenv("MTPLX_CONFIG", str(tmp_path / "missing-config.toml"))
     args = SimpleNamespace(
         target=None,
@@ -202,12 +223,12 @@ def test_quickstart_default_target_is_browser(monkeypatch, tmp_path):
     assert code == 0
 
 
-def test_quickstart_target_aliases_route_correctly(monkeypatch, tmp_path, capsys):
+def test_start_target_aliases_route_correctly(monkeypatch, tmp_path, capsys):
     """`web`, `openwebui`, `open-webui` -> openwebui; `cli`, `terminal` -> terminal."""
     monkeypatch.setenv("MTPLX_CONFIG", str(tmp_path / "missing-config.toml"))
 
     def run(target: str | None) -> dict:
-        argv = ["quickstart"]
+        argv = ["start"]
         if target:
             argv.append(target)
         argv += ["--dry-run", "--json", "--model", "models/example", "--yes"]
@@ -341,26 +362,26 @@ def test_one_shot_max_uses_verified_max_session(monkeypatch):
     assert calls == ["start", "stop"]
 
 
-def test_quickstart_parser_accepts_new_target_choices():
+def test_start_parser_accepts_target_choices():
     """Parser must accept the new `web` and `cli` target literals."""
     parser = build_parser()
     for target in ("web", "cli", "openwebui", "open-webui", "terminal"):
-        args = parser.parse_args(["quickstart", target, "--dry-run"])
+        args = parser.parse_args(["start", target, "--dry-run"])
         assert args.target == target
     # Default target (no positional) is now None — the absence of an explicit
     # target is what tells the handler to run the interactive onboarding flow
     # (or fall back to "web" when non-interactive). The `--fresh` flag is also
     # accepted for forcing the full onboarding.
-    args_default = parser.parse_args(["quickstart", "--dry-run"])
+    args_default = parser.parse_args(["start", "--dry-run"])
     assert args_default.target is None
-    args_fresh = parser.parse_args(["quickstart", "--fresh", "--dry-run"])
+    args_fresh = parser.parse_args(["start", "--fresh", "--dry-run"])
     assert args_fresh.fresh is True
 
 
 def test_cli_response_cap_defaults_to_remaining_context():
     parser = build_parser()
 
-    quickstart = parser.parse_args(["quickstart", "cli", "--dry-run"])
+    quickstart = parser.parse_args(["start", "cli", "--dry-run"])
     ask = parser.parse_args(["ask", "hello"])
     run = parser.parse_args(["run", "hello"])
     chat = parser.parse_args(["chat", "--prompt", "hello"])
@@ -374,7 +395,7 @@ def test_cli_response_cap_defaults_to_remaining_context():
 def test_cli_reasoning_flags_parse_without_being_chat_text():
     parser = build_parser()
 
-    quickstart = parser.parse_args(["quickstart", "cli", "--reasoning", "on"])
+    quickstart = parser.parse_args(["start", "cli", "--reasoning", "on"])
     run = parser.parse_args(["run", "hello", "--reasoning", "off"])
     serve = parser.parse_args(["serve", "--reasoning", "auto"])
 
@@ -383,13 +404,14 @@ def test_cli_reasoning_flags_parse_without_being_chat_text():
     assert serve.reasoning == "auto"
 
 
-def test_quickstart_missing_model_suggests_download(monkeypatch, capsys):
+def test_start_missing_model_suggests_download(monkeypatch, capsys):
     monkeypatch.setattr(
         public,
         "_resolve_runtime_model_path",
         lambda model, cache_dir=None: (None, {"detail": "not cached"}),
     )
     args = SimpleNamespace(
+        command="start",
         model="mtplx/example",
         cache_dir="/tmp/mtplx-models",
         download=False,
@@ -406,11 +428,11 @@ def test_quickstart_missing_model_suggests_download(monkeypatch, capsys):
 
     captured = capsys.readouterr().out
     assert code == 1
-    assert "MTPLX quickstart" in captured
+    assert "MTPLX start" in captured
     assert "model is not available locally" in captured
     assert "detail: not cached" in captured
-    assert "try: mtplx quickstart --download" in captured
-    assert "try: mtplx quickstart --model /path/to/model" in captured
+    assert "try: mtplx start --download" in captured
+    assert "try: mtplx start --model /path/to/model" in captured
 
 
 def test_quickstart_short_reply_reports_decode_tps():
@@ -432,7 +454,7 @@ def test_quickstart_short_reply_reports_decode_tps():
     assert "54.8 ms/verify" in line
 
 
-def test_quickstart_short_reply_prefers_stream_tps_when_available():
+def test_quickstart_short_reply_prefers_decode_tps_and_labels_live_window():
     line = public._quickstart_stats_line(
         {
             "profile": {"name": "performance-cold"},
@@ -450,8 +472,8 @@ def test_quickstart_short_reply_prefers_stream_tps_when_available():
         }
     )
 
-    assert "42.00 tok/s" in line
-    assert "decode=28.48" in line
+    assert "28.48 tok/s" in line
+    assert "live_window=42.00" in line
     assert "total=25.00" in line
     assert "5 verify calls" in line
     assert "accept=[4, 3, 2]" in line
@@ -476,7 +498,7 @@ def test_quickstart_tiny_reply_prefers_decode_over_noisy_stream_window():
     )
 
     assert "34.68 tok/s" in line
-    assert "stream=12.24" in line
+    assert "live_window=12.24" in line
     assert "total=8.73" in line
 
 
@@ -650,7 +672,7 @@ def test_quickstart_openwebui_dry_run_json(monkeypatch, tmp_path, capsys):
 
     code = main(
         [
-            "quickstart",
+            "start",
             "openwebui",
             "--dry-run",
             "--json",
@@ -666,7 +688,9 @@ def test_quickstart_openwebui_dry_run_json(monkeypatch, tmp_path, capsys):
     assert code == 0
     assert payload["target"] == "openwebui"
     assert payload["terminal_chat"] is False
-    assert payload["openwebui"]["base_url"] == "http://127.0.0.1:18012"
+    assert payload["openwebui"]["server_url"] == "http://127.0.0.1:18012"
+    assert payload["openwebui"]["base_url"] == "http://127.0.0.1:18012/v1"
+    assert payload["openwebui"]["api_base_url"] == "http://127.0.0.1:18012/v1"
     assert payload["openwebui"]["chat_url"] == "http://127.0.0.1:18012/"
     assert "Open chat UI: http://127.0.0.1:18012/" in payload["openwebui"]["openwebui_steps"]
     assert "OpenAI-compatible API base URL: http://127.0.0.1:18012/v1" in payload["openwebui"]["openwebui_steps"]
@@ -754,13 +778,11 @@ def test_public_bench_run_dry_run(capsys):
     assert code == 0
     assert '"action": "bench run"' in captured
     assert '"automatic": true' in captured
-    assert '"harness": "direct-http"' in captured
-    assert '"seed": 42' in captured
-    assert "run_context_degradation_diagnostics.py" in captured
-    assert '"runtime_profile": "long_response_exact_staged"' in captured
-    assert '"MTPLX_DROP_EVENTS": "1"' in captured
-    assert '"MTPLX_EVAL_STATE_ROOTS_ON_COMMIT": "1"' in captured
-    assert '"MTPLX_TARGET_LAYER_EVAL_SCHEDULE": "2048:16,8192:8"' in captured
+    assert '"harness": "depth-sweep"' in captured
+    assert '"seed": 0' in captured
+    assert '"direct_http_command": null' in captured
+    assert '"runtime_profile": "native_mtp_60_cold"' in captured
+    assert '"MTPLX_LAZY_VERIFY_LOGITS": "1"' in captured
 
 
 def test_public_bench_run_dry_run_records_external_kernel_env(monkeypatch, capsys):
@@ -798,7 +820,7 @@ def test_public_bench_run_dry_run_records_external_kernel_env(monkeypatch, capsy
     assert payload["runtime_env"]["MTPLX_EVAL_STATE_ROOTS_INCLUDE_LIVE"] == "0"
 
 
-def test_public_bench_cold_run_defaults_to_stable_mode(capsys):
+def test_public_bench_cold_run_defaults_to_performance_cold_mode(capsys):
     code = main(
         [
             "bench",
@@ -817,12 +839,12 @@ def test_public_bench_cold_run_defaults_to_stable_mode(capsys):
     captured = capsys.readouterr().out
     payload = json.loads(captured)
     assert code == 0
-    assert payload["profile"]["name"] == "stable"
-    assert payload["harness"] == "direct-http"
-    assert payload["seed"] == 42
-    assert payload["runtime_profile"] == "long_response_exact_staged"
-    assert payload["runtime_env"]["MTPLX_DROP_EVENTS"] == "1"
-    assert payload["runtime_env"]["MTPLX_TARGET_LAYER_EVAL_SCHEDULE"] == "2048:16,8192:8"
+    assert payload["profile"]["name"] == "performance-cold"
+    assert payload["harness"] == "depth-sweep"
+    assert payload["seed"] == 0
+    assert payload["runtime_profile"] == "native_mtp_60_cold"
+    assert payload["runtime_env"]["MTPLX_LAZY_VERIFY_LOGITS"] == "1"
+    assert "MTPLX_TARGET_LAYER_EVAL_SCHEDULE" not in payload["runtime_env"]
 
 
 def test_public_bench_performance_cold_is_explicit(capsys):
@@ -986,9 +1008,9 @@ def test_bench_nightly_dry_run_lists_kernel_gate_tasks(capsys):
     assert payload["full_exactness_command"][0:2] == ["qa", "exactness"]
     assert [task["profile"] for task in payload["tasks"]] == [
         "performance-cold",
-        "stable",
-        "stable",
-        "stable",
+        "performance-cold",
+        "performance-cold",
+        "performance-cold",
     ]
     flappy_6k_command = payload["tasks"][1]["direct_http_command"]
     assert "--python-bin" in flappy_6k_command
@@ -1042,7 +1064,7 @@ def test_bench_compare_envelopes_detects_cold_regression(tmp_path, capsys):
     assert payload["comparisons"][0]["gates"]["cold_floor_ge_59"] is False
 
 
-def test_chat_and_serve_default_to_stable_mode():
+def test_chat_and_serve_default_to_performance_cold_mode():
     parser = build_parser()
 
     run_args = parser.parse_args(["run", "hello", "--cache-dir", "/tmp/mtplx-models"])
@@ -1051,15 +1073,15 @@ def test_chat_and_serve_default_to_stable_mode():
     serve_max_args = parser.parse_args(["serve", "--max"])
     serve_no_footer_args = parser.parse_args(["serve", "--no-stats-footer"])
 
-    assert run_args.profile == "stable"
+    assert run_args.profile == "performance-cold"
     assert run_args.prompt_arg == "hello"
     assert run_args.cache_dir == "/tmp/mtplx-models"
     assert run_args.max_tokens is None
     assert run_args.reasoning is None
-    assert chat_args.profile == "stable"
+    assert chat_args.profile == "performance-cold"
     assert chat_args.max_tokens is None
     assert chat_args.reasoning is None
-    assert serve_args.profile == "stable"
+    assert serve_args.profile == "performance-cold"
     assert serve_args.reasoning is None
     assert serve_max_args.max is True
     assert serve_args.stream_interval == 1
@@ -1072,25 +1094,29 @@ def test_chat_and_serve_default_to_stable_mode():
 def test_product_helper_commands_parse():
     parser = build_parser()
 
-    quickstart = parser.parse_args(
-        ["quickstart", "--prompt", "hello", "--max-tokens", "16", "--no-stats"]
+    start = parser.parse_args(
+        ["start", "--prompt", "hello", "--max-tokens", "16", "--no-stats"]
     )
-    quickstart_openwebui = parser.parse_args(["quickstart", "openwebui", "--port", "18012"])
-    quickstart_openwebui_strict = parser.parse_args(["quickstart", "openwebui", "--strict-fast-path"])
-    quickstart_alias = parser.parse_args(["quick-start", "--dry-run"])
+    start_openwebui = parser.parse_args(["start", "openwebui", "--port", "18012"])
+    start_openwebui_strict = parser.parse_args(["start", "openwebui", "--strict-fast-path"])
+    quickstart = parser.parse_args(["quickstart", "--port", "18012"])
+    quickstart_alias = parser.parse_args(["quick-start", "--port", "18013"])
     setup = parser.parse_args(["setup", "--dry-run"])
+    pull_default = parser.parse_args(["pull"])
     ask = parser.parse_args(["ask", "hello"])
     ask_stats = parser.parse_args(["ask", "hello", "--stats"])
-    start = parser.parse_args(["start", "--port", "18012"])
+    serve_start = parser.parse_args(["serve", "--port", "18012"])
     status = parser.parse_args(["status", "--deep"])
     connect = parser.parse_args(["connect", "openwebui", "--port", "18012"])
     models = parser.parse_args(["models", "--json"])
+    report = parser.parse_args(["report", "--output-dir", "reports"])
     nightly = parser.parse_args(["bench", "nightly", "--out", "out.json"])
     nightly_json = parser.parse_args(["bench", "nightly", "--json", "--dry-run"])
     debug = parser.parse_args(["debug", "bundle", "--run-id", "debug-test"])
     hotpath = parser.parse_args(["debug", "hotpath"])
     metrics = parser.parse_args(["metrics", "watch", "--count", "1", "--json"])
     openwebui = parser.parse_args(["integrate", "openwebui", "--port", "18012", "--json"])
+    openwebui_docker = parser.parse_args(["openwebui", "docker-command", "--mtplx-port", "18012"])
     claude = parser.parse_args(["integrate", "claude-code", "--port", "18012"])
     architectures = parser.parse_args(["model", "architectures", "--json"])
     qa_architectures = parser.parse_args(["model", "qa-architectures", "--json"])
@@ -1098,30 +1124,37 @@ def test_product_helper_commands_parse():
     config = parser.parse_args(["config", "set", "profile", "exact", "--dry-run"])
     attribution = parser.parse_args(["profile", "eval-attribution", "--dry-run"])
 
+    assert start.command == "start"
+    assert start.prompt == "hello"
+    assert start.max_tokens == 16
+    assert start.show_stats is False
+    assert start_openwebui.target == "openwebui"
+    assert start_openwebui.port == 18012
+    assert start_openwebui.strict_fast_path is False
+    assert start_openwebui_strict.strict_fast_path is True
     assert quickstart.command == "quickstart"
-    assert quickstart.prompt == "hello"
-    assert quickstart.max_tokens == 16
-    assert quickstart.show_stats is False
-    assert quickstart_openwebui.target == "openwebui"
-    assert quickstart_openwebui.port == 18012
-    assert quickstart_openwebui.strict_fast_path is False
-    assert quickstart_openwebui_strict.strict_fast_path is True
+    assert quickstart.port == 18012
     assert quickstart_alias.command == "quick-start"
-    assert quickstart_alias.dry_run is True
+    assert quickstart_alias.port == 18013
     assert setup.command == "setup"
     assert setup.dry_run is True
+    assert pull_default.command == "pull"
+    assert pull_default.model == "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed"
     assert ask.command == "ask"
     assert ask.prompt_arg == "hello"
     assert ask.quiet is True
     assert ask_stats.quiet is False
-    assert start.command == "start"
-    assert start.port == 18012
-    assert start.stats_footer is False
+    assert serve_start.command == "serve"
+    assert serve_start.port == 18012
+    assert serve_start.stats_footer is True
     assert status.command == "status"
     assert status.deep is True
     assert connect.command == "connect"
     assert connect.integration == "openwebui"
     assert models.command == "models"
+    assert report.command == "report"
+    assert report.bundle is True
+    assert report.deep is True
     assert nightly.bench_action == "nightly"
     assert nightly.output == "out.json"
     assert nightly_json.json is True
@@ -1129,6 +1162,8 @@ def test_product_helper_commands_parse():
     assert hotpath.debug_action == "hotpath"
     assert metrics.metrics_action == "watch"
     assert openwebui.integration == "openwebui"
+    assert openwebui_docker.openwebui_action == "docker-command"
+    assert openwebui_docker.mtplx_port == 18012
     assert claude.integration == "claude-code"
     assert architectures.model_action == "architectures"
     assert qa_architectures.model_action == "qa-architectures"
@@ -1176,7 +1211,10 @@ def test_integrate_openwebui_json(capsys):
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
     assert payload["integration"] == "openwebui"
-    assert payload["base_url"] == "http://127.0.0.1:18012"
+    assert payload["server_url"] == "http://127.0.0.1:18012"
+    assert payload["base_url"] == "http://127.0.0.1:18012/v1"
+    assert payload["docker_api_base_url"] == "http://host.docker.internal:18012/v1"
+    assert "host.docker.internal:18012/v1" in payload["docker_command"]
     assert "--no-stats-footer" in payload["server_command"]
 
 
@@ -1279,10 +1317,223 @@ def test_serve_dispatches_packaged_openai_server(monkeypatch, capsys):
     assert calls["cmd"][calls["cmd"].index("--rate-limit") + 1] == "120"
     assert calls["cmd"][calls["cmd"].index("--stream-interval") + 1] == "4"
     assert calls["cmd"][calls["cmd"].index("--max-response-tokens") + 1] == "512"
-    assert calls["cmd"][calls["cmd"].index("--model-id") + 1] == "mtplx-qwen36-27b-native-mtp"
+    assert calls["cmd"][calls["cmd"].index("--model-id") + 1] == "mtplx-qwen36-27b-optimized-speed"
     assert "--no-enable-thinking" in calls["cmd"]
     assert "--no-stats-footer" in calls["cmd"]
     assert "--strict-warmup" in calls["cmd"]
+
+
+def test_bare_serve_invokes_server_onboarding_in_tty(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr(public, "_port_is_busy", lambda host, port: False)
+    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: (model, None))
+    monkeypatch.setattr(
+        public,
+        "_model_gate",
+        lambda model, unsafe_force_unverified=False, yes=False: (
+            {"compatibility": {"tier": "verified", "can_run": True, "exit_code": 0}},
+            None,
+        ),
+    )
+    invocations: list[dict] = []
+
+    def fake_flow(**kwargs):
+        invocations.append(kwargs)
+        return {
+            "model": "models/onboarded",
+            "profile": "performance-cold",
+            "max": False,
+            "target": "server",
+            "open_browser": False,
+        }
+
+    monkeypatch.setattr("mtplx.ui.onboarding.run_serve_flow", fake_flow)
+    calls = {}
+
+    def fake_execvpe(executable, cmd, env):
+        calls["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(public.os, "execvpe", fake_execvpe)
+    args = SimpleNamespace(
+        command="serve",
+        model="models/configured",
+        cache_dir=None,
+        download=False,
+        profile="stable",
+        unsafe_force_unverified=False,
+        yes=False,
+        host="127.0.0.1",
+        port=8765,
+        depth=3,
+        api_key=None,
+        rate_limit=0,
+        stream_interval=1,
+        max_response_tokens=None,
+        temperature=0.6,
+        top_p=0.95,
+        reasoning_parser="qwen3",
+        stats_footer=True,
+        warmup_tokens=0,
+        strict_warmup=False,
+        strict_fast_path=False,
+        max=False,
+        open_browser=False,
+        _cli_flags=set(),
+    )
+
+    try:
+        public.cmd_serve_public(args)
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    assert len(invocations) == 1
+    assert invocations[0]["configured_model"] == "models/configured"
+    assert invocations[0]["port"] == 8765
+    assert args._onboarded is True
+    assert args.model == "models/onboarded"
+    assert calls["cmd"][calls["cmd"].index("--model") + 1] == "models/onboarded"
+    assert "--open-browser" not in calls["cmd"]
+
+
+def test_bare_serve_hf_choice_enables_download_and_browser(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr(public, "_port_is_busy", lambda host, port: False)
+    monkeypatch.setattr(
+        public,
+        "_model_gate",
+        lambda model, unsafe_force_unverified=False, yes=False: (
+            {"compatibility": {"tier": "verified", "can_run": True, "exit_code": 0}},
+            None,
+        ),
+    )
+
+    def fake_flow(**_kwargs):
+        return {
+            "model": "owner/repo",
+            "profile": "performance-cold",
+            "max": False,
+            "target": "openwebui",
+            "open_browser": True,
+        }
+
+    resolution_calls: list[dict] = []
+
+    def fake_quickstart_resolve(model, *, cache_dir, download):
+        resolution_calls.append({"model": model, "download": download})
+        return "/tmp/runtime-model", {
+            "model": model,
+            "runtime_model": "/tmp/runtime-model",
+            "downloaded": True,
+            "download_ref": model,
+        }
+
+    monkeypatch.setattr("mtplx.ui.onboarding.run_serve_flow", fake_flow)
+    monkeypatch.setattr(public, "_quickstart_resolve_model", fake_quickstart_resolve)
+    calls = {}
+
+    def fake_execvpe(executable, cmd, env):
+        calls["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(public.os, "execvpe", fake_execvpe)
+    args = SimpleNamespace(
+        command="serve",
+        model="models/configured",
+        cache_dir=None,
+        download=False,
+        profile="stable",
+        unsafe_force_unverified=False,
+        yes=False,
+        host="127.0.0.1",
+        port=8765,
+        depth=3,
+        api_key=None,
+        rate_limit=0,
+        stream_interval=1,
+        max_response_tokens=None,
+        temperature=0.6,
+        top_p=0.95,
+        reasoning_parser="qwen3",
+        stats_footer=True,
+        warmup_tokens=0,
+        strict_warmup=False,
+        strict_fast_path=False,
+        max=False,
+        open_browser=False,
+        _cli_flags=set(),
+    )
+
+    try:
+        public.cmd_serve_public(args)
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    assert resolution_calls == [{"model": "owner/repo", "download": True}]
+    assert calls["cmd"][calls["cmd"].index("--model") + 1] == "/tmp/runtime-model"
+    assert "--open-browser" in calls["cmd"]
+
+
+def test_serve_skips_onboarding_with_explicit_model(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr(public, "_port_is_busy", lambda host, port: False)
+    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: (model, None))
+    monkeypatch.setattr(
+        public,
+        "_model_gate",
+        lambda model, unsafe_force_unverified=False, yes=False: (
+            {"compatibility": {"tier": "verified", "can_run": True, "exit_code": 0}},
+            None,
+        ),
+    )
+
+    def fail_flow(**_kwargs):
+        raise AssertionError("explicit --model should skip server onboarding")
+
+    monkeypatch.setattr("mtplx.ui.onboarding.run_serve_flow", fail_flow)
+    calls = {}
+
+    def fake_execvpe(executable, cmd, env):
+        calls["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(public.os, "execvpe", fake_execvpe)
+    args = SimpleNamespace(
+        command="serve",
+        model="models/explicit",
+        cache_dir=None,
+        download=False,
+        profile="performance-cold",
+        unsafe_force_unverified=False,
+        yes=False,
+        host="127.0.0.1",
+        port=8000,
+        depth=3,
+        api_key=None,
+        rate_limit=0,
+        stream_interval=1,
+        max_response_tokens=None,
+        temperature=0.6,
+        top_p=0.95,
+        reasoning_parser="qwen3",
+        stats_footer=True,
+        warmup_tokens=0,
+        strict_warmup=False,
+        strict_fast_path=False,
+        max=False,
+        open_browser=False,
+        _cli_flags={"model"},
+    )
+
+    try:
+        public.cmd_serve_public(args)
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    assert calls["cmd"][calls["cmd"].index("--model") + 1] == "models/explicit"
 
 
 def test_serve_relaxes_missing_fast_mlx_fork_for_product_start(monkeypatch, capsys):
@@ -1427,8 +1678,8 @@ def test_serve_reports_busy_port_before_model_resolution(monkeypatch, capsys):
     assert "MTPLX" in captured
     assert "0.1.0-preview" in captured
     assert "error: port 8000 is already in use" in captured
-    assert "stop the old mtplx start terminal with Ctrl-C" in captured
-    assert "try: mtplx start --port 8001" in captured
+    assert "stop the old mtplx quickstart terminal with Ctrl-C" in captured
+    assert "try: mtplx quickstart --port 8001" in captured
 
 
 def test_quickstart_openwebui_reuses_existing_server(monkeypatch, capsys):
@@ -1436,7 +1687,7 @@ def test_quickstart_openwebui_reuses_existing_server(monkeypatch, capsys):
     monkeypatch.setattr(
         public,
         "_http_json",
-        lambda url, timeout=15.0: {"ok": True, "model": "mtplx-qwen36-27b-native-mtp"},
+        lambda url, timeout=15.0: {"ok": True, "model": "mtplx-qwen36-27b-optimized-speed"},
     )
     monkeypatch.setattr(
         public,
@@ -1447,7 +1698,7 @@ def test_quickstart_openwebui_reuses_existing_server(monkeypatch, capsys):
     monkeypatch.setattr(public, "_open_browser_url", lambda url: opened.setdefault("url", url))
     args = SimpleNamespace(
         model="models/example",
-        model_id="mtplx-qwen36-27b-native-mtp",
+        model_id="mtplx-qwen36-27b-optimized-speed",
         cache_dir=None,
         profile="performance-cold",
         unsafe_force_unverified=False,
@@ -1556,12 +1807,66 @@ def test_inspect_human_output_is_default(tmp_path, capsys):
     assert "message: Model has no MTP head." in captured
 
 
+def test_start_gate_failure_is_human_readable_for_config_only_qwen(tmp_path, capsys):
+    model = tmp_path / "qwen-config-only"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen3_5ForConditionalGeneration"],
+                "model_type": "qwen3_5",
+                "mtp_num_hidden_layers": 1,
+                "num_hidden_layers": 64,
+                "hidden_size": 5120,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = main(["start", "cli", "--model", str(model), "--yes"])
+
+    captured = capsys.readouterr().out
+    assert code == 3
+    assert "error: model cannot run with MTPLX" in captured
+    assert "runtime: missing-mtp-weights" in captured
+    assert "mtplx_runtime.json is optional metadata" in captured
+    assert "fix: choose a model with real MTP weights" in captured
+    assert "\"model_files\"" not in captured
+
+
+def test_start_gate_failure_is_human_readable_for_config_only_glm(tmp_path, capsys):
+    model = tmp_path / "glm-config-only"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Glm4MoeLiteForCausalLM"],
+                "model_type": "glm4_moe_lite",
+                "num_hidden_layers": 47,
+                "num_nextn_predict_layers": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = main(["start", "cli", "--model", str(model), "--yes"])
+
+    captured = capsys.readouterr().out
+    assert code == 3
+    assert "error: model cannot run with MTPLX" in captured
+    assert "runtime: missing-mtp-weights" in captured
+    assert "mtplx_runtime.json is optional metadata" in captured
+    assert "fix: choose a model with real MTP weights" in captured
+    assert "MTP MTP markers" not in captured
+    assert "\"model_files\"" not in captured
+
+
 def test_profiles_command_lists_default_without_mlx(capsys):
     code = main(["profiles", "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
-    assert payload["default"] == "stable"
+    assert payload["default"] == "performance-cold"
     assert [profile["name"] for profile in payload["profiles"]] == [
         "stable",
         "performance-cold",

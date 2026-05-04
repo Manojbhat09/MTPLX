@@ -269,9 +269,30 @@ def fan_summary() -> dict[str, Any]:
     }
 
 
-# Threshold (RPM) above which we consider fans "ramped" after `thermalforge max`.
-# Apple Silicon idle RPMs are usually ~1500-2000; 4000+ is clearly elevated.
-FAN_RAMP_THRESHOLD_RPM = 4000
+# Fraction of a fan's reported capacity that proves a max/performance command
+# has reached the controller. Some Macs report very different RPM envelopes, so
+# use hardware capacity when available and keep the old absolute threshold only
+# as a sensorless fallback.
+FAN_RAMP_TARGET_FRACTION = 0.85
+FAN_RAMP_FALLBACK_THRESHOLD_RPM = 4000
+
+
+def _fan_target_is_ramped(fan: dict[str, Any]) -> bool:
+    target = fan.get("target_rpm")
+    try:
+        target_int = None if target is None else int(target)
+    except (TypeError, ValueError):
+        target_int = None
+    if target_int is None:
+        return False
+    max_capacity = fan.get("max_capacity_rpm") or (fan.get("raw") or {}).get("max_rpm")
+    try:
+        max_int = None if max_capacity is None else int(max_capacity)
+    except (TypeError, ValueError):
+        max_int = None
+    if max_int and max_int > 0:
+        return target_int >= int(max_int * FAN_RAMP_TARGET_FRACTION)
+    return target_int >= FAN_RAMP_FALLBACK_THRESHOLD_RPM
 
 
 def _summary_indicates_max(summary: dict[str, Any]) -> bool:
@@ -291,12 +312,8 @@ def _summary_indicates_max(summary: dict[str, Any]) -> bool:
         mode = (fan.get("mode") or "").lower()
         if mode in {"manual", "max"}:
             return True
-        target = fan.get("target_rpm")
-        try:
-            if target is not None and int(target) >= FAN_RAMP_THRESHOLD_RPM:
-                return True
-        except (TypeError, ValueError):
-            pass
+        if _fan_target_is_ramped(fan):
+            return True
     return False
 
 
@@ -319,7 +336,7 @@ def _summary_indicates_auto(summary: dict[str, Any]) -> bool:
         # setpoint (~min_rpm) while mode is auto. The mode is the authoritative
         # restore signal; target only helps when a tool omits mode.
         if mode in {"auto", "automatic", "default"}:
-            if target_int is not None and target_int >= FAN_RAMP_THRESHOLD_RPM:
+            if _fan_target_is_ramped(fan):
                 return False
             continue
         if target_int is not None and target_int <= 0:
@@ -459,7 +476,12 @@ def set_thermal_profile_verified(
     }
 
 
-def restore_thermal_profile_verified(*, log: Any = None) -> dict[str, Any]:
+def restore_thermal_profile_verified(
+    *,
+    log: Any = None,
+    settle_timeout_s: float = 12.0,
+    poll_interval_s: float = 1.0,
+) -> dict[str, Any]:
     """Restore Apple-default fan control and prove the daemon accepted it.
 
     This is intentionally stricter than the old ``set_thermal_profile("silent")``
@@ -476,7 +498,13 @@ def restore_thermal_profile_verified(*, log: Any = None) -> dict[str, Any]:
 
     _emit("[max] restoring fans to Apple auto curve...")
     set_result = set_thermal_profile("silent")
+    deadline = time.monotonic() + max(0.0, float(settle_timeout_s))
     after = fan_summary()
+    while bool(set_result.get("ok")) and not _summary_indicates_auto(after):
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(max(0.1, float(poll_interval_s)))
+        after = fan_summary()
     ok = bool(set_result.get("ok")) and _summary_indicates_auto(after)
     message = "fan profile restored" if ok else "fan restore was attempted but not verified"
     if ok:
@@ -962,7 +990,7 @@ def run_command_with_profile(
 
 # ---------- auto-install -----------------------------------------------------
 #
-# Bootstrap path for users who pick Max mode in `mtplx quickstart` and don't
+# Bootstrap path for users who pick Max mode in `mtplx start` and don't
 # already have a fan controller.
 #
 # As of 2026-04 the upstream Homebrew tap (ProducerGuy/tap) ships a formula

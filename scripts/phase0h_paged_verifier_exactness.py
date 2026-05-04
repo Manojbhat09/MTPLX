@@ -177,11 +177,12 @@ def _forward_decode_from_stock_prefix_last_logits(
         prefill = rt.forward_ar(prefill_ids, cache=cache, return_hidden=False)
         _eval_result(prefill)
     if paged:
-        install_vllm_metal_paged_attention_kv_cache(
-            cache,
-            block_size=args.block_size,
-            num_blocks=args.num_blocks,
-        )
+        with patched_env(_profile_env(args, enabled=True)):
+            install_vllm_metal_paged_attention_kv_cache(
+                cache,
+                block_size=args.block_size,
+                num_blocks=args.num_blocks,
+            )
     input_ids = mx.array([verify_ids], dtype=mx.int32)
     with patched_env(_profile_env(args, enabled=paged)):
         configure_split_full_attention(rt.model)

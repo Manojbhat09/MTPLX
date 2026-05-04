@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mtplx chat --model "${MTPLX_MODEL:-mtplx/Qwen3.6-27B-MTPLX-GDN8-Speed4-CyanKiwiMTP}"
+mtplx chat --model "${MTPLX_MODEL:-Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed}"
