@@ -213,7 +213,56 @@ Every command has `--json` for machine-readable output and `--help` for context-
 
 ## Architecture
 
-The architectural achievement is **a single-model native-MTP runtime that's mathematically exact at temperature**, with a real serving surface bolted on. There is no second drafter, no greedy hack, and no "drop in a fast-decode library" wrapper. Three layers, drawn the way they actually run.
+The architectural achievement is **a single-model native-MTP runtime that's mathematically exact at temperature**, with a real serving surface bolted on. There is no second drafter, no greedy hack, and no "drop in a fast-decode library" wrapper. Four layers, drawn the way they actually run.
+
+### 0. MLX runtime layer (the kernel stack we own)
+
+MTPLX is not a thin wrapper over stock MLX — the speed lane sits on top of an **MLX source fork** plus a small set of **custom Metal kernels** registered as primitives. Stock `mlx-lm` cannot reproduce the multiplier above; the runtime layer is what makes the speculative cycle in §2 tractable on Apple Silicon.
+
+What we changed at the MLX source level (fork: `mlx-mtplx-0.31.2-qmm`, commit `2377a99f` "Tune small-M qmv for MTPLX 60TPS path"):
+
+- **Small-M `qmv` retuning.** The verify forward is dominated by quantized-matrix-vector ops at `M ≈ 3..6` (one position per accepted draft). Stock MLX's `qmv_fast_impl` is tuned for large M and stalls dispatch at small M. Our fork: `BN16` group-size, **4-simdgroup** instead of 2-simdgroup, `unroll_count(4)` on the inner loop. Cuts the verify-MLP region by enough to be the difference between "MTP loses to AR" and "MTP at ~2.24×".
+- **Source-primitive registration.** Custom kernels (below) are registered through `mlx.core.fast.metal_kernel` and integrated into MLX's graph the same way stock primitives are, so `mx.compile` can fuse around them and `mx.eval` doesn't see them as opaque blocks.
+
+Custom Metal kernels we shipped on top of the fork:
+
+- **`linear-gdn-from-conv-tape`** — the GDN linear-attention path during verify. Records an *innovation tape* of `(token, gate, state-delta)` tuples during the draft phase, then **replays** them deterministically on rollback when a draft is rejected. Replaces stock MLX's `Conv1d` + recurrent-state restore with a single fused kernel that's bit-exact (`max_diff = 0.0` against batched-vs-sequential reference) and shape-stable.
+- **`verify_qmv` (small-M qmv kernel).** Direct successor of dflash-mlx's M=16 idea, retuned for MTPLX's M=3..6 verify shapes. Now subsumed by the MLX-source qmv tuning above for the verify hot path; remains as a standalone primitive for diagnostic regressions.
+- **GraphBank.** A cache of `mx.compile`-compiled verify graphs, keyed by `(suffix_length, depth, profile)`. Each verify shape gets one compiled graph reused across cycles — no per-cycle Python dispatch overhead. Capture-commit + GraphBank together hit `capture_commit_time_s ≈ 0.073 ms` per cycle (vs `verify_time_s ≈ 47 ms` per cycle), i.e. the commit step is three orders of magnitude smaller than the verify itself.
+- **Draft-only 4-bit / 3-bit LM head** built in memory by `scripts/probe_draft_lm_head_requant.py`. The target's `lm_head` stays at the model's actual precision (BF16 / INT4 affine); the drafter gets a separate, much smaller LM-head requantized for proposal use only. Cuts draft time by ~29% without touching target accuracy.
+
+Runtime knobs that ship on by default in `performance-cold`:
+
+- `MTPLX_LAZY_VERIFY_LOGITS=1` · `MTPLX_BATCH_TARGET_ARRAYS=1` · `MTPLX_LAZY_MTP_HISTORY_APPEND=1` · `MTPLX_DROP_EVENTS=1` · `MTPLX_SKIP_VERIFY_SNAPSHOT=1`.
+
+Numerical hygiene (these are correctness fixes, not speed):
+
+- **`fp32` `p/q` ratio** during probability-ratio acceptance. The Leviathan–Chen ratio underflows in BF16 at small `q`; fp32 is the only safe path.
+- **`mx.random.split` per draft position** so each acceptance roll uses an independent RNG key. Without this, depth>1 would silently correlate accept decisions.
+
+```mermaid
+flowchart TB
+    subgraph FORK["MLX source fork · mlx-mtplx-0.31.2-qmm"]
+        QMV["small-M qmv: BN16 · 4-simdgroup · unroll_count(4)<br/>tuned for M=3..6 verify shapes"]
+        REG["mx.fast.metal_kernel + source-primitive registration<br/>(mx.compile fuses across our kernels)"]
+    end
+    subgraph KERNS["Custom Metal kernels"]
+        TAPE["linear-gdn-from-conv-tape<br/>fused GDN verify + innovation-tape rollback"]
+        VQMV["verify_qmv · small-M qmv (diagnostic)"]
+        DLM["Draft-only 4/3-bit LM head<br/>built in memory, target lm_head untouched"]
+    end
+    subgraph GRAPH["Compiled graphs"]
+        BANK2["GraphBank · mx.compile per (suffix_len, depth, profile)<br/>capture_commit_time ≈ 0.073 ms / cycle"]
+    end
+    subgraph HYGIENE["Numerical hygiene"]
+        FP32["fp32 p/q ratio (BF16 underflow at small q)"]
+        RNG["mx.random.split per draft position"]
+    end
+    FORK --> KERNS
+    KERNS --> GRAPH
+    GRAPH --> HOT["used by speculative cycle in §2"]
+    HYGIENE --> HOT
+```
 
 ### 1. Single-model runtime
 
