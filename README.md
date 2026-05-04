@@ -11,7 +11,9 @@
 
 # **Native MTP speculative decoding on Apple Silicon**
 
-**60+ tok/s** on Qwen3.6-27B · math-correct rejection sampling at `temp=0.6` · MLX-native · zero external drafter
+**~2.24× over no-MTP AR at `temp=0.6`** on Qwen3.6-27B · math-correct rejection sampling · MLX-native · zero external drafter
+
+<sub>Multiplier is hardware-independent. Absolute tok/s scales with memory bandwidth — current public record on M5 Max: **63.056 / 62.886 tok/s** D3, [`Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed`](https://huggingface.co/Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed).</sub>
 
 [![CI](https://github.com/youssofal/mtplx/actions/workflows/ci.yml/badge.svg)](https://github.com/youssofal/mtplx/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%E2%80%933.13-blue)](https://www.python.org/)
@@ -44,15 +46,15 @@ That's it. The wizard handles the default speed model (`Youssofal/Qwen3.6-27B-MT
 
 - **Native MTP speculative decoding.** Built-in MTP heads, no external drafter, no RAM hit for a second model.
 - **Math-correct sampling at T=0.6.** Probability-ratio acceptance with residual correction. Verified `max_diff = 0.0` against reference single-token AR on the verified Qwen3.6-27B path.
-- **60+ tok/s cold on a 27B-class model.** Verified D3/192 long-code at 60.169 tok/s (Apple Silicon M5 Max, no fan boost, MLX-native, 2026-04-29).
+- **~2.24× over no-MTP AR at `temp=0.6`.** The hardware-independent number, which the CLI reports as `mean_speedup_vs_ar`. Verified contract on the public default `Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed`: `63.056 / 62.886 tok/s` MTP-D3 vs `28.156 tok/s` no-MTP AR, on Apple Silicon M5 Max with `--max` fans, target sampler `temp=0.6 top_p=0.95 top_k=20`, draft sampler `temp=0.70`. Absolute tok/s scales with memory bandwidth; the 2.24× multiplier doesn't.
 - **Real serving surface.** OpenAI-compatible `/v1/chat/completions` + `/v1/completions` + `/v1/models`, Anthropic-compatible `/v1/messages` (streaming SSE), `/health`, `/metrics`. Plug it into Open WebUI, Claude Code, Cline, Continue, or anything that speaks OpenAI.
 - **In-browser chat UI** with auto-detected model context (256k for Qwen3.6), live tokens-per-second, markdown rendering, code-block copy buttons, a stop button, and a settings sidebar that persists per-machine.
 - **Interactive start wizard.** Pick model, mode, and surface in three numbered prompts. Returning users get "same as last time?". No flag-soup required.
 - **Local-folder model picker.** Point the wizard at any parent directory — your `~/models/`, the LM Studio cache, the HuggingFace cache — and it walks the tree, classifies each model into the four-tier compatibility contract, and presents a numbered picker. Config-only classification, never mmaps a tensor file, so a single APFS-dataless or partial download in the tree can't crash the picker.
 - **One-line live download progress.** Single rich-rendered line with bar / percent / GB / speed / ETA, streamed at 8 fps. HuggingFace's tqdm bars are suppressed during the download so they don't fight the MTPLX UI for terminal real estate.
 - **Honest profile names that tell you what they do.**
-  - `Medium` — default native-MTP speed path (`performance-cold`), about 2.2× burst over the same model with MTP off, not sustained without fan control.
-  - `Max` — Medium + ThermalForge fans pinned at 100%, about 2.24× in the measured speed lane, loud by design.
+  - `Medium` — default native-MTP speed path (`performance-cold`), in the **~2.2× over no-MTP AR** lane, not sustained without fan control.
+  - `Max` — Medium + ThermalForge fans pinned at 100%, **~2.24× over no-MTP AR** in the recorded lane (`63.056 / 62.886 tok/s` MTP vs `28.156 tok/s` AR on M5 Max), loud by design.
   - `Stable` — hidden compatibility flag (`--profile stable` / `--profile safe`) for the exact/staged long-reply path.
 - **Crash-safe fan control.** When Max is on, MTPLX spawns a detached watchdog that restores fans to auto if the parent dies for any reason — including `kill -9` and "I closed the terminal". Verified live on hardware.
 - **Idle-aware Max mode.** Server tracks request activity; after 15 minutes of no chat, fans drop to auto, then ramp back up on the next message.
@@ -60,7 +62,7 @@ That's it. The wizard handles the default speed model (`Youssofal/Qwen3.6-27B-MT
 - **Lazy imports.** `mtplx --help`, `doctor`, `inspect`, `init`, `setup` work on a fresh venv *without MLX installed*. Generation and serving pull in MLX only when needed.
 - **Preview status: 562-test suite green**, including end-to-end onboarding, local-folder picker, live download progress, fan-control crash safety, OpenAI server fake-state, lazy-import survival, exactness gates.
 
-> **Preview honesty.** The cold path is verified at 60+ tok/s. *Sustained* no-fan long-context throughput is currently ~37 tok/s on Flappy 10k versus a ≥50 tok/s target — the v0.1 release ships with this gap explicit. Closing it is the v0.2 deliverable; see [Roadmap](#roadmap).
+> **Preview honesty.** The cold path is verified at the **~2.24× multiplier** above. *Sustained* no-fan long-context throughput is currently in a worse lane on Flappy 10k versus the v0.2 target — the v0.1 release ships with this gap explicit. Closing it is the v0.2 deliverable; see [Roadmap](#roadmap).
 
 ---
 
@@ -116,10 +118,11 @@ Most "fast decode on Apple Silicon" projects fall into one of three buckets:
 
 The math-correctness wedge is real. At `temperature=0.6`, the difference between "rejected because the draft argmax disagrees" and "rejected via the Leviathan/Chen rejection-sampling theorem" is the difference between a benchmark trick and a runtime your code editor can trust. MTPLX does the latter, including residual correction `(p − q)+` for the cases where the draft was rejected.
 
-**Verified evidence:**
-- D3/192 long-code, native MTP, exact T=0.6 / top_p=0.95 / top_k=20 speculative sampling: **60.169 tok/s** (clean preflight, 2026-04-29 14:37 BST). 2.54× over matched no-MTP AR (23.59 tok/s) on the same hardware.
-- Per-position acceptance at depth 4: `[97.62%, 95.24%, 88.10%, 75.61%]` — higher than the published vLLM MTP-5 numbers at every depth.
-- Distribution exactness vs reference single-token AR: `max_diff = 0.0`.
+**Verified evidence (current public default `Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed`):**
+- **~2.24× over matched no-MTP AR at `temp=0.6`** on Apple Silicon M5 Max: `63.056 / 62.886 tok/s` MTP-D3 paired runs vs `28.156 tok/s` no-MTP AR, same machine, same target sampler (`temp=0.6 top_p=0.95 top_k=20`), draft sampler `temp=0.70 top_p=0.95 top_k=20`, performance-cold profile, fans pinned by `--max`, thinking mode off. Recorded in `mtplx_runtime.json` under the model.
+- The multiplier is what the CLI reports as `mean_speedup_vs_ar`. Absolute tok/s above is M5-Max-with-614-GB/s-bandwidth-specific; if your Mac is slower you keep the **2.24×** ratio, the absolute number drops with bandwidth.
+- Per-position acceptance on the recorded prompt: `[100%, 97.96%, 93.88%]` at D3 (corrections=3 over 49 verify calls).
+- Distribution exactness vs reference single-token AR: `max_diff = 0.0`. Greedy diagnostic on the same cleaned window: `60.108 tok/s`.
 
 ```mermaid
 flowchart LR
@@ -144,8 +147,8 @@ Picked by `mtplx start`, or set explicitly via `--profile`. Every mode preserves
 
 | Mode | Profile | Mechanics | Speed lane | Best for |
 |---|---|---|---|---|
-| **Medium** | `performance-cold` | Native-MTP speed path, Apple fan curve | ~2.2× burst, not sustained | Default first run, short replies, snappy chat |
-| **Max** | `performance-cold` + `--max` | Medium path plus ThermalForge pinned to 100% | ~2.24× in the measured lane | Sustained workloads, you don't mind fans |
+| **Medium** | `performance-cold` | Native-MTP speed path, Apple fan curve | ~2.2× over no-MTP AR, not sustained without fans | Default first run, short replies, snappy chat |
+| **Max** | `performance-cold` + `--max` | Medium path plus ThermalForge pinned to 100% | **~2.24× over no-MTP AR** (recorded: 63.056/62.886 vs 28.156 tok/s on M5 Max) | Sustained workloads, you don't mind fans |
 | **Stable** | `stable` / `safe` | Exact/staged long-reply path, hidden from onboarding | Lower peak speed, steadier shape | Compatibility and conservative long replies |
 
 `Max` requires ThermalForge. `mtplx max --install` installs it from source into `~/.mtplx/bin/thermalforge`, sets up a passwordless sudoers rule scoped to that one binary, and verifies fans actually ramp before declaring success. One sudo prompt, end-to-end. Crash safety covers SIGINT, SIGTERM, SIGHUP, terminal close, and `kill -9` via a detached sidecar process.
@@ -282,7 +285,7 @@ The CLI (`mtplx start` / `pull` / `doctor` / `inspect` / `max`) is the on-ramp t
 
 **v0.1.0-preview.1 (today).** Verified Qwen3-Next-MTP cold path, OpenAI/Anthropic-compatible serving, in-browser chat, interactive `mtplx start` wizard with local-folder model picker and one-line live download progress, four-tier compatibility, crash-safe Max mode, lazy-import CLI surface, 562-test suite green.
 
-**v0.2 — sustained throughput.** Diagnostic-gated kernel ladder targeting `last64/first64 ≥ 0.90` no-fan on 10k generations while preserving the 60 tok/s class. Mechanism-driven: lazy-graph severance + output narrowing if graph history is the bottleneck; MLX-primitive-registered cache-update + `mx.compile` if dispatch tax dominates; an owned GDN+MLP verify-cycle kernel via `mx.fast.metal_kernel` only if the cheaper paths don't close the gap.
+**v0.2 — sustained throughput.** Diagnostic-gated kernel ladder targeting `last64/first64 ≥ 0.90` no-fan on 10k generations while preserving the **~2.24× multiplier** lane. Mechanism-driven: lazy-graph severance + output narrowing if graph history is the bottleneck; MLX-primitive-registered cache-update + `mx.compile` if dispatch tax dominates; an owned GDN+MLP verify-cycle kernel via `mx.fast.metal_kernel` only if the cheaper paths don't close the gap.
 
 **v0.3 — broader fleet.** DeepSeek V3 / V3.2 MTP backend (registered, runtime pending), GLM-4 MoE backend, MiMo backend, generic MTP backend behind `mtplx_runtime.json`. PyPI public release. Optional Homebrew tap. Multi-session server concurrency.
 
@@ -296,7 +299,7 @@ The kernel-ladder direction is grounded in a six-agent deep-research synthesis (
 - It's not an external-drafter system. There's no second model. The drafter is the target's own MTP heads.
 - It's not a generic "speculative decoding library". It's a runtime + serving stack with an explicit model-compatibility contract.
 - It's not a CUDA project. MTPLX is MLX-native and Apple-Silicon-first. Linux/CUDA is not on the roadmap; for that, use vLLM.
-- It's not finished. v0.1 is a preview. The 60 tok/s cold target is met, the sustained target is not, and the README says so.
+- It's not finished. v0.1 is a preview. The **~2.24× multiplier** cold-lane target is met, the sustained-no-fan target is not, and the README says so.
 
 ---
 
