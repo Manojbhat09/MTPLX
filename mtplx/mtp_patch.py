@@ -276,8 +276,6 @@ def _load_embedded_mtp_weights(
     *,
     prequantized: bool = False,
 ) -> dict[str, Any]:
-    from safetensors import safe_open
-
     key_to_file = _embedded_mtp_weight_map(model_path)
     if not key_to_file:
         return {}
@@ -287,11 +285,20 @@ def _load_embedded_mtp_weights(
     for key, shard in key_to_file.items():
         files.setdefault(shard, []).append(key)
 
-    framework = _safetensors_runtime_framework()
     for shard, keys in files.items():
-        with safe_open(str(shard), framework=framework) as handle:
+        try:
+            import mlx.core as mx
+
+            shard_tensors = mx.load(str(shard))
             for key in sorted(keys):
-                raw_mtp[_strip_mtp_namespace(key)] = handle.get_tensor(key)
+                raw_mtp[_strip_mtp_namespace(key)] = shard_tensors[key]
+            del shard_tensors
+        except Exception:
+            from safetensors import safe_open
+
+            with safe_open(str(shard), framework=_safetensors_runtime_framework()) as handle:
+                for key in sorted(keys):
+                    raw_mtp[_strip_mtp_namespace(key)] = handle.get_tensor(key)
 
     return _finalize_mtp_weights(raw_mtp, config, prequantized=prequantized)
 

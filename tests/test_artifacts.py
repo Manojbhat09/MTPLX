@@ -618,6 +618,29 @@ def test_hf_qwen_mtp_without_runtime_contract_is_family_runnable(monkeypatch):
     assert calls == [("Qwen/Qwen3-Next-80B-A3B-Instruct", "mtp.safetensors")]
 
 
+def test_qwen_runtime_loader_reads_bf16_embedded_mtp_weights(tmp_path):
+    import mlx.core as mx
+    from mtplx.mtp_patch import _load_embedded_mtp_weights
+
+    mx.save_safetensors(
+        str(tmp_path / "model.safetensors"),
+        {
+            **{key: mx.ones((1,), dtype=mx.bfloat16) for key in EXPECTED_MTP_KEYS},
+            "model.language_model.layers.0.mlp.down_proj.weight": mx.ones(
+                (1,), dtype=mx.bfloat16
+            ),
+        },
+    )
+
+    weights = _load_embedded_mtp_weights(
+        tmp_path,
+        {"model_type": "qwen3_5", "mtp_num_hidden_layers": 1},
+    )
+
+    assert sorted(weights) == sorted(key.removeprefix("mtp.") for key in EXPECTED_MTP_KEYS)
+    assert weights["fc.weight"].dtype == mx.bfloat16
+
+
 def test_hf_verified_contract_passes_metadata_gate(monkeypatch):
     from mtplx import artifacts
 
