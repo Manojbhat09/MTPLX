@@ -1302,6 +1302,219 @@ def test_serve_dispatches_packaged_openai_server(monkeypatch, capsys):
     assert "--strict-warmup" in calls["cmd"]
 
 
+def test_bare_serve_invokes_server_onboarding_in_tty(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr(public, "_port_is_busy", lambda host, port: False)
+    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: (model, None))
+    monkeypatch.setattr(
+        public,
+        "_model_gate",
+        lambda model, unsafe_force_unverified=False, yes=False: (
+            {"compatibility": {"tier": "verified", "can_run": True, "exit_code": 0}},
+            None,
+        ),
+    )
+    invocations: list[dict] = []
+
+    def fake_flow(**kwargs):
+        invocations.append(kwargs)
+        return {
+            "model": "models/onboarded",
+            "profile": "performance-cold",
+            "max": False,
+            "target": "server",
+            "open_browser": False,
+        }
+
+    monkeypatch.setattr("mtplx.ui.onboarding.run_serve_flow", fake_flow)
+    calls = {}
+
+    def fake_execvpe(executable, cmd, env):
+        calls["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(public.os, "execvpe", fake_execvpe)
+    args = SimpleNamespace(
+        command="serve",
+        model="models/configured",
+        cache_dir=None,
+        download=False,
+        profile="stable",
+        unsafe_force_unverified=False,
+        yes=False,
+        host="127.0.0.1",
+        port=8765,
+        depth=3,
+        api_key=None,
+        rate_limit=0,
+        stream_interval=1,
+        max_response_tokens=None,
+        temperature=0.6,
+        top_p=0.95,
+        reasoning_parser="qwen3",
+        stats_footer=True,
+        warmup_tokens=0,
+        strict_warmup=False,
+        strict_fast_path=False,
+        max=False,
+        open_browser=False,
+        _cli_flags=set(),
+    )
+
+    try:
+        public.cmd_serve_public(args)
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    assert len(invocations) == 1
+    assert invocations[0]["configured_model"] == "models/configured"
+    assert invocations[0]["port"] == 8765
+    assert args._onboarded is True
+    assert args.model == "models/onboarded"
+    assert calls["cmd"][calls["cmd"].index("--model") + 1] == "models/onboarded"
+    assert "--open-browser" not in calls["cmd"]
+
+
+def test_bare_serve_hf_choice_enables_download_and_browser(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr(public, "_port_is_busy", lambda host, port: False)
+    monkeypatch.setattr(
+        public,
+        "_model_gate",
+        lambda model, unsafe_force_unverified=False, yes=False: (
+            {"compatibility": {"tier": "verified", "can_run": True, "exit_code": 0}},
+            None,
+        ),
+    )
+
+    def fake_flow(**_kwargs):
+        return {
+            "model": "owner/repo",
+            "profile": "performance-cold",
+            "max": False,
+            "target": "openwebui",
+            "open_browser": True,
+        }
+
+    resolution_calls: list[dict] = []
+
+    def fake_quickstart_resolve(model, *, cache_dir, download):
+        resolution_calls.append({"model": model, "download": download})
+        return "/tmp/runtime-model", {
+            "model": model,
+            "runtime_model": "/tmp/runtime-model",
+            "downloaded": True,
+            "download_ref": model,
+        }
+
+    monkeypatch.setattr("mtplx.ui.onboarding.run_serve_flow", fake_flow)
+    monkeypatch.setattr(public, "_quickstart_resolve_model", fake_quickstart_resolve)
+    calls = {}
+
+    def fake_execvpe(executable, cmd, env):
+        calls["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(public.os, "execvpe", fake_execvpe)
+    args = SimpleNamespace(
+        command="serve",
+        model="models/configured",
+        cache_dir=None,
+        download=False,
+        profile="stable",
+        unsafe_force_unverified=False,
+        yes=False,
+        host="127.0.0.1",
+        port=8765,
+        depth=3,
+        api_key=None,
+        rate_limit=0,
+        stream_interval=1,
+        max_response_tokens=None,
+        temperature=0.6,
+        top_p=0.95,
+        reasoning_parser="qwen3",
+        stats_footer=True,
+        warmup_tokens=0,
+        strict_warmup=False,
+        strict_fast_path=False,
+        max=False,
+        open_browser=False,
+        _cli_flags=set(),
+    )
+
+    try:
+        public.cmd_serve_public(args)
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    assert resolution_calls == [{"model": "owner/repo", "download": True}]
+    assert calls["cmd"][calls["cmd"].index("--model") + 1] == "/tmp/runtime-model"
+    assert "--open-browser" in calls["cmd"]
+
+
+def test_serve_skips_onboarding_with_explicit_model(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr(public, "_port_is_busy", lambda host, port: False)
+    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: (model, None))
+    monkeypatch.setattr(
+        public,
+        "_model_gate",
+        lambda model, unsafe_force_unverified=False, yes=False: (
+            {"compatibility": {"tier": "verified", "can_run": True, "exit_code": 0}},
+            None,
+        ),
+    )
+
+    def fail_flow(**_kwargs):
+        raise AssertionError("explicit --model should skip server onboarding")
+
+    monkeypatch.setattr("mtplx.ui.onboarding.run_serve_flow", fail_flow)
+    calls = {}
+
+    def fake_execvpe(executable, cmd, env):
+        calls["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(public.os, "execvpe", fake_execvpe)
+    args = SimpleNamespace(
+        command="serve",
+        model="models/explicit",
+        cache_dir=None,
+        download=False,
+        profile="performance-cold",
+        unsafe_force_unverified=False,
+        yes=False,
+        host="127.0.0.1",
+        port=8000,
+        depth=3,
+        api_key=None,
+        rate_limit=0,
+        stream_interval=1,
+        max_response_tokens=None,
+        temperature=0.6,
+        top_p=0.95,
+        reasoning_parser="qwen3",
+        stats_footer=True,
+        warmup_tokens=0,
+        strict_warmup=False,
+        strict_fast_path=False,
+        max=False,
+        open_browser=False,
+        _cli_flags={"model"},
+    )
+
+    try:
+        public.cmd_serve_public(args)
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    assert calls["cmd"][calls["cmd"].index("--model") + 1] == "models/explicit"
+
+
 def test_serve_relaxes_missing_fast_mlx_fork_for_product_start(monkeypatch, capsys):
     calls = {}
 

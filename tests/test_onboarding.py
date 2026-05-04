@@ -58,6 +58,7 @@ def test_mode_label_covers_all_modes():
 def test_interface_label_covers_all_targets():
     assert "Web UI" in onboarding.interface_label("openwebui")
     assert "Web UI" in onboarding.interface_label("web")
+    assert "API server" in onboarding.interface_label("server")
     assert "CLI" in onboarding.interface_label("cli")
     assert "CLI" in onboarding.interface_label("terminal")
 
@@ -94,6 +95,43 @@ def test_run_onboarding_max_mode_drops_flag_when_thermal_unavailable(monkeypatch
     assert state["profile"] == "performance-cold"
     assert state["max"] is False
     assert state["target"] == "terminal"
+
+
+def test_run_serve_onboarding_screens_defaults_to_api_server(monkeypatch):
+    answers = iter(["1", "1", "1"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    state = onboarding.run_serve_onboarding_screens(host="127.0.0.1", port=8765)
+    assert state["model"] == onboarding._verified_default_model()
+    assert state["profile"] == "performance-cold"
+    assert state["max"] is False
+    assert state["target"] == "server"
+    assert state["open_browser"] is False
+
+
+def test_run_serve_onboarding_screens_can_open_browser(monkeypatch):
+    answers = iter(["1", "1", "2"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    state = onboarding.run_serve_onboarding_screens(host="127.0.0.1", port=8765)
+    assert state["target"] == "openwebui"
+    assert state["open_browser"] is True
+
+
+def test_run_serve_flow_does_not_reuse_quickstart_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(tmp_path / "serve.json"))
+    onboarding.save_state(
+        {
+            "model": "mtplx/old",
+            "profile": "performance-cold",
+            "max": False,
+            "target": "openwebui",
+        }
+    )
+    answers = iter(["1", "1", "1"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    state = onboarding.run_serve_flow()
+    assert state is not None
+    assert state["model"] == onboarding._verified_default_model()
+    assert state["target"] == "server"
 
 
 def test_ensure_thermal_control_installed_returns_true_when_already_present(monkeypatch):

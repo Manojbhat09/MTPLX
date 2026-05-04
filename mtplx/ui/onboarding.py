@@ -756,7 +756,12 @@ def _print_welcome() -> None:
     console.print()
 
 
-def _print_summary(state: dict) -> None:
+def _print_summary(
+    state: dict,
+    *,
+    title: str = "Ready to go",
+    plain_heading: str = "Your quickstart configuration:",
+) -> None:
     model_display = _pretty_path(state.get("model")) or "?"
     try:
         from rich.panel import Panel
@@ -764,7 +769,7 @@ def _print_summary(state: dict) -> None:
         from rich.text import Text
     except ImportError:
         print()
-        print("  Your quickstart configuration:")
+        print(f"  {plain_heading}")
         print(f"    Model:     {model_display}")
         print(f"    Mode:      {mode_label(state)}")
         print(f"    Interface: {interface_label(state.get('target'))}")
@@ -776,7 +781,7 @@ def _print_summary(state: dict) -> None:
         # ``Console()`` couldn't initialize (no tty, weird stdout, etc.) —
         # fall back to the same plain-stdout layout as the import-fail path.
         print()
-        print("  Your quickstart configuration:")
+        print(f"  {plain_heading}")
         print(f"    Model:     {model_display}")
         print(f"    Mode:      {mode_label(state)}")
         print(f"    Interface: {interface_label(state.get('target'))}")
@@ -790,7 +795,7 @@ def _print_summary(state: dict) -> None:
     table.add_row("Interface", interface_label(state.get("target")))
     panel = Panel(
         table,
-        title=Text("Ready to go", style="bold green"),
+        title=Text(title, style="bold green"),
         title_align="left",
         border_style="green",
         padding=(1, 2),
@@ -1065,6 +1070,39 @@ def screen_interface() -> str:
     return "openwebui" if choice == "1" else "terminal"
 
 
+def screen_server_surface(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    default_open_browser: bool = False,
+) -> bool:
+    """Return whether the server flow should open the browser chat."""
+
+    raw_host = str(host or "").strip()
+    display_host = "127.0.0.1" if raw_host in {"", "0.0.0.0", "::"} else raw_host
+    base = f"http://{display_host}:{int(port)}"
+    _step_panel(
+        step=3,
+        total=3,
+        title="How should the server start?",
+        options=[
+            (
+                "1",
+                f"API server only [{base}/v1]",
+                "Starts the OpenAI-compatible endpoint and leaves this terminal attached to the server logs.",
+            ),
+            (
+                "2",
+                f"Open browser chat too [{base}/]",
+                "Starts the same server and opens the local MTPLX chat UI after startup.",
+            ),
+        ],
+    )
+    default = "2" if default_open_browser else "1"
+    choice = _prompt_choice("Select", ["1", "2"], default=default)
+    return choice == "2"
+
+
 def run_onboarding_screens(*, configured_model: str | None = None) -> dict:
     """Walk all three screens and return the chosen state dict.
 
@@ -1084,6 +1122,33 @@ def run_onboarding_screens(*, configured_model: str | None = None) -> dict:
         "profile": profile,
         "max": max_mode,
         "target": target,
+    }
+
+
+def run_serve_onboarding_screens(
+    *,
+    configured_model: str | None = None,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    default_open_browser: bool = False,
+) -> dict:
+    """Walk the advanced server setup screens and return the chosen state."""
+
+    model = screen_model(configured=configured_model)
+    profile, max_mode = screen_mode()
+    if max_mode:
+        max_mode = ensure_thermal_control_installed()
+    open_browser = screen_server_surface(
+        host=host,
+        port=port,
+        default_open_browser=default_open_browser,
+    )
+    return {
+        "model": model,
+        "profile": profile,
+        "max": max_mode,
+        "target": "openwebui" if open_browser else "server",
+        "open_browser": open_browser,
     }
 
 
@@ -1323,6 +1388,82 @@ def run_quickstart_flow(
         return None
 
 
+def _print_server_welcome() -> None:
+    try:
+        from rich.panel import Panel
+        from rich.text import Text
+    except ImportError:
+        print()
+        print("MTPLX server setup. Three quick questions before the server starts.")
+        print("For each step, type the number of your choice and press Enter.")
+        print()
+        return
+    console = _console()
+    if console is None:
+        print()
+        print("MTPLX server setup. Three quick questions before the server starts.")
+        print("For each step, type the number of your choice and press Enter.")
+        print()
+        return
+    body = Text()
+    body.append("MTPLX server setup.\n\n", style="bold")
+    body.append("Three questions before the OpenAI-compatible server starts:\n", style="")
+    body.append("  1. Which model?\n", style="dim")
+    body.append("  2. Which runtime mode?\n", style="dim")
+    body.append("  3. API only, or also open the browser chat?\n\n", style="dim")
+    body.append("For each step, type the number of your choice and press Enter.", style="italic")
+    panel = Panel(
+        body,
+        title=Text("Server setup", style="bold cyan"),
+        title_align="left",
+        border_style="cyan",
+        padding=(1, 2),
+        expand=False,
+    )
+    console.print()
+    console.print(panel)
+    console.print()
+
+
+def run_serve_flow(
+    *,
+    fresh: bool = False,
+    configured_model: str | None = None,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    default_open_browser: bool = False,
+) -> dict | None:
+    """Interactive setup for bare ``mtplx serve``.
+
+    Unlike ``run_quickstart_flow``, this intentionally does not offer "same as
+    last time" reuse: ``serve`` is the advanced server command, so a bare
+    interactive invocation should always let the user pick the server model and
+    runtime mode before binding a port.
+    """
+
+    _ = fresh  # Symmetric with quickstart; serve always starts from choices.
+    try:
+        _print_server_welcome()
+        choice = run_serve_onboarding_screens(
+            configured_model=configured_model,
+            host=host,
+            port=port,
+            default_open_browser=default_open_browser,
+        )
+        _print_summary(
+            choice,
+            title="Server ready",
+            plain_heading="Your server configuration:",
+        )
+        return choice
+    except (KeyboardInterrupt, EOFError):
+        try:
+            print()
+        except Exception:  # pragma: no cover - stdout is closed
+            pass
+        return None
+
+
 # ---------- label helpers ---------------------------------------------------
 def mode_label(state: dict) -> str:
     profile = state.get("profile", "safe")
@@ -1338,6 +1479,8 @@ def mode_label(state: dict) -> str:
 def interface_label(target: str | None) -> str:
     if target in ("openwebui", "open-webui", "web"):
         return "Web UI  ·  browser"
+    if target in ("server", "api", "api-server"):
+        return "API server  ·  no browser"
     if target in ("cli", "terminal"):
         return "CLI  ·  this terminal"
     return target or "?"

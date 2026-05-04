@@ -2892,6 +2892,21 @@ def _server_command_name(args: Any) -> str:
     return "quickstart"
 
 
+def _serve_should_onboard(args: Any) -> bool:
+    """Return whether bare interactive ``mtplx serve`` should run setup."""
+
+    if getattr(args, "command", None) != "serve":
+        return False
+    if bool(getattr(args, "yes", False)):
+        return False
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    cli_flags = getattr(args, "_cli_flags", set()) or set()
+    if {"model", "profile", "max"} & set(cli_flags):
+        return False
+    return True
+
+
 def cmd_serve_public(args: Any) -> int:
     api_key = getattr(args, "api_key", None)
     if not _is_localhost_bind(getattr(args, "host", None)) and not api_key:
@@ -2904,9 +2919,38 @@ def cmd_serve_public(args: Any) -> int:
         else:
             print("error: --api-key is required when --host is not localhost")
             print(f"host: {getattr(args, 'host', None)}")
-            print("try: mtplx quickstart --host 127.0.0.1")
-            print("try: mtplx quickstart --host 0.0.0.0 --api-key $MTPLX_AUTH")
+            server_command = _server_command_name(args)
+            print(f"try: mtplx {server_command} --host 127.0.0.1")
+            print(f"try: mtplx {server_command} --host 0.0.0.0 --api-key $MTPLX_AUTH")
         return 2
+    if _serve_should_onboard(args):
+        from mtplx.ui.onboarding import run_serve_flow
+
+        choice = run_serve_flow(
+            configured_model=getattr(args, "model", None),
+            host=str(getattr(args, "host", "127.0.0.1")),
+            port=int(getattr(args, "port", 8000)),
+            default_open_browser=bool(getattr(args, "open_browser", False)),
+        )
+        if choice is None:
+            _print_serve_start_line("aborted")
+            return 130
+        chosen_model = choice.get("model")
+        if chosen_model:
+            args.model = chosen_model
+            try:
+                from mtplx.hf_loader import repo_id_from_model_ref
+
+                if repo_id_from_model_ref(chosen_model):
+                    args.download = True
+            except Exception:
+                pass
+        chosen_profile = choice.get("profile")
+        if chosen_profile:
+            args.profile = chosen_profile
+        args.max = bool(choice.get("max"))
+        args.open_browser = bool(choice.get("open_browser"))
+        args._onboarded = True
     depth_error = _validate_public_depth(args, printer=_print_serve_start_line)
     if depth_error is not None:
         return depth_error
@@ -2934,17 +2978,57 @@ def cmd_serve_public(args: Any) -> int:
         _print_serve_start_line(f"try: mtplx {server_command} --port {int(args.port) + 1}")
         return 2
     profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
-    runtime_model, resolve_error = _resolve_runtime_model_path(
-        args.model,
-        cache_dir=getattr(args, "cache_dir", None),
-    )
-    if resolve_error is not None:
-        _print_command_error(
-            resolve_error,
-            command="quickstart",
-            json_output=bool(getattr(args, "json", False)),
+    cache_dir = getattr(args, "cache_dir", None)
+    if bool(getattr(args, "download", False)):
+        try:
+            runtime_model, resolution = _quickstart_resolve_model(
+                args.model,
+                cache_dir=cache_dir,
+                download=True,
+            )
+        except KeyboardInterrupt:
+            _print_serve_start_line("download cancelled")
+            return 130
+        except Exception as exc:
+            _print_serve_start_line(f"error: {exc}")
+            return 1
+        if runtime_model is None:
+            if resolution.get("cancelled"):
+                _print_serve_start_line("download cancelled")
+                return 130
+            gate_inspection = resolution.get("gate_inspection")
+            if isinstance(gate_inspection, dict):
+                _print_model_gate_error(
+                    gate_inspection,
+                    printer=_print_serve_start_line,
+                    json_output=bool(getattr(args, "json", False)),
+                )
+                compatibility = gate_inspection.get("compatibility") or {}
+                return int(compatibility.get("exit_code") or 1)
+            resolution_error = resolution.get("error")
+            if isinstance(resolution_error, dict):
+                _print_command_error(
+                    resolution_error,
+                    command=_server_command_name(args),
+                    json_output=bool(getattr(args, "json", False)),
+                )
+            else:
+                _print_serve_start_line("error: model is not available locally")
+            return 1
+        if resolution.get("downloaded"):
+            _print_serve_start_line(f"downloaded: {resolution.get('download_ref')}")
+    else:
+        runtime_model, resolve_error = _resolve_runtime_model_path(
+            args.model,
+            cache_dir=cache_dir,
         )
-        return 1
+        if resolve_error is not None:
+            _print_command_error(
+                resolve_error,
+                command=_server_command_name(args),
+                json_output=bool(getattr(args, "json", False)),
+            )
+            return 1
     inspection, gate_exit = _model_gate(
         runtime_model,
         unsafe_force_unverified=bool(getattr(args, "unsafe_force_unverified", False)),

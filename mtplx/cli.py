@@ -1628,6 +1628,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     quickstart_server_p.add_argument("--model", default=default_model)
     quickstart_server_p.add_argument("--cache-dir")
+    quickstart_server_p.add_argument(
+        "--download",
+        action="store_true",
+        help="Download a Hugging Face model before starting if it is not cached",
+    )
     quickstart_server_p.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
     quickstart_server_p.add_argument("--unsafe-force-unverified", action="store_true")
     quickstart_server_p.add_argument("--yes", action="store_true", help="Confirm unsafe non-interactive actions")
@@ -1845,9 +1850,14 @@ def build_parser() -> argparse.ArgumentParser:
     chat_p.add_argument("--max", action="store_true", help="Opt into ThermalForge/TG Pro performance fan profile for this run")
     chat_p.set_defaults(func=cmd_chat_public)
 
-    serve_p = sub.add_parser("serve", help="Start the OpenAI-compatible MTPLX server")
+    serve_p = sub.add_parser("serve", help="Choose model/mode, then start the OpenAI-compatible MTPLX server")
     serve_p.add_argument("--model", default=default_model)
     serve_p.add_argument("--cache-dir")
+    serve_p.add_argument(
+        "--download",
+        action="store_true",
+        help="Download a Hugging Face model before starting if it is not cached",
+    )
     serve_p.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
     serve_p.add_argument("--unsafe-force-unverified", action="store_true")
     serve_p.add_argument("--yes", action="store_true", help="Confirm unsafe non-interactive actions")
