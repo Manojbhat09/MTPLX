@@ -1,13 +1,6 @@
 <div align="center">
 
-```
-  ███╗   ███╗ ████████╗ ██████╗  ██╗      ██╗  ██╗
-  ████╗ ████║ ╚══██╔══╝ ██╔══██╗ ██║      ╚██╗██╔╝
-  ██╔████╔██║    ██║    ██████╔╝ ██║       ╚███╔╝
-  ██║╚██╔╝██║    ██║    ██╔═══╝  ██║       ██╔██╗
-  ██║ ╚═╝ ██║    ██║    ██║      ███████╗ ██╔╝ ██╗
-  ╚═╝     ╚═╝    ╚═╝    ╚═╝      ╚══════╝ ╚═╝  ╚═╝
-```
+<img src="docs/assets/readme/hero.svg" alt="MTPLX" width="100%" />
 
 # **Native MTP speculative decoding on Apple Silicon**
 
@@ -134,18 +127,7 @@ The math-correctness wedge is real. At `temperature=0.6`, the difference between
 - Per-position acceptance on the recorded prompt: `[100%, 97.96%, 93.88%]` at D3 (corrections=3 over 49 verify calls).
 - Distribution exactness vs reference single-token AR: `max_diff = 0.0`. Greedy diagnostic on the same cleaned window: `60.108 tok/s`.
 
-```mermaid
-flowchart LR
-    A[Prompt] --> B[Target model<br/>Qwen3.6-27B]
-    B --> C[Built-in MTP heads<br/>draft K=4]
-    C --> D[Probability-ratio<br/>acceptance + residual correction]
-    D --> E[Verified tokens]
-    E -->|loop| B
-    F[OpenAI-compatible server<br/>Anthropic-compatible /v1/messages]
-    E --> F
-    G[Browser chat<br/>or terminal chat]
-    F --> G
-```
+<img src="docs/assets/readme/flow.svg" alt="MTPLX end-to-end flow" width="100%" />
 
 No second model, no greedy hack, no external drafter, no silent distribution drift.
 
@@ -250,91 +232,25 @@ Numerical hygiene (these are correctness fixes, not speed):
 - **`fp32` `p/q` ratio** during probability-ratio acceptance. The Leviathan–Chen ratio underflows in BF16 at small `q`; fp32 is the only safe path.
 - **`mx.random.split` per draft position** so each acceptance roll uses an independent RNG key. Without this, depth>1 would silently correlate accept decisions.
 
-```mermaid
-flowchart TB
-    subgraph FORK["MLX source fork · mlx-mtplx-0.31.2-qmm"]
-        QMV["small-M qmv: BN16 · 4-simdgroup · unroll_count(4)<br/>tuned for M=3..6 verify shapes"]
-        REG["mx.fast.metal_kernel + source-primitive registration<br/>(mx.compile fuses across our kernels)"]
-    end
-    subgraph KERNS["Custom Metal kernels"]
-        TAPE["linear-gdn-from-conv-tape<br/>fused GDN verify + innovation-tape rollback"]
-        VQMV["verify_qmv · small-M qmv (diagnostic)"]
-        DLM["Draft-only 4/3-bit LM head<br/>built in memory, target lm_head untouched"]
-    end
-    subgraph GRAPH["Compiled graphs"]
-        BANK2["GraphBank · mx.compile per (suffix_len, depth, profile)<br/>capture_commit_time ≈ 0.073 ms / cycle"]
-    end
-    subgraph HYGIENE["Numerical hygiene"]
-        FP32["fp32 p/q ratio (BF16 underflow at small q)"]
-        RNG["mx.random.split per draft position"]
-    end
-    FORK --> KERNS
-    KERNS --> GRAPH
-    GRAPH --> HOT["used by speculative cycle in §2"]
-    HYGIENE --> HOT
-```
+<img src="docs/assets/readme/mlx-runtime.svg" alt="MLX runtime layer" width="100%" />
 
 ### 1. Single-model runtime
 
 The target model and the drafter are the **same checkpoint**. Qwen3.6-27B ships native MTP heads; MTPLX uses them as the speculative drafter. Zero RAM cost for a second model, zero distillation, zero "we trained a drafter" handoff. The trunk's KV cache obeys a **committed-history contract** (verified against the vLLM CUDA reference at cosine > 0.9998 through D5) so recursive draft depth holds together — that's what lets D2/D3/D4 acceptance reach the 90s instead of collapsing.
 
-```mermaid
-flowchart LR
-    subgraph TGT["Target model · Qwen3.6-27B (single checkpoint)"]
-        TRUNK["Trunk · 64 layers (48 GDN + 16 full-attn)<br/>committed-history KV cache"]
-        HEAD["Built-in MTP heads · recursive depth K=3 default"]
-        TRUNK -.shares hidden states.-> HEAD
-    end
-```
+<img src="docs/assets/readme/single-model.svg" alt="Single-model runtime" width="100%" />
 
 ### 2. Speculative cycle (the hot loop)
 
 Per cycle: the MTP head drafts K tokens, the target verifies all K in parallel via one batched forward, **probability-ratio acceptance** (Leviathan–Chen) decides per-position, **residual correction `(p − q)+`** emits a clean replacement on rejection, and a **bonus token** falls out for free when all K accept. Verify cost is paid by `capture_commit` + the `linear-gdn-from-conv-tape` GDN kernel + a **GraphBank** of compiled verify shapes; the math is exact at any temperature.
 
-```mermaid
-flowchart LR
-    DRAFT["MTP head drafts q₁..q_K<br/>+ proposal probabilities"] --> VERIFY
-    VERIFY["Target batched verify forward<br/>capture-commit · linear-gdn-from-conv-tape · GraphBank"] --> ACCEPT
-    ACCEPT["Probability-ratio acceptance<br/>(Leviathan–Chen at any T)"] -->|all K accepted| BONUS
-    ACCEPT -->|rejected at i| CORR
-    BONUS["Bonus token at K+1 (free)"] --> COMMIT
-    CORR["Residual (p − q)+ token at i"] --> COMMIT
-    COMMIT["Committed-history KV writeback"] -->|next cycle| DRAFT
-```
+<img src="docs/assets/readme/cycle.svg" alt="Speculative cycle" width="100%" />
 
 ### 3. Serving stack
 
 The runtime is wrapped in a real serving surface so you can point Open WebUI / Claude Code / Cline / Continue / `curl` / `openai-python` / `anthropic-python` at it. **Engine sessions** keep per-chat state; the **Session Bank** preserves warm-prefix exact state across turns (verified `logits_max_abs_diff = 0.0` against fresh forwards) so multi-turn TTFT doesn't collapse the way a stateless shim would.
 
-```mermaid
-flowchart TB
-    subgraph CLIENTS["Clients"]
-        BR["Browser chat<br/>127.0.0.1:8000"]
-        OW["Open WebUI · Cline · Claude Code · Continue"]
-        CURL["curl · openai-python · anthropic-python"]
-        TERM["Terminal chat (mtplx start cli)"]
-    end
-    subgraph API["FastAPI server"]
-        OAI["/v1/chat/completions · /v1/completions · /v1/models"]
-        ANT["/v1/messages (Anthropic SSE translator)"]
-        OBS["/health · /metrics"]
-    end
-    subgraph ENG["Engine layer"]
-        SESS["Engine sessions (per-chat context + cache)"]
-        BANK["Session bank · warm-prefix exact-state reuse"]
-    end
-    BR --> OAI
-    OW --> OAI
-    OW --> ANT
-    CURL --> OAI
-    CURL --> ANT
-    TERM --> ENG
-    OAI --> SESS
-    ANT --> SESS
-    SESS --> BANK
-    BANK -->|drives| RUNTIME["Native-MTP runtime (cycle above)"]
-    OBS --- ENG
-```
+<img src="docs/assets/readme/serving.svg" alt="Serving stack" width="100%" />
 
 The CLI (`mtplx start` / `pull` / `doctor` / `inspect` / `max`) is the on-ramp to all of the above and not the architectural story — it lazy-imports MLX so `--help`, `doctor`, `inspect`, `init`, `setup` work on a fresh venv with no GPU/Apple-Silicon stack installed.
 
