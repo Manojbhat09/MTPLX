@@ -28,11 +28,11 @@ This is **not** DFlash, DDTree, llama-spec, or an external-drafter system. It's 
 Install:
 
 ```bash
-brew install --verbose --display-times youssofal/mtplx/mtplx
+brew install youssofal/mtplx/mtplx
 mtplx start            # interactive: pick model → mode → web/CLI, then chat
 ```
 
-The Homebrew installer sets up the `mtplx` command in `/opt/homebrew/bin` and bootstraps the Python runtime under `/opt/homebrew/var/mtplx`. Use `--verbose --display-times` if you want visible download progress and install timing. Python users can also run `python3 -m pip install --pre mtplx`.
+The Homebrew installer sets up the `mtplx` command in `/opt/homebrew/bin` and bootstraps the Python runtime under `/opt/homebrew/var/mtplx`. Python users can also run `python3 -m pip install --pre mtplx`.
 
 That's it. The wizard handles the default speed model (`Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed`), runtime mode, and surface (browser chat at `127.0.0.1:8000/` or terminal chat) on first run. On every subsequent run it asks "same as last time?" so you're one keypress from chatting.
 
@@ -66,7 +66,7 @@ That's it. The wizard handles the default speed model (`Youssofal/Qwen3.6-27B-MT
 
 ```bash
 # 1. Install on macOS
-brew install --verbose --display-times youssofal/mtplx/mtplx
+brew install youssofal/mtplx/mtplx
 
 # 2. Verify the install
 mtplx help
