@@ -1,0 +1,13 @@
+MTPLX
+Copyright 2026 Youssof Altoukhi
+
+MTPLX is a native MTP speculative decoding project for Apple Silicon.
+
+Preferred attribution for public projects, products, benchmarks, articles, and
+research that use or build on MTPLX:
+
+  Powered by MTPLX by Youssof Altoukhi
+  https://github.com/youssofal/mtplx
+
+If MTPLX informs academic or technical writing, please cite the repository using
+the included CITATION.cff metadata.

@@ -9,8 +9,8 @@ description = "Native MTP speculative decoding for Qwen3-Next on Apple Silicon."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
-authors = [{name = "Youssof A.", email = "business@youssofal.com"}]
+license-files = ["LICENSE", "NOTICE"]
+authors = [{name = "Youssof Altoukhi", email = "business@youssofal.com"}]
 dependencies = [
   "fastapi>=0.136",
   "huggingface-hub>=0.36",
@@ -39,6 +39,7 @@ keywords = ["mlx", "apple-silicon", "speculative-decoding", "qwen", "mtp", "loca
 Homepage = "https://github.com/youssofal/mtplx"
 Documentation = "https://github.com/youssofal/mtplx/tree/main/docs"
 Issues = "https://github.com/youssofal/mtplx/issues"
+Citation = "https://github.com/youssofal/mtplx/blob/main/CITATION.cff"
 
 [project.optional-dependencies]
 competitors = [

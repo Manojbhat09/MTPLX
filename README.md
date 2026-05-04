@@ -352,8 +352,18 @@ The kernel-ladder direction is grounded in a six-agent deep-research synthesis (
 
 ---
 
-## Attribution
+## License, citation, and attribution
 
 MTPLX builds on [MLX](https://github.com/ml-explore/mlx) and the Qwen3-Next model family. The speculative-sampling math follows Leviathan & Chen 2023 ("Fast Inference from Transformers via Speculative Decoding") and the MTP heads ship with Qwen. Design and diagnostics are informed by vLLM speculative decoding, vLLM-Metal (issues #188 and #281), DFlash-MLX, DDTree-MLX, and DeepSeek V3.2's `mx.depends` precedent. Optional fan control via [ThermalForge](https://github.com/ProducerGuy/ThermalForge). Model weights and licenses remain governed by their upstream model cards.
 
-— Built by [@youssofal](https://github.com/youssofal). Contributions, bug reports, and benchmark replications welcome via [Issues](https://github.com/youssofal/mtplx/issues).
+MTPLX is released under the [Apache License 2.0](LICENSE). If you redistribute MTPLX or derivative works, preserve the Apache license and the attribution notices from [NOTICE](NOTICE) as required by Apache-2.0.
+
+If MTPLX powers a public project, product, benchmark, article, or research result, please include clear credit in your README, docs, paper, or public writeup:
+
+> Powered by MTPLX by Youssof Altoukhi
+>
+> https://github.com/youssofal/mtplx
+
+For academic or technical writing, cite the repository using [CITATION.cff](CITATION.cff).
+
+— Built by [Youssof Altoukhi](https://github.com/youssofal). Contributions, bug reports, and benchmark replications welcome via [Issues](https://github.com/youssofal/mtplx/issues).
