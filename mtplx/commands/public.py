@@ -4019,7 +4019,7 @@ def _quickstart_generate(
     draft_sampler: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from mtplx.benchmarks.schema import PromptCase, encode_prompt_case
-    from mtplx.generation import generate_mtpk
+    from mtplx.generation import generate_ar, generate_mtpk
     from mtplx.sampling import SamplerConfig
 
     messages: list[dict[str, str]] = []
@@ -4066,26 +4066,38 @@ def _quickstart_generate(
         if terminal_streamer is not None:
             terminal_streamer.feed(new_tokens)
 
+    sampler = SamplerConfig(
+        temperature=float(getattr(args, "temperature", 0.6)),
+        top_p=float(getattr(args, "top_p", 0.95)),
+        top_k=int(getattr(args, "top_k", 20)),
+    )
+    seed = int(getattr(args, "seed", 0)) + turn_index
     try:
-        out = generate_mtpk(
-            rt,
-            prompt_ids,
-            max_tokens=max_tokens_value,
-            sampler=SamplerConfig(
-                temperature=float(getattr(args, "temperature", 0.6)),
-                top_p=float(getattr(args, "top_p", 0.95)),
-                top_k=int(getattr(args, "top_k", 20)),
-            ),
-            draft_sampler=_draft_sampler_from_spec(draft_sampler),
-            speculative_depth=int(getattr(args, "depth", 3)),
-            seed=int(getattr(args, "seed", 0)) + turn_index,
-            mtp_hidden_variant="post_norm",
-            mtp_cache_policy="persistent",
-            mtp_history_policy="committed",
-            verify_strategy="capture_commit",
-            verify_core="linear-gdn-from-conv-tape",
-            token_callback=record_tokens,
-        )
+        if bool(getattr(args, "no_mtp", False)):
+            out = generate_ar(
+                rt,
+                prompt_ids,
+                max_tokens=max_tokens_value,
+                sampler=sampler,
+                seed=seed,
+                token_callback=record_tokens,
+            )
+        else:
+            out = generate_mtpk(
+                rt,
+                prompt_ids,
+                max_tokens=max_tokens_value,
+                sampler=sampler,
+                draft_sampler=_draft_sampler_from_spec(draft_sampler),
+                speculative_depth=int(getattr(args, "depth", 3)),
+                seed=seed,
+                mtp_hidden_variant="post_norm",
+                mtp_cache_policy="persistent",
+                mtp_history_policy="committed",
+                verify_strategy="capture_commit",
+                verify_core="linear-gdn-from-conv-tape",
+                token_callback=record_tokens,
+            )
     finally:
         if terminal_streamer is not None:
             terminal_streamer.finish()
@@ -4097,6 +4109,7 @@ def _quickstart_generate(
         "remaining_context_tokens": budget["remaining_context_tokens"],
         "context_cap_applied": budget["context_cap_applied"],
         "reasoning": reasoning_mode,
+        "generation_mode": "ar" if bool(getattr(args, "no_mtp", False)) else "mtp",
         "tok_s": out.stats.tok_s,
         "end_to_end_tok_s": out.stats.tok_s,
         "elapsed_s": out.stats.elapsed_s,
@@ -4232,8 +4245,9 @@ def _quickstart_run_terminal_chat(args: Any, *, runtime_model: str, inspection: 
 def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspection: dict[str, Any]) -> int:
     profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
     apply_profile_env(profile.name)
-    draft_lm_head = _model_draft_lm_head_spec(inspection, profile)
-    draft_sampler = _model_draft_sampler_spec(inspection, profile)
+    no_mtp = bool(getattr(args, "no_mtp", False))
+    draft_lm_head = None if no_mtp else _model_draft_lm_head_spec(inspection, profile)
+    draft_sampler = None if no_mtp else _model_draft_sampler_spec(inspection, profile)
 
     from mtplx.runtime import load
     from mtplx.ui import ModelLoadProgress, render_banner, render_startup_panel
@@ -4248,6 +4262,9 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
             profile_summary=_PROFILE_SHORT_SUMMARIES.get(profile.name),
             api_url="terminal chat (no server)",
             mode_label=(
+                "No-MTP AR"
+                if no_mtp
+                else
                 "Max MTP"
                 if getattr(args, "max", False)
                 else "Medium MTP"
@@ -4269,9 +4286,11 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
     quiet_progress = not sys.stdout.isatty()
     with ModelLoadProgress("Loading model", quiet=quiet_progress) as progress:
         progress.set_subtitle(f"profile {profile.name}")
-        rt = load(runtime_model, mtp=True)
+        rt = load(runtime_model, mtp=not no_mtp)
         progress.set_subtitle("ready")
     _quickstart_line(f"Model ready in {time.perf_counter() - started:.1f}s")
+    if no_mtp:
+        _quickstart_line("Generation mode: AR target-only; MTP sidecar/drafting disabled.")
     draft_report = None
     if draft_lm_head is not None:
         _quickstart_line(

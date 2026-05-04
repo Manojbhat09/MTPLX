@@ -321,6 +321,7 @@ def test_one_shot_max_uses_verified_max_session(monkeypatch):
         tokens=[1],
         stats=SimpleNamespace(generated_tokens=1, tok_s=1.0, verify_time_s=0.0, verify_calls=0),
     )
+    fake_generation.generate_ar = fake_generation.generate_mtpk
     fake_sampling = ModuleType("mtplx.sampling")
     fake_sampling.SamplerConfig = lambda **kw: SimpleNamespace(**kw)
 
@@ -376,6 +377,8 @@ def test_start_parser_accepts_target_choices():
     assert args_default.target is None
     args_fresh = parser.parse_args(["start", "--fresh", "--dry-run"])
     assert args_fresh.fresh is True
+    args_no_mtp = parser.parse_args(["start", "cli", "--no-mtp", "--dry-run"])
+    assert args_no_mtp.no_mtp is True
 
 
 def test_cli_response_cap_defaults_to_remaining_context():
@@ -569,6 +572,7 @@ def test_quickstart_generation_default_uses_remaining_model_context(monkeypatch,
         )
 
     fake_generation.generate_mtpk = fake_generate_mtpk
+    fake_generation.generate_ar = fake_generate_mtpk
     fake_sampling = ModuleType("mtplx.sampling")
     fake_sampling.SamplerConfig = lambda **kw: SimpleNamespace(**kw)
 
@@ -601,6 +605,74 @@ def test_quickstart_generation_default_uses_remaining_model_context(monkeypatch,
     assert payload["stats"]["reasoning"] == "off"
 
 
+def test_quickstart_generation_no_mtp_uses_ar(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    class TinyTokenizer:
+        model_max_length = 100
+
+        def apply_chat_template(self, *_args, **_kwargs):
+            return list(range(12))
+
+    def stats() -> SimpleNamespace:
+        return SimpleNamespace(
+            generated_tokens=1,
+            tok_s=1.0,
+            elapsed_s=1.0,
+            prompt_eval_time_s=0.0,
+            verify_time_s=0.0,
+            target_forward_time_s=1.0,
+            repair_time_s=0.0,
+            draft_time_s=0.0,
+            verify_calls=0,
+            accepted_by_depth=[],
+            drafted_by_depth=[],
+            correction_tokens=0,
+            bonus_tokens=0,
+        )
+
+    fake_generation = ModuleType("mtplx.generation")
+
+    def fake_generate_ar(*_args, **kwargs):
+        captured["mode"] = "ar"
+        captured["max_tokens"] = kwargs["max_tokens"]
+        return SimpleNamespace(text="ok", stats=stats())
+
+    def fake_generate_mtpk(*_args, **_kwargs):  # pragma: no cover - must not be used
+        captured["mode"] = "mtp"
+        return SimpleNamespace(text="wrong", stats=stats())
+
+    fake_generation.generate_ar = fake_generate_ar
+    fake_generation.generate_mtpk = fake_generate_mtpk
+    fake_sampling = ModuleType("mtplx.sampling")
+    fake_sampling.SamplerConfig = lambda **kw: SimpleNamespace(**kw)
+
+    monkeypatch.setitem(sys.modules, "mtplx.generation", fake_generation)
+    monkeypatch.setitem(sys.modules, "mtplx.sampling", fake_sampling)
+
+    payload = public._quickstart_generate(
+        rt=SimpleNamespace(tokenizer=TinyTokenizer(), model_path=tmp_path),
+        inspection={},
+        profile=SimpleNamespace(to_dict=lambda: {"name": "stable"}),
+        args=SimpleNamespace(
+            system=None,
+            max_tokens=None,
+            temperature=0.6,
+            top_p=0.95,
+            top_k=20,
+            depth=3,
+            seed=0,
+            no_mtp=True,
+        ),
+        prompt="hello",
+        history=[],
+        turn_index=0,
+    )
+
+    assert captured == {"mode": "ar", "max_tokens": 88}
+    assert payload["stats"]["generation_mode"] == "ar"
+
+
 def test_quickstart_generation_reasoning_on_passes_enable_thinking(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
 
@@ -630,6 +702,7 @@ def test_quickstart_generation_reasoning_on_passes_enable_thinking(monkeypatch, 
             bonus_tokens=0,
         ),
     )
+    fake_generation.generate_ar = fake_generation.generate_mtpk
     fake_sampling = ModuleType("mtplx.sampling")
     fake_sampling.SamplerConfig = lambda **kw: SimpleNamespace(**kw)
 

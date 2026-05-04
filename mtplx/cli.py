@@ -1562,6 +1562,11 @@ def build_parser() -> argparse.ArgumentParser:
     start_flow_p.add_argument("--top-p", type=float, default=0.95)
     start_flow_p.add_argument("--top-k", type=int, default=20)
     start_flow_p.add_argument("--depth", type=int, default=3)
+    start_flow_p.add_argument(
+        "--no-mtp",
+        action="store_true",
+        help="Terminal CLI only: load the model without MTP and use plain AR generation",
+    )
     start_flow_p.add_argument("--seed", type=int, default=0)
     _add_reasoning_arg(start_flow_p)
     start_flow_p.add_argument("--no-stats", action="store_false", dest="show_stats", default=True, help="Hide speed stats after responses")
