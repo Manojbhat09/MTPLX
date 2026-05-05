@@ -1,6 +1,6 @@
 import asyncio
 import json
-from threading import Event
+from threading import Event, Lock
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +22,7 @@ from mtplx.server.openai import (
     _encode_messages,
     _effective_completion_tokens,
     _generation_params,
+    _generation_final_postcommit_compatibility,
     _normalize_thinking_tags,
     _online_hidden_config,
     _policy_fingerprint,
@@ -29,6 +30,8 @@ from mtplx.server.openai import (
     _raise_if_stream_cancelled,
     _repair_streamed_generation_stats,
     _request_is_authorized,
+    _schedule_idle_postcommit_snapshot,
+    _store_generation_final_history_snapshot,
     _strip_assistant_history_baggage,
     _usage_payload,
     parse_args,
@@ -41,8 +44,73 @@ class TinyTokenizer:
         return "".join(chr(int(token)) for token in tokens)
 
 
+class ChatTemplateTokenizer(TinyTokenizer):
+    def apply_chat_template(
+        self, messages, *, tokenize, add_generation_prompt, **_kwargs
+    ):
+        assert tokenize is True
+        text = "\n".join(
+            f"{message['role']}:{message.get('content') or ''}" for message in messages
+        )
+        if add_generation_prompt:
+            text = f"{text}\nassistant:" if text else "assistant:"
+        return _ids(text)
+
+    def encode(self, text, **_kwargs):
+        return _ids(str(text))
+
+
 def _ids(text: str) -> list[int]:
     return [ord(ch) for ch in text]
+
+
+class RecordingBank:
+    def __init__(self) -> None:
+        self.puts: list[dict] = []
+
+    def put(self, **kwargs):
+        self.puts.append(kwargs)
+        return SimpleNamespace(
+            prefix_len=len(kwargs["token_ids"]),
+            nbytes=123,
+            token_hash="test-token-hash",
+        )
+
+
+def _postcommit_state(*, tokenizer=None):
+    args = parse_args(["--warmup-tokens", "0"])
+    bank = RecordingBank()
+    return SimpleNamespace(
+        args=args,
+        runtime=SimpleNamespace(
+            tokenizer=tokenizer or ChatTemplateTokenizer(),
+            model_path="models/test",
+            mtp_enabled=True,
+        ),
+        sessions=SimpleNamespace(bank=bank),
+        template_hash="template",
+        draft_head_identity="draft-head",
+        lock=Lock(),
+        generation_executor=SimpleNamespace(
+            submit=lambda fn, *args, **kwargs: fn(*args, **kwargs)
+        ),
+        postcommit_executor=SimpleNamespace(
+            submit=lambda fn, *args, **kwargs: fn(*args, **kwargs)
+        ),
+        has_foreground=lambda: False,
+    )
+
+
+def _final_state(tokens, *, safe=True):
+    return SimpleNamespace(
+        final_trunk_cache=["cache"],
+        final_logits="logits",
+        final_hidden="hidden",
+        final_committed_mtp_cache=None,
+        generated_token_ids=tuple(tokens),
+        safe_to_commit=safe,
+        finish_reason="stop",
+    )
 
 
 def test_server_parse_args_exposes_product_flags():
@@ -77,7 +145,128 @@ def test_server_parse_args_exposes_product_flags():
     assert args.top_p == 0.8
     assert args.reasoning_parser == "none"
     assert args.warmup_tokens == 4
+    assert args.session_postcommit_mode == "async"
     validate_server_security_args(args)
+
+
+def test_generation_final_postcommit_exact_stores_final_state_without_retokenized_prefill():
+    state = _postcommit_state()
+    messages = [ChatMessage(role="user", content="hi")]
+    prompt_ids = _encode_messages(
+        state.runtime.tokenizer,
+        messages,
+        enable_thinking=False,
+        add_generation_prompt=True,
+    )
+    generated_tokens = _ids("ok")
+    generated = {
+        "tokens": generated_tokens,
+        "_final_state": _final_state(generated_tokens),
+    }
+
+    result = _store_generation_final_history_snapshot(
+        state,
+        session_id="session-1",
+        prompt_ids=prompt_ids,
+        generated=generated,
+        messages=messages,
+        assistant_content="ok",
+        thinking_enabled=False,
+        policy_fingerprint="policy",
+    )
+
+    assert result["stored"] is True
+    assert result["mode"] == "generation_final_exact"
+    assert result["history_suffix_tokens"] == 0
+    assert state.sessions.bank.puts[0]["token_ids"] == prompt_ids + generated_tokens
+
+
+def test_generation_final_postcommit_prefix_stores_boundary_and_reports_suffix():
+    state = _postcommit_state()
+    messages = [ChatMessage(role="user", content="hi")]
+    prompt_ids = _encode_messages(
+        state.runtime.tokenizer,
+        messages,
+        enable_thinking=False,
+        add_generation_prompt=True,
+    )
+    generated_tokens = _ids("ok")
+    generated = {
+        "tokens": generated_tokens,
+        "_final_state": _final_state(generated_tokens),
+    }
+
+    result = _store_generation_final_history_snapshot(
+        state,
+        session_id="session-1",
+        prompt_ids=prompt_ids,
+        generated=generated,
+        messages=messages,
+        assistant_content="ok!",
+        thinking_enabled=False,
+        policy_fingerprint="policy",
+    )
+
+    assert result["stored"] is True
+    assert result["mode"] == "generation_final_prefix"
+    assert result["history_suffix_tokens"] == 1
+    assert state.sessions.bank.puts[0]["token_ids"] == prompt_ids + generated_tokens
+
+
+def test_generation_final_postcommit_rejects_tool_call_history_rewrite():
+    state = _postcommit_state()
+    messages = [ChatMessage(role="user", content="call tool")]
+    prompt_ids = _encode_messages(
+        state.runtime.tokenizer,
+        messages,
+        enable_thinking=False,
+        add_generation_prompt=True,
+    )
+    generated_tokens = _ids('{"name":"lookup"}')
+    generated = {
+        "tokens": generated_tokens,
+        "_final_state": _final_state(generated_tokens),
+    }
+
+    compatibility = _generation_final_postcommit_compatibility(
+        state,
+        prompt_ids=prompt_ids,
+        generated=generated,
+        messages=messages,
+        assistant_content="",
+        assistant_tool_calls=[
+            {
+                "type": "function",
+                "function": {"name": "lookup", "arguments": {}},
+            }
+        ],
+        thinking_enabled=False,
+    )
+
+    assert compatibility["safe"] is False
+    assert compatibility["reason"] == "tool_call_history_rewrite"
+    assert state.sessions.bank.puts == []
+
+
+def test_idle_async_postcommit_reports_pending_without_foreground_work(capsys):
+    state = _postcommit_state()
+
+    pending = _schedule_idle_postcommit_snapshot(
+        state,
+        session_id="session-1",
+        messages=[ChatMessage(role="user", content="hi")],
+        assistant_content="ok",
+        thinking_enabled=False,
+        policy_fingerprint="policy",
+        unsafe_reason="retokenized_history_mismatch",
+    )
+
+    assert pending == {
+        "stored": False,
+        "mode": "async_pending",
+        "reason": "retokenized_history_mismatch",
+    }
+    assert "abandoned_foreground_busy" in capsys.readouterr().out
 
 
 def test_server_security_requires_api_key_for_non_localhost_bind():
@@ -236,12 +425,10 @@ def test_anthropic_stream_translates_openai_sse_events():
             '"finish_reason":null}]}\n\n'
         )
         yield (
-            'data: {"choices":[{"delta":{"content":"Hel"},'
-            '"finish_reason":null}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}\n\n'
         )
         yield (
-            'data: {"choices":[{"delta":{"content":"lo"},'
-            '"finish_reason":null}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"lo"},"finish_reason":null}]}\n\n'
         )
         yield (
             'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'

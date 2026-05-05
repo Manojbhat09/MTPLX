@@ -56,7 +56,11 @@ from mtplx.profiles import (
 from mtplx.draft_lm_head import _install_draft_lm_head
 
 try:
-    from mtplx.generation import generate_ar, generate_mtpk, restore_or_prefill_prompt_state
+    from mtplx.generation import (
+        generate_ar,
+        generate_mtpk,
+        restore_or_prefill_prompt_state,
+    )
     from mtplx.native_mlp import native_mlp_stats
     from mtplx.engine_session import (
         EngineSessionBusy,
@@ -67,12 +71,15 @@ try:
     )
     from mtplx.runtime import load
     from mtplx.session_bank import CacheMissReason
+
     _RUNTIME_IMPORT_ERROR: Exception | None = None
 except Exception as exc:
     _RUNTIME_IMPORT_ERROR = exc
 
     def _missing_runtime(*_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError(f"MTPLX runtime dependencies are unavailable: {_RUNTIME_IMPORT_ERROR}") from _RUNTIME_IMPORT_ERROR
+        raise RuntimeError(
+            f"MTPLX runtime dependencies are unavailable: {_RUNTIME_IMPORT_ERROR}"
+        ) from _RUNTIME_IMPORT_ERROR
 
     generate_ar = _missing_runtime
     generate_mtpk = _missing_runtime
@@ -143,7 +150,9 @@ def _raise_if_stream_cancelled(cancel_event: Event) -> None:
         raise _StreamCancelled("stream client disconnected")
 
 
-def _cancel_stream_generation(cancel_event: Event, generation_future: Any | None) -> None:
+def _cancel_stream_generation(
+    cancel_event: Event, generation_future: Any | None
+) -> None:
     cancel_event.set()
     if generation_future is None:
         return
@@ -161,6 +170,8 @@ def _comma_floats(value: str) -> tuple[float, ...]:
         return tuple(float(part) for part in parts)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 _BEGIN_END_THOUGHT_RE = re.compile(
     r"<\|begin_of_thought\|>.*?<\|end_of_thought\|>",
     re.IGNORECASE | re.DOTALL,
@@ -187,8 +198,7 @@ def _assert_fast_path_env() -> dict[str, dict[str, Any]]:
     bad = {key: value for key, value in status.items() if not value["ok"]}
     if bad:
         raise RuntimeError(
-            "MTPLX fast-path env is incomplete: "
-            + json.dumps(bad, sort_keys=True)
+            "MTPLX fast-path env is incomplete: " + json.dumps(bad, sort_keys=True)
         )
     return status
 
@@ -231,7 +241,10 @@ def _mlx_fork_status() -> dict[str, Any]:
         return {"ok": False, "error": repr(exc)}
     commit = None
     for parent in [path.parent, *path.parents]:
-        if EXPECTED_MLX_QMV_FORK_FRAGMENT in parent.name or EXPECTED_MLX_QMV_FORK_FRAGMENT in str(parent):
+        if (
+            EXPECTED_MLX_QMV_FORK_FRAGMENT in parent.name
+            or EXPECTED_MLX_QMV_FORK_FRAGMENT in str(parent)
+        ):
             try:
                 commit = subprocess.check_output(
                     ["git", "-C", str(parent), "rev-parse", "--short", "HEAD"],
@@ -269,7 +282,9 @@ def _parse_byte_limit(value: str | int | None) -> int | None:
         "gb": 1024**3,
         "gib": 1024**3,
     }
-    for suffix, multiplier in sorted(multipliers.items(), key=lambda item: -len(item[0])):
+    for suffix, multiplier in sorted(
+        multipliers.items(), key=lambda item: -len(item[0])
+    ):
         if text.endswith(suffix):
             number = text[: -len(suffix)]
             return int(float(number) * multiplier)
@@ -440,7 +455,11 @@ class ServerState:
         self.foreground_active = 0
         self.rate_limiter = _RateLimiter(args.rate_limit)
         self.profile = get_profile(args.profile)
-        runtime_label = "Medium MTP" if self.profile.name == "performance-cold" else self.profile.name
+        runtime_label = (
+            "Medium MTP"
+            if self.profile.name == "performance-cold"
+            else self.profile.name
+        )
         _startup_line(f"[4/6] Preparing {runtime_label} runtime")
         if args.generation_mode == "mtp" and not args.load_mtp:
             raise ValueError("--generation-mode mtp requires --load-mtp")
@@ -478,14 +497,20 @@ class ServerState:
         _startup_line("[4/6] Runtime checks complete")
         started = time.perf_counter()
         _startup_line(f"[5/6] Loading model weights: {args.model}")
-        _startup_line("      This is the long step; MTPLX is mapping the model into MLX.")
+        _startup_line(
+            "      This is the long step; MTPLX is mapping the model into MLX."
+        )
         _startup_line("      Model load in progress (this may take a minute).")
         load_heartbeat = _startup_heartbeat("Model still loading")
         try:
-            self.runtime = load(args.model, mtp=bool(args.load_mtp), contract=MTPContract())
+            self.runtime = load(
+                args.model, mtp=bool(args.load_mtp), contract=MTPContract()
+            )
         except BaseException as exc:
             elapsed_s = time.perf_counter() - started
-            _startup_line(f"[5/6] Model load failed after {elapsed_s:.1f}s: {type(exc).__name__}: {exc}")
+            _startup_line(
+                f"[5/6] Model load failed after {elapsed_s:.1f}s: {type(exc).__name__}: {exc}"
+            )
             raise
         finally:
             load_heartbeat.set()
@@ -531,6 +556,10 @@ class ServerState:
             max_workers=1,
             thread_name_prefix="mtplx-generation",
         )
+        self.postcommit_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="mtplx-postcommit",
+        )
         self.warmup_status = _run_startup_warmup(self)
 
     def begin_foreground(self) -> None:
@@ -559,7 +588,9 @@ def _is_localhost_bind(host: str | None) -> bool:
 
 
 def validate_server_security_args(args: argparse.Namespace) -> None:
-    if not _is_localhost_bind(getattr(args, "host", None)) and not getattr(args, "api_key", None):
+    if not _is_localhost_bind(getattr(args, "host", None)) and not getattr(
+        args, "api_key", None
+    ):
         raise SystemExit("--api-key is required when --host is not localhost")
     if int(getattr(args, "stream_interval", 1)) < 1:
         raise SystemExit("--stream-interval must be >= 1")
@@ -698,7 +729,9 @@ def _anthropic_content_to_text(content: Any) -> str:
     return str(content)
 
 
-def _anthropic_to_chat_request(request: AnthropicMessagesRequest) -> ChatCompletionRequest:
+def _anthropic_to_chat_request(
+    request: AnthropicMessagesRequest,
+) -> ChatCompletionRequest:
     messages: list[ChatMessage] = []
     system_text = _anthropic_content_to_text(request.system).strip()
     if system_text:
@@ -755,7 +788,11 @@ def _anthropic_sse(event: str, payload: dict[str, Any]) -> str:
 async def _iter_sse_data(body_iterator: Any):
     buffer = ""
     async for raw_chunk in body_iterator:
-        chunk = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else str(raw_chunk)
+        chunk = (
+            raw_chunk.decode("utf-8")
+            if isinstance(raw_chunk, bytes)
+            else str(raw_chunk)
+        )
         buffer += chunk
         while "\n\n" in buffer:
             frame, buffer = buffer.split("\n\n", 1)
@@ -870,7 +907,9 @@ async def _anthropic_stream_from_openai_sse(body_iterator: Any, *, model: str):
                     )
                 finish_reason = choice.get("finish_reason")
                 if finish_reason:
-                    stop_reason = "max_tokens" if finish_reason == "length" else "end_turn"
+                    stop_reason = (
+                        "max_tokens" if finish_reason == "length" else "end_turn"
+                    )
     finally:
         if hasattr(body_iterator, "aclose"):
             try:
@@ -880,7 +919,9 @@ async def _anthropic_stream_from_openai_sse(body_iterator: Any, *, model: str):
 
     if not content_started:
         yield start_content_block()
-    yield _anthropic_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+    yield _anthropic_sse(
+        "content_block_stop", {"type": "content_block_stop", "index": 0}
+    )
     delta_payload: dict[str, Any] = {
         "type": "message_delta",
         "delta": {"stop_reason": stop_reason, "stop_sequence": None},
@@ -901,7 +942,9 @@ def _strip_stats_footer(text: str) -> str:
 
 def _details_block_to_think(match: re.Match[str]) -> str:
     block = match.group(0)
-    block = re.sub(r"<summary\b[^>]*>.*?</summary>", "", block, flags=re.IGNORECASE | re.DOTALL)
+    block = re.sub(
+        r"<summary\b[^>]*>.*?</summary>", "", block, flags=re.IGNORECASE | re.DOTALL
+    )
     block = re.sub(r"</?details\b[^>]*>", "", block, flags=re.IGNORECASE | re.DOTALL)
     block = re.sub(r"<br\s*/?>", "\n", block, flags=re.IGNORECASE)
     block = re.sub(r"<[^>]+>", "", block)
@@ -973,7 +1016,9 @@ def _normalize_tool_specs(tools: list[dict[str, Any]] | None) -> list[dict[str, 
     normalized: list[dict[str, Any]] = []
     for index, tool in enumerate(tools):
         if not isinstance(tool, dict):
-            raise HTTPException(status_code=400, detail=f"tools[{index}] must be an object")
+            raise HTTPException(
+                status_code=400, detail=f"tools[{index}] must be an object"
+            )
         if not _tool_spec_name(tool):
             raise HTTPException(
                 status_code=400,
@@ -1042,7 +1087,9 @@ def _json_object_string(value: Any, *, context: str) -> str:
             try:
                 parsed = json.loads(text)
             except json.JSONDecodeError as exc:
-                raise _tool_protocol_error(f"{context} arguments are not valid JSON") from exc
+                raise _tool_protocol_error(
+                    f"{context} arguments are not valid JSON"
+                ) from exc
     else:
         parsed = value
     if not isinstance(parsed, dict):
@@ -1091,7 +1138,9 @@ def _parse_xml_tool_call(block: str) -> tuple[str, Any] | None:
     for param_match in _TOOL_PARAMETER_BLOCK_RE.finditer(body):
         param_name = param_match.group(1).strip()
         if not param_name:
-            raise _tool_protocol_error(f"tool '{name}' contains an empty parameter name")
+            raise _tool_protocol_error(
+                f"tool '{name}' contains an empty parameter name"
+            )
         arguments[param_name] = _decode_tool_parameter_value(param_match.group(2))
         consumed.append(param_match.span())
     if consumed:
@@ -1103,7 +1152,9 @@ def _parse_xml_tool_call(block: str) -> tuple[str, Any] | None:
         residue_parts.append(body[cursor:])
         residue = "".join(residue_parts).strip()
         if residue:
-            raise _tool_protocol_error(f"tool '{name}' contains text outside parameters")
+            raise _tool_protocol_error(
+                f"tool '{name}' contains text outside parameters"
+            )
     elif body.strip():
         raise _tool_protocol_error(f"tool '{name}' contains unwrapped parameter text")
     return name, arguments
@@ -1162,8 +1213,12 @@ def _template_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
         name = str(tool_call.get("name") or "").strip()
         arguments = tool_call.get("arguments", {})
     if not name:
-        raise HTTPException(status_code=400, detail="assistant tool_call is missing a name")
-    arguments_text = _json_object_string(arguments, context=f"assistant tool_call '{name}'")
+        raise HTTPException(
+            status_code=400, detail="assistant tool_call is missing a name"
+        )
+    arguments_text = _json_object_string(
+        arguments, context=f"assistant tool_call '{name}'"
+    )
     normalized = {
         "type": "function",
         "function": {
@@ -1189,7 +1244,9 @@ def _message_to_template_dict(
         content = (
             _strip_assistant_history_baggage(content)
             if strip_assistant_reasoning_history
-            else _normalize_openwebui_reasoning_details(_strip_stats_footer(content)).strip()
+            else _normalize_openwebui_reasoning_details(
+                _strip_stats_footer(content)
+            ).strip()
         )
     item: dict[str, Any] = {"role": message.role, "content": content}
     if message.name:
@@ -1277,7 +1334,9 @@ def _encode_messages(
     return list(tokenizer.encode(prompt))
 
 
-def _encode_prompt(tokenizer: Any, prompt: str | list[int] | list[str] | None) -> list[int]:
+def _encode_prompt(
+    tokenizer: Any, prompt: str | list[int] | list[str] | None
+) -> list[int]:
     if prompt is None:
         return []
     if isinstance(prompt, str):
@@ -1344,9 +1403,13 @@ def _request_generation_mode_value(request: BaseModel) -> Any:
     return value
 
 
-def _request_generation_mode_for_generation(state: ServerState, request: BaseModel) -> str:
+def _request_generation_mode_for_generation(
+    state: ServerState, request: BaseModel
+) -> str:
     default = _normalize_generation_mode(getattr(state.args, "generation_mode", "mtp"))
-    mode = _normalize_generation_mode(_request_generation_mode_value(request), default=default)
+    mode = _normalize_generation_mode(
+        _request_generation_mode_value(request), default=default
+    )
     if mode == "mtp" and not bool(getattr(state.runtime, "mtp_enabled", False)):
         raise HTTPException(
             status_code=400,
@@ -1427,13 +1490,11 @@ def _metrics_envelope(
 ) -> dict[str, Any]:
     decode_tok_s, decode_elapsed_s = _decode_timing(stats)
     prompt_eval_time_s = float(stats.get("prompt_eval_time_s") or 0.0)
-    ttft_s = (
-        max(0.0, token_times[0] - request_started_s)
-        if token_times
-        else None
-    )
+    ttft_s = max(0.0, token_times[0] - request_started_s) if token_times else None
     cached_tokens = int(stats.get("cached_tokens") or 0)
-    new_prefill_tokens = int(stats.get("new_prefill_tokens") or (prompt_tokens - cached_tokens))
+    new_prefill_tokens = int(
+        stats.get("new_prefill_tokens") or (prompt_tokens - cached_tokens)
+    )
     prefill_tok_s = (
         max(0, new_prefill_tokens) / prompt_eval_time_s
         if prompt_eval_time_s > 0
@@ -1449,7 +1510,9 @@ def _metrics_envelope(
         "ttft_s": ttft_s,
         "decode_elapsed_s": decode_elapsed_s,
         "request_elapsed_s": request_elapsed_s,
-        "request_tok_s": completion_tokens / request_elapsed_s if request_elapsed_s > 0 else 0.0,
+        "request_tok_s": completion_tokens / request_elapsed_s
+        if request_elapsed_s > 0
+        else 0.0,
         "decode_tok_s": decode_tok_s,
         "sliding_decode_tok_s_first_32": _token_window_rate_first(token_times, 32),
         "sliding_decode_tok_s_first_64": _token_window_rate_first(token_times, 64),
@@ -1589,23 +1652,18 @@ PUBLIC_POSTCOMMIT_KEYS = (
     "prefix_len",
     "nbytes",
     "elapsed_s",
+    "history_suffix_tokens",
     "error",
 )
 
 
 def _public_mtplx_stats(generated: dict[str, Any]) -> dict[str, Any]:
     stats = generated.get("stats") or {}
-    public = {
-        key: stats[key]
-        for key in PUBLIC_MTPLX_STATS_KEYS
-        if key in stats
-    }
+    public = {key: stats[key] for key in PUBLIC_MTPLX_STATS_KEYS if key in stats}
     postcommit = stats.get("session_postcommit_snapshot")
     if isinstance(postcommit, dict):
         public["session_postcommit_snapshot"] = {
-            key: postcommit[key]
-            for key in PUBLIC_POSTCOMMIT_KEYS
-            if key in postcommit
+            key: postcommit[key] for key in PUBLIC_POSTCOMMIT_KEYS if key in postcommit
         }
     return _json_safe(public)
 
@@ -1641,7 +1699,9 @@ def _request_observability(
         "request_message_chars": [
             len(_content_to_text(message.content)) for message in request.messages
         ],
-        "request_extra_keys": sorted((getattr(request, "model_extra", None) or {}).keys()),
+        "request_extra_keys": sorted(
+            (getattr(request, "model_extra", None) or {}).keys()
+        ),
         "request_metadata_keys": sorted(metadata.keys()),
         "request_session_source": session_source,
         "request_session_candidate_headers": candidate_headers,
@@ -1691,10 +1751,14 @@ def _policy_fingerprint(
 def _proposal_cache_config(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "online_correction_cache": bool(args.online_correction_cache),
-        "online_correction_cache_min_depth": int(args.online_correction_cache_min_depth),
+        "online_correction_cache_min_depth": int(
+            args.online_correction_cache_min_depth
+        ),
         "online_correction_cache_key": str(args.online_correction_cache_key),
         "prompt_correction_cache": bool(args.prompt_correction_cache),
-        "prompt_correction_cache_min_depth": int(args.prompt_correction_cache_min_depth),
+        "prompt_correction_cache_min_depth": int(
+            args.prompt_correction_cache_min_depth
+        ),
     }
 
 
@@ -1716,7 +1780,9 @@ def _adaptive_config(
     policy = str(getattr(args, "adaptive_policy", "none") or "none")
     if policy == "none":
         return {"policy": "none"}
-    effective_max_depth = int(max_depth if max_depth is not None else getattr(args, "depth", 3))
+    effective_max_depth = int(
+        max_depth if max_depth is not None else getattr(args, "depth", 3)
+    )
     config: dict[str, Any] = {
         "policy": policy,
         "max_depth": effective_max_depth,
@@ -1758,7 +1824,9 @@ def _make_adaptive_policy(
     policy = str(getattr(args, "adaptive_policy", "none") or "none")
     if policy == "none":
         return None
-    effective_max_depth = int(max_depth if max_depth is not None else getattr(args, "depth", 3))
+    effective_max_depth = int(
+        max_depth if max_depth is not None else getattr(args, "depth", 3)
+    )
     if policy == "streak":
         return AdaptiveDepthPolicy(
             max_depth=effective_max_depth,
@@ -1853,11 +1921,263 @@ def _store_retokenized_history_snapshot(
         state.end_foreground()
     return {
         "stored": True,
+        "mode": "retokenized_history",
         "prefix_len": entry.prefix_len,
         "nbytes": entry.nbytes,
         "elapsed_s": time.perf_counter() - started,
         "token_hash": entry.token_hash,
     }
+
+
+def _history_ids_for_postcommit(
+    state: ServerState,
+    *,
+    messages: list[ChatMessage],
+    assistant_content: str,
+    assistant_tool_calls: list[dict[str, Any]] | None,
+    thinking_enabled: bool,
+) -> list[int]:
+    history_messages = list(messages) + [
+        ChatMessage(
+            role="assistant",
+            content=assistant_content,
+            tool_calls=assistant_tool_calls,
+        ),
+    ]
+    return _encode_messages(
+        state.runtime.tokenizer,
+        history_messages,
+        enable_thinking=thinking_enabled,
+        strip_assistant_reasoning_history=state.args.strip_assistant_reasoning_history,
+        add_generation_prompt=False,
+    )
+
+
+def _generation_final_postcommit_compatibility(
+    state: ServerState,
+    *,
+    prompt_ids: list[int],
+    generated: dict[str, Any],
+    messages: list[ChatMessage],
+    assistant_content: str,
+    assistant_tool_calls: list[dict[str, Any]] | None = None,
+    thinking_enabled: bool,
+) -> dict[str, Any]:
+    if assistant_tool_calls:
+        return {
+            "safe": False,
+            "mode": "unsafe",
+            "reason": "tool_call_history_rewrite",
+        }
+    if (
+        _STATS_FOOTER_RE.search(assistant_content)
+        or STATS_FOOTER_MARKER in assistant_content
+    ):
+        return {
+            "safe": False,
+            "mode": "unsafe",
+            "reason": "stats_footer_in_assistant_history",
+        }
+    final_state = generated.get("_final_state")
+    if final_state is None:
+        return {
+            "safe": False,
+            "mode": "unsafe",
+            "reason": "missing_generation_final_state",
+        }
+    if not bool(getattr(final_state, "safe_to_commit", False)):
+        return {
+            "safe": False,
+            "mode": "unsafe",
+            "reason": "generation_final_state_unsafe",
+        }
+    generated_tokens = [int(token) for token in generated.get("tokens") or []]
+    final_generated_tokens = [
+        int(token)
+        for token in getattr(
+            final_state, "generated_token_ids", tuple(generated_tokens)
+        )
+    ]
+    if final_generated_tokens != generated_tokens:
+        return {
+            "safe": False,
+            "mode": "unsafe",
+            "reason": "generated_token_mismatch",
+        }
+    final_token_ids = [int(token) for token in prompt_ids] + final_generated_tokens
+    if not final_token_ids:
+        return {"safe": False, "mode": "unsafe", "reason": "empty_generation_boundary"}
+    history_ids = _history_ids_for_postcommit(
+        state,
+        messages=messages,
+        assistant_content=assistant_content,
+        assistant_tool_calls=assistant_tool_calls,
+        thinking_enabled=thinking_enabled,
+    )
+    if history_ids == final_token_ids:
+        return {
+            "safe": True,
+            "mode": "generation_final_exact",
+            "reason": "token_identical",
+            "token_ids": final_token_ids,
+            "history_suffix_tokens": 0,
+        }
+    if (
+        len(history_ids) >= len(final_token_ids)
+        and history_ids[: len(final_token_ids)] == final_token_ids
+    ):
+        return {
+            "safe": True,
+            "mode": "generation_final_prefix",
+            "reason": "generation_boundary_prefix_of_history",
+            "token_ids": final_token_ids,
+            "history_suffix_tokens": len(history_ids) - len(final_token_ids),
+        }
+    reason = "retokenized_history_mismatch"
+    if bool(state.args.strip_assistant_reasoning_history) and thinking_enabled:
+        reason = "reasoning_history_stripping_mismatch"
+    elif str(generated.get("finish_reason") or "") == "stop":
+        reason = "stop_token_boundary_mismatch"
+    return {
+        "safe": False,
+        "mode": "unsafe",
+        "reason": reason,
+        "history_tokens": len(history_ids),
+        "generation_boundary_tokens": len(final_token_ids),
+    }
+
+
+def _store_generation_final_history_snapshot(
+    state: ServerState,
+    *,
+    session_id: str | None,
+    prompt_ids: list[int],
+    generated: dict[str, Any],
+    messages: list[ChatMessage],
+    assistant_content: str,
+    assistant_tool_calls: list[dict[str, Any]] | None = None,
+    thinking_enabled: bool,
+    policy_fingerprint: str,
+) -> dict[str, Any]:
+    if session_id is None:
+        return {"stored": False, "mode": "unsafe", "reason": "no_session_id"}
+    started = time.perf_counter()
+    compatibility = _generation_final_postcommit_compatibility(
+        state,
+        prompt_ids=prompt_ids,
+        generated=generated,
+        messages=messages,
+        assistant_content=assistant_content,
+        assistant_tool_calls=assistant_tool_calls,
+        thinking_enabled=thinking_enabled,
+    )
+    if not bool(compatibility.get("safe")):
+        return {
+            "stored": False,
+            "mode": compatibility.get("mode", "unsafe"),
+            "reason": compatibility.get("reason", "unsafe_history"),
+            "elapsed_s": time.perf_counter() - started,
+        }
+    final_state = generated["_final_state"]
+    token_ids = [int(token) for token in compatibility["token_ids"]]
+    acquired = state.lock.acquire(blocking=False)
+    if not acquired:
+        return {
+            "stored": False,
+            "mode": "unsafe",
+            "reason": "model_lock_busy_before_generation_final_commit",
+            "elapsed_s": time.perf_counter() - started,
+        }
+    try:
+        mtp_snapshot = (
+            snapshot_cache(final_state.final_committed_mtp_cache)
+            if final_state.final_committed_mtp_cache is not None
+            else None
+        )
+        entry = state.sessions.bank.put(
+            runtime=state.runtime,
+            token_ids=token_ids,
+            cache=final_state.final_trunk_cache,
+            logits=final_state.final_logits,
+            hidden=final_state.final_hidden,
+            hidden_variant="post_norm",
+            keep_live_ref=True,
+            session_id=session_id,
+            template_hash=state.template_hash,
+            mtp_history_policy="committed",
+            draft_head_identity=state.draft_head_identity,
+            policy_fingerprint=policy_fingerprint,
+            mtp_history_snapshot=mtp_snapshot,
+            snapshot_epoch=len(token_ids),
+            mtp_snapshot_epoch=len(token_ids) if mtp_snapshot is not None else None,
+        )
+    finally:
+        state.lock.release()
+    return {
+        "stored": True,
+        "mode": compatibility["mode"],
+        "reason": compatibility["reason"],
+        "prefix_len": entry.prefix_len,
+        "nbytes": entry.nbytes,
+        "elapsed_s": time.perf_counter() - started,
+        "history_suffix_tokens": int(compatibility.get("history_suffix_tokens") or 0),
+        "token_hash": entry.token_hash,
+    }
+
+
+def _schedule_idle_postcommit_snapshot(
+    state: ServerState,
+    *,
+    session_id: str | None,
+    messages: list[ChatMessage],
+    assistant_content: str,
+    assistant_tool_calls: list[dict[str, Any]] | None = None,
+    thinking_enabled: bool,
+    policy_fingerprint: str,
+    unsafe_reason: str,
+) -> dict[str, Any]:
+    pending = {
+        "stored": False,
+        "mode": "async_pending",
+        "reason": unsafe_reason,
+    }
+
+    def async_postcommit() -> None:
+        result = {
+            "stored": False,
+            "mode": "abandoned_foreground_busy",
+            "reason": "idle_only_fallback_skipped_to_protect_foreground_latency",
+        }
+        try:
+            if state.has_foreground() or state.lock.locked():
+                result = {
+                    "stored": False,
+                    "mode": "deferred_foreground_busy",
+                    "reason": "foreground_or_model_lock_busy",
+                }
+            print(
+                "[mtplx] idle async session postcommit "
+                + json.dumps(
+                    {
+                        "session_id": session_id,
+                        "unsafe_reason": unsafe_reason,
+                        **result,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+        except BaseException as exc:
+            print(
+                f"[mtplx] async session postcommit failed: {exc!r}",
+                flush=True,
+            )
+
+    executor = getattr(state, "postcommit_executor", None)
+    if executor is None:
+        executor = state.generation_executor
+    executor.submit(async_postcommit)
+    return pending
 
 
 def _generation_params(
@@ -1871,7 +2191,9 @@ def _generation_params(
 ) -> tuple[int, SamplerConfig, dict[str, Any]]:
     remaining_context = max(1, int(state.context_window) - int(prompt_token_count))
     request_max_tokens = None if max_tokens is None else int(max_tokens)
-    requested_max = remaining_context if request_max_tokens is None else request_max_tokens
+    requested_max = (
+        remaining_context if request_max_tokens is None else request_max_tokens
+    )
     before_server_cap = requested_max
     server_max_response_tokens = state.args.max_response_tokens
     if state.args.max_response_tokens is not None:
@@ -1879,22 +2201,31 @@ def _generation_params(
     after_server_cap = requested_max
     requested_max = max(1, min(after_server_cap, remaining_context))
     sampler = SamplerConfig(
-        temperature=state.args.temperature if temperature is None else float(temperature),
+        temperature=state.args.temperature
+        if temperature is None
+        else float(temperature),
         top_p=state.args.top_p if top_p is None else float(top_p),
         top_k=state.args.top_k if top_k is None else int(top_k),
     )
-    return requested_max, sampler, {
-        "request_max_tokens": request_max_tokens,
-        "server_max_response_tokens": (
-            None if server_max_response_tokens is None else int(server_max_response_tokens)
-        ),
-        "effective_max_tokens": int(requested_max),
-        "remaining_context_tokens": int(remaining_context),
-        "server_cap_applied": bool(
-            server_max_response_tokens is not None and after_server_cap < before_server_cap
-        ),
-        "context_cap_applied": bool(requested_max < after_server_cap),
-    }
+    return (
+        requested_max,
+        sampler,
+        {
+            "request_max_tokens": request_max_tokens,
+            "server_max_response_tokens": (
+                None
+                if server_max_response_tokens is None
+                else int(server_max_response_tokens)
+            ),
+            "effective_max_tokens": int(requested_max),
+            "remaining_context_tokens": int(remaining_context),
+            "server_cap_applied": bool(
+                server_max_response_tokens is not None
+                and after_server_cap < before_server_cap
+            ),
+            "context_cap_applied": bool(requested_max < after_server_cap),
+        },
+    )
 
 
 def _fresh_seed() -> int:
@@ -1979,7 +2310,11 @@ def _run_generation(
         .replace("\n", " ")
         .strip()
     )
-    trace_label = f"{session_id or 'stateless'}:{trace_preview[:64]}" if trace_preview else session_id
+    trace_label = (
+        f"{session_id or 'stateless'}:{trace_preview[:64]}"
+        if trace_preview
+        else session_id
+    )
     trace_metadata = {
         "session_id": session_id,
         "session_restore_mode": session_restore_mode,
@@ -2022,7 +2357,9 @@ def _run_generation(
                     trace_metadata=trace_metadata,
                 )
             else:
-                adaptive_policy = _make_adaptive_policy(state.args, max_depth=effective_depth)
+                adaptive_policy = _make_adaptive_policy(
+                    state.args, max_depth=effective_depth
+                )
                 out = generate_mtpk(
                     state.runtime,
                     prompt_ids,
@@ -2038,7 +2375,9 @@ def _run_generation(
                     verify_core=state.args.verify_core,
                     token_callback=record_tokens,
                     session_bank=session_bank,
-                    session_restore_mode=_session_bank_restore_mode(session_restore_mode),
+                    session_restore_mode=_session_bank_restore_mode(
+                        session_restore_mode
+                    ),
                     session_template_hash=session_template_hash,
                     session_draft_head_identity=session_draft_head_identity,
                     session_policy_fingerprint=session_policy_fingerprint,
@@ -2050,7 +2389,9 @@ def _run_generation(
                     online_correction_cache_min_depth=int(
                         state.args.online_correction_cache_min_depth
                     ),
-                    online_correction_cache_key=str(state.args.online_correction_cache_key),
+                    online_correction_cache_key=str(
+                        state.args.online_correction_cache_key
+                    ),
                     prompt_correction_cache=bool(state.args.prompt_correction_cache),
                     prompt_correction_cache_min_depth=int(
                         state.args.prompt_correction_cache_min_depth
@@ -2067,7 +2408,9 @@ def _run_generation(
                     online_hidden_corrector_max_feed_depth=(
                         state.args.online_hidden_corrector_max_feed_depth
                     ),
-                    online_hidden_corrector_key=str(state.args.online_hidden_corrector_key),
+                    online_hidden_corrector_key=str(
+                        state.args.online_hidden_corrector_key
+                    ),
                 )
         finally:
             state.lock.release()
@@ -2089,12 +2432,13 @@ def _run_generation(
             session_cache_hit = bool(stats.get("session_cache_hit") or False)
             if session_cache_hit:
                 cache_miss_reason = None
-            session_restore_mode = str(stats.get("session_restore_mode") or session_restore_mode)
+            session_restore_mode = str(
+                stats.get("session_restore_mode") or session_restore_mode
+            )
         final_state = out.final_state
         if (
             commit_final_state_to_bank
-            and
-            session_bank is not None
+            and session_bank is not None
             and session_id is not None
             and final_state is not None
             and final_state.safe_to_commit
@@ -2120,7 +2464,9 @@ def _run_generation(
                 policy_fingerprint=session_policy_fingerprint,
                 mtp_history_snapshot=mtp_snapshot,
                 snapshot_epoch=len(final_token_ids),
-                mtp_snapshot_epoch=len(final_token_ids) if mtp_snapshot is not None else None,
+                mtp_snapshot_epoch=len(final_token_ids)
+                if mtp_snapshot is not None
+                else None,
             )
         envelope = _metrics_envelope(
             stats=stats,
@@ -2161,7 +2507,9 @@ def _run_generation(
         stats["server_seed"] = generation_seed
         stats["server_attempts"] = attempt + 1
         stats["server_blank_retries"] = attempt
-        stats["server_blank_retry_suppressed"] = bool(streaming_response and blank_retry_budget)
+        stats["server_blank_retry_suppressed"] = bool(
+            streaming_response and blank_retry_budget
+        )
         state.last_metrics.append(dict(envelope))
         state.last_metrics = state.last_metrics[-100:]
         state.last_request_at = time.time()
@@ -2174,10 +2522,9 @@ def _run_generation(
             "completion_tokens": completion_tokens,
             "elapsed_s": elapsed_s,
             "tok_s": tok_s,
+            "_final_state": final_state,
             "finish_reason": (
-                out.final_state.finish_reason
-                if out.final_state is not None
-                else "stop"
+                out.final_state.finish_reason if out.final_state is not None else "stop"
             ),
         }
         if seed_is_explicit or out.text.strip():
@@ -2239,7 +2586,9 @@ def _run_startup_warmup(state: ServerState) -> dict[str, Any]:
             }
         )
         warmup_heartbeat.set()
-        _startup_line(f"[6/6] Warmup failed after {status['elapsed_s']:.1f}s: {status['error']}")
+        _startup_line(
+            f"[6/6] Warmup failed after {status['elapsed_s']:.1f}s: {status['error']}"
+        )
         if getattr(state.args, "strict_warmup", False):
             raise
         return status
@@ -2262,7 +2611,9 @@ def _run_startup_warmup(state: ServerState) -> dict[str, Any]:
 def _chunk_text(text: str, chunk_chars: int = 24) -> list[str]:
     if not text:
         return [""]
-    return [text[index : index + chunk_chars] for index in range(0, len(text), chunk_chars)]
+    return [
+        text[index : index + chunk_chars] for index in range(0, len(text), chunk_chars)
+    ]
 
 
 def _decode_timing(stats: dict[str, Any]) -> tuple[float, float]:
@@ -2274,7 +2625,9 @@ def _decode_timing(stats: dict[str, Any]) -> tuple[float, float]:
         target_forward_time_s = float(stats.get("target_forward_time_s") or 0.0)
         verify_time_s = float(stats.get("verify_time_s") or 0.0)
         repair_time_s = float(stats.get("repair_time_s") or 0.0)
-        prompt_eval_time_s = max(0.0, target_forward_time_s - verify_time_s - repair_time_s)
+        prompt_eval_time_s = max(
+            0.0, target_forward_time_s - verify_time_s - repair_time_s
+        )
     decode_elapsed_s = max(0.0, elapsed_s - prompt_eval_time_s)
     if decode_elapsed_s <= 0.0:
         return 0.0, 0.0
@@ -2310,7 +2663,11 @@ def _split_thinking_segments(text: str, *, thinking_enabled: bool) -> tuple[str,
     def append_reasoning(segment: str) -> None:
         if not segment:
             return
-        if reasoning_parts and not reasoning_parts[-1].endswith(("\n", " ")) and not segment.startswith(("\n", " ")):
+        if (
+            reasoning_parts
+            and not reasoning_parts[-1].endswith(("\n", " "))
+            and not segment.startswith(("\n", " "))
+        ):
             reasoning_parts.append("\n")
         reasoning_parts.append(segment)
 
@@ -2320,10 +2677,16 @@ def _split_thinking_segments(text: str, *, thinking_enabled: bool) -> tuple[str,
         if inside_thinking:
             close_index = text.find(THINK_CLOSE, position)
             if close_index < 0:
-                segment = text[position:].replace(THINK_OPEN, "").replace(THINK_CLOSE, "")
+                segment = (
+                    text[position:].replace(THINK_OPEN, "").replace(THINK_CLOSE, "")
+                )
                 append_reasoning(segment)
                 break
-            segment = text[position:close_index].replace(THINK_OPEN, "").replace(THINK_CLOSE, "")
+            segment = (
+                text[position:close_index]
+                .replace(THINK_OPEN, "")
+                .replace(THINK_CLOSE, "")
+            )
             append_reasoning(segment)
             position = close_index + len(THINK_CLOSE)
             inside_thinking = False
@@ -2335,7 +2698,9 @@ def _split_thinking_segments(text: str, *, thinking_enabled: bool) -> tuple[str,
             if segment:
                 content_parts.append(segment)
             break
-        segment = text[position:open_index].replace(THINK_OPEN, "").replace(THINK_CLOSE, "")
+        segment = (
+            text[position:open_index].replace(THINK_OPEN, "").replace(THINK_CLOSE, "")
+        )
         if segment:
             content_parts.append(segment)
         position = open_index + len(THINK_OPEN)
@@ -2350,7 +2715,9 @@ def _normalize_thinking_tags(text: str, *, thinking_enabled: bool) -> str:
     generated text may begin inside the reasoning block and only emit </think>.
     Open WebUI's built-in parser needs a start tag in the streamed content.
     """
-    reasoning, content = _split_thinking_segments(text, thinking_enabled=thinking_enabled)
+    reasoning, content = _split_thinking_segments(
+        text, thinking_enabled=thinking_enabled
+    )
     if not thinking_enabled:
         return content
     pieces: list[str] = []
@@ -2497,20 +2864,30 @@ class _ThinkingContentStreamSplitter:
             if self._inside_thinking:
                 close_index = self._pending.find(THINK_CLOSE)
                 if close_index < 0:
-                    emit_len = len(self._pending) if final else max(0, len(self._pending) - keep)
+                    emit_len = (
+                        len(self._pending)
+                        if final
+                        else max(0, len(self._pending) - keep)
+                    )
                     if emit_len <= 0:
                         break
-                    self._append_chunk(chunks, "reasoning_content", self._pending[:emit_len])
+                    self._append_chunk(
+                        chunks, "reasoning_content", self._pending[:emit_len]
+                    )
                     self._pending = self._pending[emit_len:]
                     break
-                self._append_chunk(chunks, "reasoning_content", self._pending[:close_index])
+                self._append_chunk(
+                    chunks, "reasoning_content", self._pending[:close_index]
+                )
                 self._pending = self._pending[close_index + len(THINK_CLOSE) :].lstrip()
                 self._inside_thinking = False
                 continue
 
             open_index = self._pending.find(THINK_OPEN)
             if open_index < 0:
-                emit_len = len(self._pending) if final else max(0, len(self._pending) - keep)
+                emit_len = (
+                    len(self._pending) if final else max(0, len(self._pending) - keep)
+                )
                 if emit_len <= 0:
                     break
                 self._append_chunk(chunks, "content", self._pending[:emit_len])
@@ -3764,12 +4141,13 @@ def _chat_ui_html(
 </body>
 </html>"""
     return (
-        template
-        .replace("__MODEL__", html.escape(model_id))
+        template.replace("__MODEL__", html.escape(model_id))
         .replace("__API_NOTE__", html.escape(api_note))
         .replace("__SERVER_URL__", html.escape(server_url))
         .replace("__MODEL_JSON__", json.dumps(model_id))
-        .replace("__DEFAULT_SETTINGS_JSON__", json.dumps(default_settings, sort_keys=True))
+        .replace(
+            "__DEFAULT_SETTINGS_JSON__", json.dumps(default_settings, sort_keys=True)
+        )
         .replace("__DEPTH_VALUE__", str(default_depth))
         .replace("__DEPTH_MAX__", str(default_depth))
     )
@@ -3781,7 +4159,11 @@ def _thinking_enabled_for_request(
 ) -> bool:
     if state.args.reasoning_parser == "none":
         return False
-    return state.args.enable_thinking if request.enable_thinking is None else bool(request.enable_thinking)
+    return (
+        state.args.enable_thinking
+        if request.enable_thinking is None
+        else bool(request.enable_thinking)
+    )
 
 
 def create_app(state: ServerState) -> FastAPI:
@@ -3790,6 +4172,9 @@ def create_app(state: ServerState) -> FastAPI:
         try:
             yield
         finally:
+            postcommit_executor = getattr(state, "postcommit_executor", None)
+            if postcommit_executor is not None:
+                postcommit_executor.shutdown(wait=False, cancel_futures=True)
             state.generation_executor.shutdown(wait=False, cancel_futures=True)
 
     app = FastAPI(title="MTPLX OpenAI-compatible server", lifespan=lifespan)
@@ -3803,7 +4188,9 @@ def create_app(state: ServerState) -> FastAPI:
     )
 
     @app.middleware("http")
-    async def api_key_and_rate_limit(request: Request, call_next: Callable[[Request], Any]) -> Any:
+    async def api_key_and_rate_limit(
+        request: Request, call_next: Callable[[Request], Any]
+    ) -> Any:
         if not _request_is_authorized(request, state.args.api_key):
             return JSONResponse(
                 status_code=401,
@@ -3842,7 +4229,8 @@ def create_app(state: ServerState) -> FastAPI:
                     "top_p": float(state.args.top_p),
                     "top_k": int(state.args.top_k),
                     "depth": int(state.args.depth),
-                    "mtp_enabled": str(getattr(state.args, "generation_mode", "mtp")) == "mtp",
+                    "mtp_enabled": str(getattr(state.args, "generation_mode", "mtp"))
+                    == "mtp",
                     "max_tokens": int(state.args.max_response_tokens or 16384),
                     "reasoning": str(getattr(state.args, "reasoning", None) or "auto"),
                     "system": "",
@@ -3867,7 +4255,9 @@ def create_app(state: ServerState) -> FastAPI:
             "openwebui": {
                 "where": "Open WebUI -> Settings -> Connections -> OpenAI-compatible connection",
                 "base_url": f"{server_url}/v1",
-                "api_key": "leave blank for localhost" if not state.args.api_key else "use the API key you started MTPLX with",
+                "api_key": "leave blank for localhost"
+                if not state.args.api_key
+                else "use the API key you started MTPLX with",
                 "model": state.model_id,
             },
             "endpoints": {
@@ -3952,7 +4342,9 @@ def create_app(state: ServerState) -> FastAPI:
                 "MTPLX_TARGET_LAYER_EVAL_CONTEXT_THRESHOLD"
             ),
             "target_layer_eval_max_q": os.environ.get("MTPLX_TARGET_LAYER_EVAL_MAX_Q"),
-            "defer_verify_hidden_eval": os.environ.get("MTPLX_DEFER_VERIFY_HIDDEN_EVAL"),
+            "defer_verify_hidden_eval": os.environ.get(
+                "MTPLX_DEFER_VERIFY_HIDDEN_EVAL"
+            ),
             "late_depth_switch_after_tokens": os.environ.get(
                 "MTPLX_LATE_DEPTH_SWITCH_AFTER_TOKENS"
             ),
@@ -4054,9 +4446,7 @@ def create_app(state: ServerState) -> FastAPI:
                 "MTPLX_NATIVE_GDN_TAIL_SIMDGROUPS"
             ),
             "live_output_detach": os.environ.get("MTPLX_DETACH_LIVE_OUTPUTS"),
-            "live_output_detach_mode": os.environ.get(
-                "MTPLX_DETACH_LIVE_OUTPUTS_MODE"
-            ),
+            "live_output_detach_mode": os.environ.get("MTPLX_DETACH_LIVE_OUTPUTS_MODE"),
             "mlx_cache_limit": state.mlx_cache_limit_status,
             "mlx_fork": state.mlx_fork_status,
         }
@@ -4099,15 +4489,22 @@ def create_app(state: ServerState) -> FastAPI:
         }
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(raw_request: Request, request: ChatCompletionRequest) -> Any:
+    async def chat_completions(
+        raw_request: Request, request: ChatCompletionRequest
+    ) -> Any:
         if not request.messages:
             raise HTTPException(status_code=400, detail="messages must not be empty")
         headers = dict(raw_request.headers)
         metadata = _request_metadata(request)
-        cache_bypass = (
-            headers.get("x-mtplx-cache-mode", "").lower() in {"bypass", "stateless", "off"}
-            or str(metadata.get("cache_mode", "")).lower() in {"bypass", "stateless", "off"}
-        )
+        cache_bypass = headers.get("x-mtplx-cache-mode", "").lower() in {
+            "bypass",
+            "stateless",
+            "off",
+        } or str(metadata.get("cache_mode", "")).lower() in {
+            "bypass",
+            "stateless",
+            "off",
+        }
         tool_specs = _normalize_tool_specs(request.tools)
         tools_active = _tools_active_for_request(tool_specs, request.tool_choice)
         background = is_background_request(
@@ -4136,7 +4533,9 @@ def create_app(state: ServerState) -> FastAPI:
         thinking_enabled = _thinking_enabled_for_request(state, request)
         if tools_active and request.enable_thinking is None:
             thinking_enabled = False
-        request_generation_mode = _request_generation_mode_for_generation(state, request)
+        request_generation_mode = _request_generation_mode_for_generation(
+            state, request
+        )
         request_depth = _request_depth_for_generation(
             state,
             request,
@@ -4168,12 +4567,12 @@ def create_app(state: ServerState) -> FastAPI:
             depth=request_depth,
         )
         if not background and not cache_bypass:
-            requested_restore_mode = headers.get("x-mtplx-restore-mode", "reference_lease")
+            requested_restore_mode = headers.get(
+                "x-mtplx-restore-mode", "reference_lease"
+            )
             requested_restore_mode = requested_restore_mode.replace("-", "_")
             session_restore_mode = (
-                "clone"
-                if requested_restore_mode == "clone"
-                else "reference_lease"
+                "clone" if requested_restore_mode == "clone" else "reference_lease"
             )
             session_id, session_source = state.sessions.resolve_session_id(
                 headers=headers,
@@ -4213,7 +4612,9 @@ def create_app(state: ServerState) -> FastAPI:
                     session_id=session_id,
                     cache_miss_reason=cache_miss_reason,
                     session_restore_mode=session_restore_mode,
-                    session_bank=None if background or cache_bypass else state.sessions.bank,
+                    session_bank=None
+                    if background or cache_bypass
+                    else state.sessions.bank,
                     session_template_hash=state.template_hash,
                     session_draft_head_identity=state.draft_head_identity,
                     session_policy_fingerprint=policy_fingerprint,
@@ -4252,35 +4653,55 @@ def create_app(state: ServerState) -> FastAPI:
             *,
             assistant_content: str,
             assistant_tool_calls: list[dict[str, Any]] | None = None,
+            stream_response: bool = False,
         ) -> None:
             if session is None:
                 return
-            loop = asyncio.get_running_loop()
-            if state.args.session_postcommit_mode == "async":
+            started = time.perf_counter()
+            compatibility = _generation_final_postcommit_compatibility(
+                state,
+                prompt_ids=prompt_ids,
+                generated=generated,
+                messages=request.messages,
+                assistant_content=assistant_content,
+                assistant_tool_calls=assistant_tool_calls,
+                thinking_enabled=thinking_enabled,
+            )
+            if compatibility.get("safe"):
                 generated["stats"]["session_postcommit_snapshot"] = {
-                    "stored": False,
-                    "mode": "async_pending",
+                    "stored": True,
+                    "mode": compatibility["mode"],
+                    "reason": compatibility["reason"],
+                    "prefix_len": len(compatibility["token_ids"]),
+                    "elapsed_s": time.perf_counter() - started,
+                    "history_suffix_tokens": int(
+                        compatibility.get("history_suffix_tokens") or 0
+                    ),
                 }
-
-                def async_postcommit() -> None:
-                    try:
-                        _store_retokenized_history_snapshot(
-                            state,
-                            session_id=session_id,
-                            messages=request.messages,
-                            assistant_content=assistant_content,
-                            assistant_tool_calls=assistant_tool_calls,
-                            thinking_enabled=thinking_enabled,
-                            policy_fingerprint=policy_fingerprint,
-                        )
-                    except BaseException as exc:
-                        print(
-                            f"[mtplx] async session postcommit failed: {exc!r}",
-                            flush=True,
-                        )
-
-                state.generation_executor.submit(async_postcommit)
                 return
+            unsafe_reason = str(compatibility.get("reason") or "unsafe_history")
+            generated_mode = str(
+                generated.get("stats", {}).get("generation_mode") or ""
+            )
+            if (
+                stream_response
+                and state.args.session_postcommit_mode == "async"
+                and generated_mode != "ar"
+            ):
+                generated["stats"]["session_postcommit_snapshot"] = (
+                    _schedule_idle_postcommit_snapshot(
+                        state,
+                        session_id=session_id,
+                        messages=request.messages,
+                        assistant_content=assistant_content,
+                        assistant_tool_calls=assistant_tool_calls,
+                        thinking_enabled=thinking_enabled,
+                        policy_fingerprint=policy_fingerprint,
+                        unsafe_reason=unsafe_reason,
+                    )
+                )
+                return
+            loop = asyncio.get_running_loop()
             postcommit = await loop.run_in_executor(
                 state.generation_executor,
                 lambda: _store_retokenized_history_snapshot(
@@ -4296,6 +4717,7 @@ def create_app(state: ServerState) -> FastAPI:
             generated["stats"]["session_postcommit_snapshot"] = postcommit
 
         if request.stream and tools_active:
+
             async def tool_event_stream():
                 def stream_chunk(
                     *,
@@ -4337,7 +4759,9 @@ def create_app(state: ServerState) -> FastAPI:
                         "object": "chat.completion.chunk",
                         "created": created,
                         "model": model,
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                        "choices": [
+                            {"index": 0, "delta": {}, "finish_reason": "error"}
+                        ],
                         "error": {
                             "message": message,
                             "type": error_type,
@@ -4363,6 +4787,7 @@ def create_app(state: ServerState) -> FastAPI:
                             generated,
                             assistant_content="",
                             assistant_tool_calls=tool_calls,
+                            stream_response=True,
                         )
                         yield stream_chunk(
                             delta={
@@ -4382,6 +4807,7 @@ def create_app(state: ServerState) -> FastAPI:
                         await store_postcommit_snapshot(
                             generated,
                             assistant_content=display_text,
+                            stream_response=True,
                         )
                         if display_text:
                             yield stream_chunk(delta={"content": display_text})
@@ -4403,27 +4829,43 @@ def create_app(state: ServerState) -> FastAPI:
                 )
                 yield "data: [DONE]\n\n"
 
-            return StreamingResponse(tool_event_stream(), media_type="text/event-stream")
+            return StreamingResponse(
+                tool_event_stream(), media_type="text/event-stream"
+            )
 
         if request.stream:
+
             async def event_stream():
                 first = {
                     "id": response_id,
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": model,
-                    "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant"},
+                            "finish_reason": None,
+                        }
+                    ],
                 }
                 yield f"data: {json.dumps(first)}\n\n"
 
                 queue: Queue[tuple[str, Any]] = Queue()
                 cancel_event = Event()
                 decoder = _IncrementalTokenDecoder(state.runtime.tokenizer)
-                splitter = _ThinkingContentStreamSplitter(thinking_enabled=thinking_enabled)
+                splitter = _ThinkingContentStreamSplitter(
+                    thinking_enabled=thinking_enabled
+                )
                 stream_interval = max(1, int(state.args.stream_interval))
                 pending_stream_tokens: list[int] = []
                 commit_event = Event()
-                commit_state = {"commit": False, "assistant_history_content": None}
+                commit_state = {
+                    "commit": False,
+                    "assistant_history_content": None,
+                    "postcommit_snapshot": None,
+                    "retokenize_inline": False,
+                }
 
                 def on_tokens(new_tokens: list[int]) -> None:
                     _raise_if_stream_cancelled(cancel_event)
@@ -4456,7 +4898,9 @@ def create_app(state: ServerState) -> FastAPI:
                                 session_id=session_id,
                                 cache_miss_reason=cache_miss_reason,
                                 session_restore_mode=session_restore_mode,
-                                session_bank=None if background or cache_bypass else state.sessions.bank,
+                                session_bank=None
+                                if background or cache_bypass
+                                else state.sessions.bank,
                                 session_template_hash=state.template_hash,
                                 session_draft_head_identity=state.draft_head_identity,
                                 session_policy_fingerprint=policy_fingerprint,
@@ -4489,30 +4933,61 @@ def create_app(state: ServerState) -> FastAPI:
                                 queue.put(("done", generated))
                                 commit_event.wait()
                                 if commit_state["commit"]:
-                                    assistant_history_content = (
-                                        str(commit_state.get("assistant_history_content") or "")
-                                        or (
-                                            _normalize_thinking_tags(
-                                                str(generated["text"]),
-                                                thinking_enabled=thinking_enabled,
-                                            )
-                                            if state.args.normalize_thinking_tags
-                                            else str(generated["text"])
+                                    assistant_history_content = str(
+                                        commit_state.get("assistant_history_content")
+                                        or ""
+                                    ) or (
+                                        _normalize_thinking_tags(
+                                            str(generated["text"]),
+                                            thinking_enabled=thinking_enabled,
                                         )
+                                        if state.args.normalize_thinking_tags
+                                        else str(generated["text"])
                                     )
-                                    postcommit = _store_retokenized_history_snapshot(
-                                        state,
-                                        session_id=session_id,
-                                        messages=request.messages,
-                                        assistant_content=assistant_history_content,
-                                        thinking_enabled=thinking_enabled,
-                                        policy_fingerprint=policy_fingerprint,
-                                    )
-                                    generated["stats"]["session_postcommit_snapshot"] = postcommit
+                                    if bool(commit_state.get("retokenize_inline")):
+                                        postcommit = _store_retokenized_history_snapshot(
+                                            state,
+                                            session_id=session_id,
+                                            messages=request.messages,
+                                            assistant_content=assistant_history_content,
+                                            thinking_enabled=thinking_enabled,
+                                            policy_fingerprint=policy_fingerprint,
+                                        )
+                                    else:
+                                        postcommit = _store_generation_final_history_snapshot(
+                                            state,
+                                            session_id=session_id,
+                                            prompt_ids=prompt_ids,
+                                            generated=generated,
+                                            messages=request.messages,
+                                            assistant_content=assistant_history_content,
+                                            thinking_enabled=thinking_enabled,
+                                            policy_fingerprint=policy_fingerprint,
+                                        )
+                                        if not postcommit.get("stored"):
+                                            generated["stats"][
+                                                "session_postcommit_snapshot"
+                                            ] = postcommit
+                                            queue.put(
+                                                (
+                                                    "released",
+                                                    {
+                                                        "generated": generated,
+                                                        "postcommit": postcommit,
+                                                    },
+                                                )
+                                            )
+                                            return
+                                    generated["stats"][
+                                        "session_postcommit_snapshot"
+                                    ] = postcommit
                                     session.commit(
                                         prompt_ids=prompt_ids,
                                         generated_ids=generated["tokens"],
-                                        finish_reason=generated.get("finish_reason", "stop"),
+                                        finish_reason=generated.get(
+                                            "finish_reason", "stop"
+                                        ),
+                                        nbytes=int(postcommit.get("nbytes") or 0),
                                     )
                                     queue.put(("committed", generated))
                                 else:
@@ -4521,7 +4996,9 @@ def create_app(state: ServerState) -> FastAPI:
                     except _StreamCancelled as exc:
                         queue.put(("cancelled", exc))
                     except EngineSessionBusy as exc:
-                        queue.put(("error", HTTPException(status_code=409, detail=str(exc))))
+                        queue.put(
+                            ("error", HTTPException(status_code=409, detail=str(exc)))
+                        )
                     except BaseException as exc:
                         if (
                             session is not None
@@ -4545,11 +5022,11 @@ def create_app(state: ServerState) -> FastAPI:
                         "created": created,
                         "model": model,
                         "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {field: text},
-                                    "finish_reason": None,
-                                }
+                            {
+                                "index": 0,
+                                "delta": {field: text},
+                                "finish_reason": None,
+                            }
                         ],
                     }
                     return f"data: {json.dumps(payload)}\n\n"
@@ -4585,7 +5062,9 @@ def create_app(state: ServerState) -> FastAPI:
                         "object": "chat.completion.chunk",
                         "created": created,
                         "model": model,
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                        "choices": [
+                            {"index": 0, "delta": {}, "finish_reason": "error"}
+                        ],
                         "error": {
                             "message": message,
                             "type": error_type,
@@ -4616,7 +5095,9 @@ def create_app(state: ServerState) -> FastAPI:
                     while pending_stream_tokens and (
                         force or len(pending_stream_tokens) >= stream_interval
                     ):
-                        batch_size = len(pending_stream_tokens) if force else stream_interval
+                        batch_size = (
+                            len(pending_stream_tokens) if force else stream_interval
+                        )
                         batch = pending_stream_tokens[:batch_size]
                         del pending_stream_tokens[:batch_size]
                         delta = decoder.feed(batch)
@@ -4657,8 +5138,13 @@ def create_app(state: ServerState) -> FastAPI:
                         try:
                             kind, item = await asyncio.to_thread(queue.get, True, 0.25)
                         except Empty:
-                            if cancel_event.is_set() or await raw_request.is_disconnected():
-                                _cancel_stream_generation(cancel_event, generation_future)
+                            if (
+                                cancel_event.is_set()
+                                or await raw_request.is_disconnected()
+                            ):
+                                _cancel_stream_generation(
+                                    cancel_event, generation_future
+                                )
                                 return
                             continue
                         if kind == "tokens":
@@ -4700,29 +5186,57 @@ def create_app(state: ServerState) -> FastAPI:
                                     remember_stream_chunk(field, text)
                                     yield delta_chunk(field, text)
                             if session is not None:
-                                commit_state["assistant_history_content"] = streamed_history_content()
+                                assistant_history_content = streamed_history_content()
+                                commit_state["assistant_history_content"] = (
+                                    assistant_history_content
+                                )
+                                commit_state["retokenize_inline"] = (
+                                    state.args.session_postcommit_mode == "inline"
+                                    or request_generation_mode == "ar"
+                                )
                                 commit_state["commit"] = True
                                 commit_event.set()
-                                if state.args.session_postcommit_mode == "async":
-                                    generated["stats"]["session_postcommit_snapshot"] = {
-                                        "stored": False,
-                                        "mode": "async_pending",
-                                    }
+                                commit_kind, commit_item = await asyncio.to_thread(
+                                    queue.get
+                                )
+                                if commit_kind == "committed":
+                                    generated = commit_item
+                                elif commit_kind == "error":
+                                    yield error_chunk(commit_item)
+                                    yield "data: [DONE]\n\n"
+                                    return
+                                elif commit_kind == "released":
+                                    release = (
+                                        commit_item
+                                        if isinstance(commit_item, dict)
+                                        else {"generated": generated, "postcommit": {}}
+                                    )
+                                    generated = release.get("generated") or generated
+                                    postcommit = release.get("postcommit") or {}
+                                    generated["stats"][
+                                        "session_postcommit_snapshot"
+                                    ] = _schedule_idle_postcommit_snapshot(
+                                        state,
+                                        session_id=session_id,
+                                        messages=request.messages,
+                                        assistant_content=assistant_history_content,
+                                        thinking_enabled=thinking_enabled,
+                                        policy_fingerprint=policy_fingerprint,
+                                        unsafe_reason=str(
+                                            postcommit.get("reason") or "unsafe_history"
+                                        ),
+                                    )
                                 else:
-                                    commit_kind, commit_item = await asyncio.to_thread(queue.get)
-                                    if commit_kind == "committed":
-                                        generated = commit_item
-                                    elif commit_kind == "error":
-                                        yield error_chunk(commit_item)
-                                        yield "data: [DONE]\n\n"
-                                        return
-                                    else:
-                                        yield error_chunk(
-                                            RuntimeError(f"unexpected commit event: {commit_kind}")
+                                    yield error_chunk(
+                                        RuntimeError(
+                                            f"unexpected commit event: {commit_kind}"
                                         )
-                                        yield "data: [DONE]\n\n"
-                                        return
-                            generated["stats"]["reasoning_reentries"] = splitter.reentry_count
+                                    )
+                                    yield "data: [DONE]\n\n"
+                                    return
+                            generated["stats"]["reasoning_reentries"] = (
+                                splitter.reentry_count
+                            )
                             reasoning_text = "".join(history_reasoning_chunks).strip()
                             answer_text = "".join(history_content_chunks).strip()
                             generated["stats"]["reasoning_tokens"] = _count_text_tokens(
@@ -4734,7 +5248,9 @@ def create_app(state: ServerState) -> FastAPI:
                                 answer_text,
                             )
                             if state.last_metrics:
-                                state.last_metrics[-1]["reasoning_reentries"] = splitter.reentry_count
+                                state.last_metrics[-1]["reasoning_reentries"] = (
+                                    splitter.reentry_count
+                                )
                             footer = _stats_footer_text(state, generated)
                             if footer:
                                 yield delta_chunk("content", f"\n\n{footer}")
@@ -4746,7 +5262,9 @@ def create_app(state: ServerState) -> FastAPI:
                         elif kind == "cancelled":
                             return
                         else:
-                            yield error_chunk(RuntimeError(f"unexpected stream event: {kind}"))
+                            yield error_chunk(
+                                RuntimeError(f"unexpected stream event: {kind}")
+                            )
                             yield "data: [DONE]\n\n"
                             return
                 except asyncio.CancelledError:
@@ -4846,7 +5364,9 @@ def create_app(state: ServerState) -> FastAPI:
         )
 
     @app.post("/v1/messages")
-    async def anthropic_messages(raw_request: Request, request: AnthropicMessagesRequest) -> Any:
+    async def anthropic_messages(
+        raw_request: Request, request: AnthropicMessagesRequest
+    ) -> Any:
         if not request.messages:
             raise HTTPException(status_code=400, detail="messages must not be empty")
         chat_request = _anthropic_to_chat_request(request)
@@ -4867,7 +5387,9 @@ def create_app(state: ServerState) -> FastAPI:
         try:
             openai_payload = json.loads(response.body)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"failed to translate response: {exc}") from exc
+            raise HTTPException(
+                status_code=500, detail=f"failed to translate response: {exc}"
+            ) from exc
         if response.status_code >= 400:
             return response
         payload = _anthropic_payload_from_openai(openai_payload)
@@ -4876,7 +5398,9 @@ def create_app(state: ServerState) -> FastAPI:
     @app.post("/v1/completions")
     async def completions(request: CompletionRequest) -> Any:
         prompt_ids = _encode_prompt(state.runtime.tokenizer, request.prompt)
-        request_generation_mode = _request_generation_mode_for_generation(state, request)
+        request_generation_mode = _request_generation_mode_for_generation(
+            state, request
+        )
         request_depth = _request_depth_for_generation(
             state,
             request,
@@ -4898,6 +5422,7 @@ def create_app(state: ServerState) -> FastAPI:
         created = int(time.time())
         display_text = _display_text(state, generated)
         if request.stream:
+
             async def event_stream():
                 chunk_chars = 24 * max(1, int(state.args.stream_interval))
                 for chunk in _chunk_text(display_text, chunk_chars=chunk_chars):
@@ -4918,7 +5443,9 @@ def create_app(state: ServerState) -> FastAPI:
                 "object": "text_completion",
                 "created": created,
                 "model": model,
-                "choices": [{"index": 0, "text": display_text, "finish_reason": "stop"}],
+                "choices": [
+                    {"index": 0, "text": display_text, "finish_reason": "stop"}
+                ],
                 "usage": _usage_payload(generated),
                 "mtplx_stats": _public_mtplx_stats(generated),
             }
@@ -4943,12 +5470,14 @@ def _env_int(name: str, default: int) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    postcommit_default = os.environ.get("MTPLX_SESSION_POSTCOMMIT_MODE", "inline")
+    postcommit_default = os.environ.get("MTPLX_SESSION_POSTCOMMIT_MODE", "async")
     if postcommit_default not in {"inline", "async"}:
-        postcommit_default = "inline"
+        postcommit_default = "async"
     parser.add_argument("--model", default="models/Qwen3.6-27B-MTPLX-Flat4-CyanKiwiMTP")
     parser.add_argument("--model-id", default="mtplx-qwen36-27b-native-mtp")
-    parser.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
+    parser.add_argument(
+        "--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
@@ -5006,8 +5535,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help="Override context window. Default reads the model/tokenizer config.",
     )
-    parser.add_argument("--temperature", "--default-temperature", dest="temperature", type=float, default=0.6)
-    parser.add_argument("--top-p", "--default-top-p", dest="top_p", type=float, default=0.95)
+    parser.add_argument(
+        "--temperature",
+        "--default-temperature",
+        dest="temperature",
+        type=float,
+        default=0.6,
+    )
+    parser.add_argument(
+        "--top-p", "--default-top-p", dest="top_p", type=float, default=0.95
+    )
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument(
         "--adaptive-policy",
@@ -5060,10 +5597,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["inline", "async"],
         default=postcommit_default,
         help=(
-            "SessionBank postcommit policy. 'inline' preserves existing behavior; "
-            "'async' returns the stream/response before the retokenized history "
-            "snapshot finishes, while the single generation executor completes "
-            "the exact snapshot in the background."
+            "SessionBank postcommit policy for streaming fallbacks. The default "
+            "'async' uses the generation final state when token-safe and never "
+            "holds the stream open for unsafe retokenized prefill work; 'inline' "
+            "is a diagnostic mode that preserves the old blocking snapshot."
         ),
     )
     parser.add_argument(
@@ -5190,7 +5727,9 @@ def main(argv: list[str] | None = None) -> None:
             _startup_line(str(exc))
             _startup_line("try: mtplx start --profile safe")
             _startup_line("try: mtplx start --profile performance-cold")
-            _startup_line("     (public start disables the strict fork assert when the fork is missing)")
+            _startup_line(
+                "     (public start disables the strict fork assert when the fork is missing)"
+            )
             raise SystemExit(2) from None
         raise
     app = create_app(state)
@@ -5207,7 +5746,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.open_browser:
         _startup_line("Opening chat UI in your browser...")
         _open_browser_later(_startup_chat_url(args))
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", access_log=False)
+    uvicorn.run(
+        app, host=args.host, port=args.port, log_level="warning", access_log=False
+    )
 
 
 if __name__ == "__main__":

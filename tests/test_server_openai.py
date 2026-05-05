@@ -1,6 +1,7 @@
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 from pathlib import Path
+from threading import Lock
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,57 @@ class FakeExecutor:
 
     def shutdown(self, **_kwargs):
         return None
+
+
+class StreamingTokenizer:
+    def apply_chat_template(
+        self, messages, *, tokenize, add_generation_prompt, **_kwargs
+    ):
+        assert tokenize is True
+        text = "\n".join(
+            f"{message['role']}:{message.get('content') or ''}" for message in messages
+        )
+        if add_generation_prompt:
+            text = f"{text}\nassistant:" if text else "assistant:"
+        return [ord(char) for char in text]
+
+    def encode(self, text):
+        return [ord(char) for char in str(text)]
+
+    def decode(self, tokens, **_kwargs):
+        return "".join(chr(int(token)) for token in tokens)
+
+
+class RecordingBank:
+    def __init__(self):
+        self.puts: list[dict] = []
+
+    def put(self, **kwargs):
+        self.puts.append(kwargs)
+        return SimpleNamespace(
+            prefix_len=len(kwargs["token_ids"]),
+            nbytes=123,
+            token_hash="test-token-hash",
+        )
+
+
+class ForegroundState:
+    def __init__(self) -> None:
+        self.lock = Lock()
+        self.foreground_active = 0
+        self.last_request_started_at = 0.0
+
+    def begin_foreground(self) -> None:
+        self.foreground_active += 1
+
+    def end_foreground(self) -> None:
+        self.foreground_active = max(0, self.foreground_active - 1)
+
+    def has_foreground(self) -> bool:
+        return self.foreground_active > 0
+
+    def foreground_count(self) -> int:
+        return self.foreground_active
 
 
 def _fake_state(*, api_key: str | None = None, rate_limit: int = 0):
@@ -59,6 +111,34 @@ def _fake_state(*, api_key: str | None = None, rate_limit: int = 0):
             clear_all=lambda: {"cleared": True},
         ),
         generation_executor=FakeExecutor(),
+    )
+
+
+def _fake_streaming_session_state():
+    state = _fake_state()
+    foreground = ForegroundState()
+    state.lock = foreground.lock
+    state.begin_foreground = foreground.begin_foreground
+    state.end_foreground = foreground.end_foreground
+    state.has_foreground = foreground.has_foreground
+    state.foreground_count = foreground.foreground_count
+    state.runtime.tokenizer = StreamingTokenizer()
+    state.sessions = openai.EngineSessionManager(bank=RecordingBank())
+    state.generation_executor = ThreadPoolExecutor(max_workers=1)
+    state.postcommit_executor = FakeExecutor()
+    state.args.stats_footer = False
+    return state
+
+
+def _fake_final_state(tokens):
+    return SimpleNamespace(
+        final_trunk_cache=["cache"],
+        final_logits="logits",
+        final_hidden="hidden",
+        final_committed_mtp_cache=None,
+        generated_token_ids=tuple(tokens),
+        safe_to_commit=True,
+        finish_reason="stop",
     )
 
 
@@ -152,7 +232,12 @@ def test_openai_server_auth_and_rate_limit_fake_state():
     client = TestClient(create_app(_fake_state(api_key="test-key", rate_limit=1)))
 
     assert client.get("/v1/models").status_code == 401
-    assert client.get("/v1/models", headers={"Authorization": "Bearer test-key"}).status_code == 200
+    assert (
+        client.get(
+            "/v1/models", headers={"Authorization": "Bearer test-key"}
+        ).status_code
+        == 200
+    )
 
     limited = client.get("/v1/models", headers={"Authorization": "Bearer test-key"})
     assert limited.status_code == 429
@@ -274,6 +359,210 @@ def test_chat_generation_mode_request_override_routes_mtp_depth(monkeypatch):
     assert response.json()["mtplx_stats"]["mtp_depth"] == 1
 
 
+def test_streaming_session_uses_generation_final_postcommit_without_retokenized_tail(
+    monkeypatch,
+):
+    state = _fake_streaming_session_state()
+    captured: dict[str, object] = {}
+
+    def fail_retokenized(*_args, **_kwargs):
+        raise AssertionError(
+            "streaming fast path must not retokenize/prefill postcommit"
+        )
+
+    def fake_run_generation(_state, prompt_ids, **kwargs):
+        captured.setdefault(
+            "commit_final_state_to_bank",
+            kwargs.get("commit_final_state_to_bank"),
+        )
+        token_callback = kwargs.get("token_callback")
+        tokens = [ord("O"), ord("K")]
+        if token_callback is not None:
+            token_callback(tokens[:1])
+            token_callback(tokens[1:])
+        return {
+            "text": "OK",
+            "tokens": tokens,
+            "stats": {
+                "generation_mode": kwargs["generation_mode"],
+                "mtp_depth": kwargs["depth"],
+                "completion_tokens": 2,
+            },
+            "prompt_tokens": len(prompt_ids),
+            "completion_tokens": 2,
+            "finish_reason": "stop",
+            "_final_state": _fake_final_state(tokens),
+        }
+
+    monkeypatch.setattr(openai, "_store_retokenized_history_snapshot", fail_retokenized)
+    monkeypatch.setattr(openai, "_run_generation", fake_run_generation)
+
+    with TestClient(create_app(state)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"x-mtplx-session-id": "stream-session"},
+            json={
+                "messages": [{"role": "user", "content": "Say OK"}],
+                "enable_thinking": False,
+                "stream": True,
+                "max_tokens": 4,
+            },
+        )
+        second = client.post(
+            "/v1/chat/completions",
+            headers={"x-mtplx-session-id": "stream-session"},
+            json={
+                "messages": [
+                    {"role": "user", "content": "Say OK"},
+                    {"role": "assistant", "content": "OK"},
+                    {"role": "user", "content": "Again"},
+                ],
+                "enable_thinking": False,
+                "max_tokens": 4,
+            },
+        )
+
+    assert response.status_code == 200
+    assert "data: [DONE]" in response.text
+    assert '"content": "OK"' in response.text or (
+        '"content": "O"' in response.text and '"content": "K"' in response.text
+    )
+    assert '"mode": "generation_final_exact"' in response.text
+    assert captured["commit_final_state_to_bank"] is False
+    assert second.status_code == 200
+    assert "already in flight" not in second.text
+
+
+def test_streaming_unsafe_postcommit_releases_without_blocking_second_request(
+    monkeypatch,
+):
+    state = _fake_streaming_session_state()
+    scheduled: list[dict] = []
+
+    def fake_store_generation_final(*_args, **_kwargs):
+        return {
+            "stored": False,
+            "mode": "unsafe",
+            "reason": "retokenized_history_mismatch",
+        }
+
+    def fake_schedule(*_args, **kwargs):
+        scheduled.append(kwargs)
+        return {
+            "stored": False,
+            "mode": "async_pending",
+            "reason": kwargs["unsafe_reason"],
+        }
+
+    def fake_run_generation(_state, prompt_ids, **kwargs):
+        token_callback = kwargs.get("token_callback")
+        tokens = [ord("O"), ord("K")]
+        if token_callback is not None:
+            token_callback(tokens)
+        return {
+            "text": "OK",
+            "tokens": tokens,
+            "stats": {
+                "generation_mode": kwargs["generation_mode"],
+                "mtp_depth": kwargs["depth"],
+                "completion_tokens": 2,
+            },
+            "prompt_tokens": len(prompt_ids),
+            "completion_tokens": 2,
+            "finish_reason": "stop",
+            "_final_state": _fake_final_state(tokens),
+        }
+
+    monkeypatch.setattr(
+        openai, "_store_generation_final_history_snapshot", fake_store_generation_final
+    )
+    monkeypatch.setattr(openai, "_schedule_idle_postcommit_snapshot", fake_schedule)
+    monkeypatch.setattr(openai, "_run_generation", fake_run_generation)
+
+    with TestClient(create_app(state)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"x-mtplx-session-id": "unsafe-session"},
+            json={
+                "messages": [{"role": "user", "content": "Say OK"}],
+                "enable_thinking": False,
+                "stream": True,
+                "max_tokens": 4,
+            },
+        )
+        second = client.post(
+            "/v1/chat/completions",
+            headers={"x-mtplx-session-id": "unsafe-session"},
+            json={
+                "messages": [{"role": "user", "content": "Say OK again"}],
+                "enable_thinking": False,
+                "stream": True,
+                "max_tokens": 4,
+            },
+        )
+
+    assert response.status_code == 200
+    assert '"mode": "async_pending"' in response.text
+    assert '"reason": "retokenized_history_mismatch"' in response.text
+    assert scheduled
+    assert second.status_code == 200
+    assert "already in flight" not in second.text
+
+
+def test_streaming_ar_keeps_retokenized_postcommit_path(monkeypatch):
+    state = _fake_streaming_session_state()
+    retokenized_calls: list[dict] = []
+
+    def fake_retokenized(*_args, **kwargs):
+        retokenized_calls.append(kwargs)
+        return {
+            "stored": True,
+            "mode": "retokenized_history",
+            "prefix_len": 32,
+            "nbytes": 99,
+        }
+
+    def fake_run_generation(_state, prompt_ids, **kwargs):
+        token_callback = kwargs.get("token_callback")
+        tokens = [ord("A"), ord("R")]
+        if token_callback is not None:
+            token_callback(tokens)
+        return {
+            "text": "AR",
+            "tokens": tokens,
+            "stats": {
+                "generation_mode": "ar",
+                "mtp_depth": 0,
+                "completion_tokens": 2,
+            },
+            "prompt_tokens": len(prompt_ids),
+            "completion_tokens": 2,
+            "finish_reason": "stop",
+            "_final_state": None,
+        }
+
+    monkeypatch.setattr(openai, "_store_retokenized_history_snapshot", fake_retokenized)
+    monkeypatch.setattr(openai, "_run_generation", fake_run_generation)
+
+    with TestClient(create_app(state)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"x-mtplx-session-id": "ar-session"},
+            json={
+                "messages": [{"role": "user", "content": "Say AR"}],
+                "enable_thinking": False,
+                "generation_mode": "ar",
+                "stream": True,
+                "max_tokens": 4,
+            },
+        )
+
+    assert response.status_code == 200
+    assert retokenized_calls
+    assert '"mode": "retokenized_history"' in response.text
+    assert '"generation_mode": "ar"' in response.text
+
+
 def test_invalid_generation_mode_returns_400():
     client = TestClient(create_app(_fake_state()))
 
@@ -332,11 +621,15 @@ def _fake_generation(text: str):
     }
 
 
-def test_chat_tools_are_passed_to_qwen_template_and_disable_default_thinking(monkeypatch):
+def test_chat_tools_are_passed_to_qwen_template_and_disable_default_thinking(
+    monkeypatch,
+):
     state = _fake_state()
     state.runtime.tokenizer = CaptureTokenizer()
     client = TestClient(create_app(state))
-    monkeypatch.setattr(openai, "_run_generation", lambda *_args, **_kwargs: _fake_generation("ok"))
+    monkeypatch.setattr(
+        openai, "_run_generation", lambda *_args, **_kwargs: _fake_generation("ok")
+    )
 
     response = client.post(
         "/v1/chat/completions",
@@ -512,7 +805,9 @@ def test_server_state_emits_startup_progress(monkeypatch, capsys):
     monkeypatch.setattr(openai, "profile_env_status", lambda _profile: {})
     monkeypatch.setattr(openai, "_fast_path_env_status", lambda: {})
     monkeypatch.setattr(openai, "_mlx_fork_status", lambda: {"ok": True})
-    monkeypatch.setattr(openai, "_configure_mlx_cache_limit", lambda _args: {"configured": False})
+    monkeypatch.setattr(
+        openai, "_configure_mlx_cache_limit", lambda _args: {"configured": False}
+    )
     monkeypatch.setattr(
         openai,
         "load",
@@ -522,10 +817,14 @@ def test_server_state_emits_startup_progress(monkeypatch, capsys):
             tokenizer=SimpleNamespace(),
         ),
     )
-    monkeypatch.setattr(openai, "_install_draft_lm_head", lambda *_args, **_kwargs: {"installed": True})
+    monkeypatch.setattr(
+        openai, "_install_draft_lm_head", lambda *_args, **_kwargs: {"installed": True}
+    )
     monkeypatch.setattr(openai, "_draft_head_identity", lambda _runtime: "draft-head")
     monkeypatch.setattr(openai, "_template_hash", lambda _tokenizer: "template")
-    monkeypatch.setattr(openai, "_resolve_context_window", lambda _tokenizer, _model: 32768)
+    monkeypatch.setattr(
+        openai, "_resolve_context_window", lambda _tokenizer, _model: 32768
+    )
     monkeypatch.setattr(openai, "EngineSessionManager", lambda: SimpleNamespace())
 
     args = parse_args(["--model", "models/example", "--warmup-tokens", "0"])
@@ -546,7 +845,9 @@ def test_server_state_reports_model_load_failure(monkeypatch, capsys):
     monkeypatch.setattr(openai, "profile_env_status", lambda _profile: {})
     monkeypatch.setattr(openai, "_fast_path_env_status", lambda: {})
     monkeypatch.setattr(openai, "_mlx_fork_status", lambda: {"ok": True})
-    monkeypatch.setattr(openai, "_configure_mlx_cache_limit", lambda _args: {"configured": False})
+    monkeypatch.setattr(
+        openai, "_configure_mlx_cache_limit", lambda _args: {"configured": False}
+    )
 
     def fail_load(model, mtp, contract):
         assert model == "models/example"
