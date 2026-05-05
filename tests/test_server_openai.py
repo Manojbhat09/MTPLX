@@ -1,6 +1,7 @@
 from concurrent.futures import Future, ThreadPoolExecutor
 import json
 from pathlib import Path
+import time
 from threading import Lock
 from types import SimpleNamespace
 
@@ -89,7 +90,11 @@ def _fake_state(*, api_key: str | None = None, rate_limit: int = 0):
         runtime=SimpleNamespace(
             model_path=Path("models/example"),
             mtp_enabled=True,
-            tokenizer=SimpleNamespace(),
+            tokenizer=SimpleNamespace(
+                decode=lambda tokens, **_kwargs: "".join(
+                    chr(int(token)) for token in tokens
+                ),
+            ),
         ),
         profile=get_profile(args.profile),
         context_window=4096,
@@ -188,10 +193,13 @@ def test_openai_server_health_metrics_and_models_fake_state():
     # capped at a stale 32k for a 256k-context model.
     assert "discoverServerLimits" in root.text
     assert "/health" in root.text
-    # Stall watchdog so the UI surfaces a real error instead of parking on
-    # "Thinking" forever when the server hangs (also user-reported).
+    # Transport watchdog plus heartbeat handling keep long active generations
+    # from looking like crashed servers.
     assert "armStallWatchdog" in root.text
-    assert "no response from server" in root.text
+    assert "mtplx_progress.heartbeat" in root.text
+    assert "Still working" in root.text
+    assert "stream connection went quiet" in root.text
+    assert "server has crashed" not in root.text
     # Markdown via marked.js
     assert "marked.min.js" in root.text
     # Live tps element
@@ -774,6 +782,80 @@ def test_chat_stream_tool_calls_emit_delta_tool_calls(monkeypatch):
     assert '"tool_calls"' in response.text
     assert '"finish_reason": "tool_calls"' in response.text
     assert "<tool_call>" not in response.text
+
+
+def test_chat_stream_emits_heartbeat_during_alive_silence(monkeypatch):
+    state = _fake_state()
+    state.args.stats_footer = False
+    state.generation_executor = ThreadPoolExecutor(max_workers=1)
+    client = TestClient(create_app(state))
+    tokens = [ord("o"), ord("k"), ord("\n")]
+
+    monkeypatch.setattr(openai, "_encode_messages", lambda *_args, **_kwargs: [1, 2, 3])
+    monkeypatch.setattr(openai, "STREAM_HEARTBEAT_INTERVAL_S", 0.01)
+    monkeypatch.setattr(openai, "STREAM_SILENCE_WARN_S", 0.01)
+    monkeypatch.setattr(openai, "STREAM_SILENCE_WARN_INTERVAL_S", 60.0)
+
+    def fake_run_generation(_state, _prompt_ids, **kwargs):
+        time.sleep(0.35)
+        kwargs["token_callback"](tokens)
+        return {
+            "text": "ok\n",
+            "tokens": tokens,
+            "stats": {
+                "generation_mode": kwargs["generation_mode"],
+                "mtp_depth": kwargs["depth"],
+                "completion_tokens": len(tokens),
+            },
+            "prompt_tokens": 3,
+            "completion_tokens": len(tokens),
+            "finish_reason": "stop",
+        }
+
+    monkeypatch.setattr(openai, "_run_generation", fake_run_generation)
+
+    try:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"x-mtplx-cache-mode": "bypass"},
+            json={
+                "messages": [{"role": "user", "content": "Say ok."}],
+                "stream": True,
+                "max_tokens": 16,
+                "enable_thinking": False,
+            },
+        )
+    finally:
+        state.generation_executor.shutdown(wait=True)
+
+    assert response.status_code == 200
+    payloads = []
+    for event in response.text.split("\n\n"):
+        if not event.startswith("data: {"):
+            continue
+        payloads.append(json.loads(event.removeprefix("data: ")))
+
+    heartbeats = [
+        payload
+        for payload in payloads
+        if payload.get("mtplx_progress", {}).get("heartbeat") is True
+    ]
+    content = "".join(
+        payload["choices"][0].get("delta", {}).get("content", "")
+        for payload in payloads
+    )
+    final_chunks = [
+        payload
+        for payload in payloads
+        if payload["choices"][0].get("finish_reason") == "stop"
+    ]
+
+    assert heartbeats
+    assert heartbeats[0]["mtplx_progress"]["phase"] == "generating"
+    assert heartbeats[0]["mtplx_progress"]["completion_tokens"] == 0
+    assert content == "ok\n"
+    assert final_chunks
+    assert "data: [DONE]" in response.text
 
 
 def test_chat_tools_malformed_tool_call_returns_422(monkeypatch):

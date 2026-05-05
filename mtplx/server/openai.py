@@ -127,6 +127,9 @@ EXPECTED_MLX_QMV_FORK_FRAGMENT = "mlx-mtplx-0.31.2-qmm"
 STATS_FOOTER_MARKER = "\n---\n⚡ **MTPLX TPS:**"
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
+STREAM_HEARTBEAT_INTERVAL_S = 10.0
+STREAM_SILENCE_WARN_S = 30.0
+STREAM_SILENCE_WARN_INTERVAL_S = 60.0
 _REASONING_DETAILS_RE = re.compile(
     r"<details\b(?=[^>]*\btype=[\"']reasoning[\"'])[^>]*>.*?</details>",
     re.IGNORECASE | re.DOTALL,
@@ -1583,6 +1586,23 @@ def _stream_progress_payload(
         "completion_tokens": int(completion_tokens),
         "decode_elapsed_s": decode_elapsed_s,
         "decode_tok_s": decode_tok_s,
+    }
+
+
+def _stream_heartbeat_payload(
+    *,
+    completion_tokens: int,
+    stream_started_s: float,
+    last_token_s: float | None,
+    now_s: float,
+) -> dict[str, Any]:
+    last_activity_s = last_token_s if last_token_s is not None else stream_started_s
+    return {
+        "heartbeat": True,
+        "phase": "generating",
+        "completion_tokens": int(completion_tokens),
+        "elapsed_s": max(0.0, float(now_s) - float(stream_started_s)),
+        "seconds_since_last_token": max(0.0, float(now_s) - float(last_activity_s)),
     }
 
 
@@ -3956,10 +3976,9 @@ def _chat_ui_html(
       let firstTokenAt = null;
       const startedAt = performance.now();
       const liveState = {tokens: 0, elapsed: 0, tps: null, hasServerProgress: false};
-      // Stall watchdog: if no SSE chunk arrives within this window, abort
-      // and surface a clear error instead of leaving the UI parked on
-      // "Thinking" forever (the failure mode the user reported after a
-      // settings change).
+      // Transport watchdog: normal long generations should receive server
+      // heartbeat/progress frames. Abort only when the stream itself goes
+      // quiet, not when the model is still actively working.
       let lastChunkAt = performance.now();
       const STALL_WARN_MS = 30000;
       const STALL_ABORT_MS = 90000;
@@ -3973,7 +3992,7 @@ def _chat_ui_html(
             stallTimer = null;
             try { activeAbort && activeAbort.abort("stalled"); } catch (_e) {}
           } else if (idle > STALL_WARN_MS) {
-            setStatus("Waiting on server (" + Math.round(idle / 1000) + "s)…", "streaming");
+            setStatus("Waiting for stream data (" + Math.round(idle / 1000) + "s)", "streaming");
           }
         }, 1000);
       }
@@ -4008,6 +4027,11 @@ def _chat_ui_html(
             if (payload.error) throw new Error(payload.error.message || "generation failed");
             if (payload.mtplx_progress) {
               applyProgressToLiveState(liveState, payload.mtplx_progress);
+              if (payload.mtplx_progress.heartbeat) {
+                setStatus("Still working", "streaming");
+              } else {
+                setStatus("Thinking", "streaming");
+              }
             }
             if (payload.mtplx_stats) {
               finalStats = payload.mtplx_stats;
@@ -4025,6 +4049,7 @@ def _chat_ui_html(
                 turn.reasoningBlock.classList.add("open");
               }
               setReasoningMeta(turn, "streaming…");
+              setStatus("Thinking", "streaming");
             }
             if (answerPiece) {
               if (firstTokenAt === null) firstTokenAt = performance.now();
@@ -4068,12 +4093,12 @@ def _chat_ui_html(
         if (stalled) {
           turn.answerBody.classList.remove("streaming-plain");
           turn.answerBody.innerHTML = renderMarkdown(
-            "*[no response from server in " + Math.round(STALL_ABORT_MS / 1000) + "s — request aborted]*\\n\\n" +
-              "If MTPLX is still loading the model, wait a few seconds and retry. " +
-              "If the server has crashed, restart it: `mtplx start --max` (or just `mtplx start`)."
+            "*[stream connection went quiet for " + Math.round(STALL_ABORT_MS / 1000) + "s - request stopped]*\\n\\n" +
+              "The browser did not receive stream data from MTPLX. Check the server terminal, " +
+              "then retry or restart only if the MTPLX process has exited."
           );
           attachCopyButtons(turn.answerBody);
-          setStatus("Server unresponsive", "");
+          setStatus("Stream disconnected", "");
         } else if (aborted) {
           turn.answerBody.classList.remove("streaming-plain");
           turn.answerBody.innerHTML = renderMarkdown(assistantText || "*[stopped]*");
@@ -4836,6 +4861,16 @@ def create_app(state: ServerState) -> FastAPI:
         if request.stream:
 
             async def event_stream():
+                stream_started_s = time.perf_counter()
+                last_sse_sent_s = stream_started_s
+                last_token_s: float | None = None
+                next_silence_warn_s = stream_started_s + STREAM_SILENCE_WARN_S
+
+                def mark_sse_sent(chunk: str) -> str:
+                    nonlocal last_sse_sent_s
+                    last_sse_sent_s = time.perf_counter()
+                    return chunk
+
                 first = {
                     "id": response_id,
                     "object": "chat.completion.chunk",
@@ -4849,7 +4884,7 @@ def create_app(state: ServerState) -> FastAPI:
                         }
                     ],
                 }
-                yield f"data: {json.dumps(first)}\n\n"
+                yield mark_sse_sent(f"data: {json.dumps(first)}\n\n")
 
                 queue: Queue[tuple[str, Any]] = Queue()
                 cancel_event = Event()
@@ -5073,6 +5108,36 @@ def create_app(state: ServerState) -> FastAPI:
                     }
                     return f"data: {json.dumps(payload)}\n\n"
 
+                def maybe_log_stream_silence(now_s: float) -> None:
+                    nonlocal next_silence_warn_s
+                    last_activity_s = (
+                        last_token_s if last_token_s is not None else stream_started_s
+                    )
+                    seconds_since_last_token = max(0.0, now_s - last_activity_s)
+                    if (
+                        seconds_since_last_token < STREAM_SILENCE_WARN_S
+                        or now_s < next_silence_warn_s
+                    ):
+                        return
+                    print(
+                        json.dumps(
+                            {
+                                "event": "mtplx_stream_silence",
+                                "response_id": response_id,
+                                "session_id": session_id,
+                                "elapsed_s": round(now_s - stream_started_s, 6),
+                                "completion_tokens": int(streamed_progress_tokens),
+                                "seconds_since_last_token": round(
+                                    seconds_since_last_token,
+                                    6,
+                                ),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+                    next_silence_warn_s = now_s + STREAM_SILENCE_WARN_INTERVAL_S
+
                 generated: dict[str, Any] | None = None
                 history_reasoning_chunks: list[str] = []
                 history_content_chunks: list[str] = []
@@ -5131,7 +5196,7 @@ def create_app(state: ServerState) -> FastAPI:
                 for field, text in splitter.start():
                     if text:
                         remember_stream_chunk(field, text)
-                        yield delta_chunk(field, text)
+                        yield mark_sse_sent(delta_chunk(field, text))
 
                 try:
                     while True:
@@ -5146,6 +5211,23 @@ def create_app(state: ServerState) -> FastAPI:
                                     cancel_event, generation_future
                                 )
                                 return
+                            now_s = time.perf_counter()
+                            if (
+                                not generation_future.done()
+                                and now_s - last_sse_sent_s
+                                >= STREAM_HEARTBEAT_INTERVAL_S
+                            ):
+                                maybe_log_stream_silence(now_s)
+                                yield mark_sse_sent(
+                                    progress_chunk(
+                                        _stream_heartbeat_payload(
+                                            completion_tokens=streamed_progress_tokens,
+                                            stream_started_s=stream_started_s,
+                                            last_token_s=last_token_s,
+                                            now_s=now_s,
+                                        )
+                                    )
+                                )
                             continue
                         if kind == "tokens":
                             if isinstance(item, dict):
@@ -5157,34 +5239,40 @@ def create_app(state: ServerState) -> FastAPI:
                                 stream_tokens = list(item or [])
                                 token_timestamp_s = time.perf_counter()
                             if stream_tokens:
+                                last_token_s = token_timestamp_s
+                                next_silence_warn_s = (
+                                    token_timestamp_s + STREAM_SILENCE_WARN_S
+                                )
                                 if streamed_decode_started_s is None:
                                     streamed_decode_started_s = token_timestamp_s
                                 streamed_progress_tokens += len(stream_tokens)
-                                yield progress_chunk(
-                                    _stream_progress_payload(
-                                        completion_tokens=streamed_progress_tokens,
-                                        decode_started_s=streamed_decode_started_s,
-                                        now_s=token_timestamp_s,
+                                yield mark_sse_sent(
+                                    progress_chunk(
+                                        _stream_progress_payload(
+                                            completion_tokens=streamed_progress_tokens,
+                                            decode_started_s=streamed_decode_started_s,
+                                            now_s=token_timestamp_s,
+                                        )
                                     )
                                 )
                             for field, text in drain_stream_tokens(stream_tokens):
                                 remember_stream_chunk(field, text)
-                                yield delta_chunk(field, text)
+                                yield mark_sse_sent(delta_chunk(field, text))
                         elif kind == "done":
                             generated = item
                             for field, text in drain_stream_tokens([], force=True):
                                 remember_stream_chunk(field, text)
-                                yield delta_chunk(field, text)
+                                yield mark_sse_sent(delta_chunk(field, text))
                             tail = decoder.finish()
                             if tail:
                                 for field, text in splitter.feed(tail):
                                     if text:
                                         remember_stream_chunk(field, text)
-                                        yield delta_chunk(field, text)
+                                        yield mark_sse_sent(delta_chunk(field, text))
                             for field, text in splitter.finish():
                                 if text:
                                     remember_stream_chunk(field, text)
-                                    yield delta_chunk(field, text)
+                                    yield mark_sse_sent(delta_chunk(field, text))
                             if session is not None:
                                 assistant_history_content = streamed_history_content()
                                 commit_state["assistant_history_content"] = (
@@ -5202,8 +5290,8 @@ def create_app(state: ServerState) -> FastAPI:
                                 if commit_kind == "committed":
                                     generated = commit_item
                                 elif commit_kind == "error":
-                                    yield error_chunk(commit_item)
-                                    yield "data: [DONE]\n\n"
+                                    yield mark_sse_sent(error_chunk(commit_item))
+                                    yield mark_sse_sent("data: [DONE]\n\n")
                                     return
                                 elif commit_kind == "released":
                                     release = (
@@ -5227,12 +5315,14 @@ def create_app(state: ServerState) -> FastAPI:
                                         ),
                                     )
                                 else:
-                                    yield error_chunk(
-                                        RuntimeError(
-                                            f"unexpected commit event: {commit_kind}"
+                                    yield mark_sse_sent(
+                                        error_chunk(
+                                            RuntimeError(
+                                                f"unexpected commit event: {commit_kind}"
+                                            )
                                         )
                                     )
-                                    yield "data: [DONE]\n\n"
+                                    yield mark_sse_sent("data: [DONE]\n\n")
                                     return
                             generated["stats"]["reasoning_reentries"] = (
                                 splitter.reentry_count
@@ -5253,26 +5343,28 @@ def create_app(state: ServerState) -> FastAPI:
                                 )
                             footer = _stats_footer_text(state, generated)
                             if footer:
-                                yield delta_chunk("content", f"\n\n{footer}")
+                                yield mark_sse_sent(delta_chunk("content", f"\n\n{footer}"))
                             break
                         elif kind == "error":
-                            yield error_chunk(item)
-                            yield "data: [DONE]\n\n"
+                            yield mark_sse_sent(error_chunk(item))
+                            yield mark_sse_sent("data: [DONE]\n\n")
                             return
                         elif kind == "cancelled":
                             return
                         else:
-                            yield error_chunk(
-                                RuntimeError(f"unexpected stream event: {kind}")
+                            yield mark_sse_sent(
+                                error_chunk(
+                                    RuntimeError(f"unexpected stream event: {kind}")
+                                )
                             )
-                            yield "data: [DONE]\n\n"
+                            yield mark_sse_sent("data: [DONE]\n\n")
                             return
                 except asyncio.CancelledError:
                     _cancel_stream_generation(cancel_event, generation_future)
                     raise
                 except BaseException as exc:
-                    yield error_chunk(exc)
-                    yield "data: [DONE]\n\n"
+                    yield mark_sse_sent(error_chunk(exc))
+                    yield mark_sse_sent("data: [DONE]\n\n")
                     return
                 finally:
                     _cancel_stream_generation(cancel_event, generation_future)
@@ -5281,8 +5373,10 @@ def create_app(state: ServerState) -> FastAPI:
                         commit_event.set()
 
                 if generated is None:
-                    yield error_chunk(RuntimeError("generation ended without a result"))
-                    yield "data: [DONE]\n\n"
+                    yield mark_sse_sent(
+                        error_chunk(RuntimeError("generation ended without a result"))
+                    )
+                    yield mark_sse_sent("data: [DONE]\n\n")
                     return
                 done = {
                     "id": response_id,
@@ -5299,8 +5393,8 @@ def create_app(state: ServerState) -> FastAPI:
                     "usage": _usage_payload(generated),
                     "mtplx_stats": _public_mtplx_stats(generated),
                 }
-                yield f"data: {json.dumps(done)}\n\n"
-                yield "data: [DONE]\n\n"
+                yield mark_sse_sent(f"data: {json.dumps(done)}\n\n")
+                yield mark_sse_sent("data: [DONE]\n\n")
 
             return StreamingResponse(event_stream(), media_type="text/event-stream")
 

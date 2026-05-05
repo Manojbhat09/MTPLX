@@ -33,6 +33,7 @@ from mtplx.server.openai import (
     _schedule_idle_postcommit_snapshot,
     _store_generation_final_history_snapshot,
     _strip_assistant_history_baggage,
+    _stream_heartbeat_payload,
     _usage_payload,
     parse_args,
     validate_server_security_args,
@@ -321,6 +322,23 @@ def test_stream_cancel_helper_marks_event_and_cancels_future():
     assert future.cancelled is True
     with pytest.raises(_StreamCancelled):
         _raise_if_stream_cancelled(cancel_event)
+
+
+def test_stream_heartbeat_payload_is_progress_only():
+    payload = _stream_heartbeat_payload(
+        completion_tokens=42,
+        stream_started_s=100.0,
+        last_token_s=125.0,
+        now_s=140.0,
+    )
+
+    assert payload == {
+        "heartbeat": True,
+        "phase": "generating",
+        "completion_tokens": 42,
+        "elapsed_s": 40.0,
+        "seconds_since_last_token": 15.0,
+    }
 
 
 def test_anthropic_content_blocks_convert_to_text():
