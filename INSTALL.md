@@ -1,6 +1,6 @@
 # Install MTPLX
 
-MTPLX is preview software for Apple Silicon Macs.
+MTPLX is early production software for Apple Silicon Macs.
 
 ## Requirements
 
@@ -29,12 +29,6 @@ Python-only install:
 ```bash
 python3 -m pip install -U mtplx
 mtplx help
-```
-
-If your pip setup rejects prereleases, use:
-
-```bash
-python3 -m pip install --pre mtplx
 ```
 
 For local development:

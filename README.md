@@ -12,7 +12,7 @@
 [![PyPI](https://img.shields.io/pypi/v/mtplx?label=PyPI)](https://pypi.org/project/mtplx/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-black?logo=apple)](https://developer.apple.com/metal/)
-[![Status](https://img.shields.io/badge/status-v0.1.0--preview.3-orange)](CHANGELOG.md)
+[![Status](https://img.shields.io/badge/status-v0.1.4-blue)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
 </div>
@@ -57,9 +57,9 @@ That's it. The wizard handles the default speed model (`Youssofal/Qwen3.6-27B-MT
 - **Idle-aware Max mode.** Server tracks request activity; after 15 minutes of no chat, fans drop to auto, then ramp back up on the next message.
 - **Four-tier model compatibility contract.** `mtplx inspect <model>` reports: verified / arch-compatible-unverified / incompatible-architecture / no-MTP. No silent garbage runs.
 - **Lazy imports.** `mtplx --help`, `doctor`, `inspect`, `init`, `setup` work on a fresh venv *without MLX installed*. Generation and serving pull in MLX only when needed.
-- **Preview status: local and GitHub release gates green**, including onboarding, local-folder picker, live download progress, fan-control crash safety, OpenAI server/tool-call compatibility, lazy-import survival, exactness gates, wheel build, and repository hygiene.
+- **v0.1.4 status: local and GitHub release gates green**, including onboarding, local-folder picker, live download progress, fan-control crash safety, OpenAI server/tool-call compatibility, lazy-import survival, exactness gates, wheel build, and repository hygiene.
 
-> **Preview honesty.** The cold path is verified at the **~2.24× multiplier** above. *Sustained* no-fan long-context throughput is currently in a worse lane on Flappy 10k versus the v0.2 target — the v0.1 release ships with this gap explicit. Closing it is the v0.2 deliverable; see [Roadmap](#roadmap).
+> **Release honesty.** The cold path is verified at the **~2.24× multiplier** above. *Sustained* no-fan long-context throughput is currently in a worse lane on Flappy 10k versus the v0.2 target — the v0.1 release ships with this gap explicit. Closing it is the v0.2 deliverable; see [Roadmap](#roadmap).
 
 ---
 
@@ -105,10 +105,10 @@ Homebrew writes a durable launcher so `mtplx` works from a normal new Terminal t
 curl -fsSL https://raw.githubusercontent.com/youssofal/MTPLX/main/scripts/install_macos.sh | bash
 ```
 
-For Python-only installs, PyPI is also available. Preview 3 is packaged as `0.1.0rc3`, so use:
+For Python-only installs, PyPI is also available:
 
 ```bash
-python3 -m pip install --pre mtplx
+python3 -m pip install -U mtplx
 ```
 
 ---
@@ -266,7 +266,7 @@ The CLI (`mtplx start` / `pull` / `doctor` / `inspect` / `max`) is the on-ramp t
 - It's not an external-drafter system. There's no second model. The drafter is the target's own MTP heads.
 - It's not a generic "speculative decoding library". It's a runtime + serving stack with an explicit model-compatibility contract.
 - It's not a CUDA project. MTPLX is MLX-native and Apple-Silicon-first. Linux/CUDA is not on the roadmap; for that, use vLLM.
-- It's not finished. v0.1 is a preview. The **~2.24× multiplier** cold-lane target is met, the sustained-no-fan target is not, and the README says so.
+- It's not finished. v0.1 is an early production release. The **~2.24× multiplier** cold-lane target is met, the sustained-no-fan target is not, and the README says so.
 
 ---
 

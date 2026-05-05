@@ -2,7 +2,7 @@
 
 See [INSTALL.md](../INSTALL.md) for the short path.
 
-MTPLX v0.1-preview is Apple-Silicon-first:
+MTPLX v0.1 is Apple-Silicon-first:
 
 - macOS 14.0 or newer
 - native arm64 Python 3.10 or newer

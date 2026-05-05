@@ -28,7 +28,7 @@ def _write_runtime_contract(
     recommended_draft_sampler=None,
 ):
     contract = {
-        "mtplx_version": "0.1.0-preview",
+        "mtplx_version": "0.1.4",
         "arch_id": arch_id,
         "mtp_depth_max": 3,
         "recommended_profile": profile,
@@ -1153,7 +1153,7 @@ def test_hf_verified_contract_passes_metadata_gate(monkeypatch):
         if filename == "mtplx_runtime.json":
             return (
                 {
-                    "mtplx_version": "0.1.0-preview",
+                    "mtplx_version": "0.1.4",
                     "arch_id": "qwen3-next-mtp",
                     "mtp_depth_max": 3,
                     "recommended_profile": "stable",

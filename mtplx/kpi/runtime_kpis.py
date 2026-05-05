@@ -121,7 +121,7 @@ def public_bench_runtime_profile_env(
 ) -> tuple[str, dict[str, str]]:
     """Return the intended public benchmark runtime profile.
 
-    The v0.1-preview default is always ``stable``.  The historical 60+ tok/s
+    The v0.1 default is always ``stable``.  The historical 60+ tok/s
     path is exposed only through ``profile="performance-cold"`` (or its legacy
     alias), not through suite names.
     """

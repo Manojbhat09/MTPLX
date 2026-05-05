@@ -22,7 +22,7 @@ The model must be Tier 1 verified for normal v0.1 runs. Architecture-compatible 
 
 ## Slow Long Responses
 
-This is a known v0.1-preview caveat. Use the benchmark output and profile name when filing an issue. Do not compare `--max` diagnostic runs against no-fan product claims.
+This is a known v0.1 caveat. Use the benchmark output and profile name when filing an issue. Do not compare `--max` diagnostic runs against no-fan product claims.
 
 ## Server Binding
 

@@ -16,8 +16,7 @@ def test_version_metadata_matches_package_metadata():
     project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
 
     assert __version__ == project["version"]
-    if __version__.startswith("0.1.0rc"):
-        assert DISPLAY_VERSION == f"0.1.0-preview.{__version__.removeprefix('0.1.0rc')}"
+    assert DISPLAY_VERSION == __version__
 
 
 def test_version_command_without_subcommand(capsys):
@@ -27,7 +26,7 @@ def test_version_command_without_subcommand(capsys):
         assert exc.code == 0
 
     captured = capsys.readouterr().out
-    assert "mtplx 0.1.0-preview.3 (0.1.0rc3)" in captured
+    assert f"mtplx {DISPLAY_VERSION} ({__version__})" in captured
 
 
 def test_empty_cli_shows_friendly_consumer_help(capsys):
@@ -36,7 +35,7 @@ def test_empty_cli_shows_friendly_consumer_help(capsys):
     captured = capsys.readouterr().out
     assert code == 0
     # Compact help: ASCII banner + version pill + Commands + Examples + footer.
-    assert "v0.1.0-preview" in captured
+    assert f"v{DISPLAY_VERSION}" in captured
     assert "Native MTP speculative decoding" in captured
     assert "mtplx quickstart" in captured
     assert "Prepare config and the model cache" in captured
@@ -1447,7 +1446,7 @@ def test_serve_dispatches_packaged_openai_server(monkeypatch, capsys):
     captured = capsys.readouterr().out
     # Banner + framed status panel from the new mtplx.ui module.
     assert "MTPLX" in captured
-    assert "0.1.0-preview" in captured
+    assert DISPLAY_VERSION in captured
     assert "127.0.0.1:8000/v1" in captured
     assert "127.0.0.1:8000/" in captured
     # Numbered handoff lines that still print before the model load.
@@ -1932,7 +1931,7 @@ def test_serve_reports_busy_port_before_model_resolution(monkeypatch, capsys):
     captured = capsys.readouterr().out
     # Banner still prints before the busy-port error path.
     assert "MTPLX" in captured
-    assert "0.1.0-preview" in captured
+    assert DISPLAY_VERSION in captured
     assert "error: port 8000 is already in use" in captured
     assert "stop the old mtplx quickstart terminal with Ctrl-C" in captured
     assert "try: mtplx quickstart --port 8001" in captured

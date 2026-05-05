@@ -2,6 +2,20 @@
 
 All notable user-facing changes are recorded here.
 
+## v0.1.4
+
+### Fixed
+
+- Fixed streaming completions hanging after visible generation finished by committing token-safe SessionBank state from the generation final state, and by moving unsafe postcommit work to an idle-only fallback that does not block the client.
+- Fixed false web UI stall aborts during long active generations by adding server-side SSE progress heartbeats and heartbeat-aware browser status handling.
+- Fixed the local install/release naming problem by moving from the preview/rc package line to stable `0.1.4` / `v0.1.4` naming.
+
+### Release Notes
+
+- Issue #7 and issue #8 are the user-visible fixes in this release.
+- No sampler, decode-loop, MTP acceptance, kernel, or model-weight behavior changed for this release.
+- Sustained no-fan long-context throughput remains the v0.2 performance track; v0.1.4 fixes serving liveness and release packaging, not the thermal/decay target.
+
 ## v0.1.0-preview.3
 
 ### Fixed

@@ -1825,7 +1825,7 @@ def build_parser() -> argparse.ArgumentParser:
         "model",
         nargs="?",
         default=DEFAULT_HF_MODEL_ID,
-        help="Hugging Face repo id or URL. Defaults to the preview speed model.",
+        help="Hugging Face repo id or URL. Defaults to the verified speed model.",
     )
     pull_p.add_argument("--cache-dir")
     pull_p.add_argument("--revision")

@@ -1,6 +1,6 @@
-"""Version metadata for the MTPLX preview package."""
+"""Version metadata for the MTPLX package."""
 
 from __future__ import annotations
 
-__version__ = "0.1.0rc3"
-DISPLAY_VERSION = "0.1.0-preview.3"
+__version__ = "0.1.4"
+DISPLAY_VERSION = "0.1.4"
