@@ -379,6 +379,45 @@ def test_start_parser_accepts_target_choices():
     assert args_fresh.fresh is True
     args_no_mtp = parser.parse_args(["start", "cli", "--no-mtp", "--dry-run"])
     assert args_no_mtp.no_mtp is True
+    args_mtp = parser.parse_args(["start", "cli", "--mtp", "--dry-run"])
+    assert args_mtp.no_mtp is False
+
+
+def test_start_help_mentions_target_only_ar_mtp_controls(capsys):
+    code = main(["help", "start"])
+
+    captured = capsys.readouterr().out
+    assert code == 0
+    assert "--no-mtp" in captured
+    assert "target-only AR generation" in captured
+    assert "/mtp off" in captured
+    assert "/stats" in captured
+
+
+def test_mtp_toggle_flags_parse_on_public_generation_surfaces():
+    parser = build_parser()
+
+    cases = [
+        ["start", "cli", "--no-mtp", "--dry-run"],
+        ["quickstart", "--no-mtp"],
+        ["serve", "--no-mtp"],
+        ["ask", "hello", "--no-mtp"],
+        ["run", "hello", "--no-mtp"],
+        ["chat", "--prompt", "hello", "--no-mtp"],
+    ]
+    for argv in cases:
+        assert parser.parse_args(argv).no_mtp is True
+
+    mtp_cases = [
+        ["start", "cli", "--mtp", "--dry-run"],
+        ["quickstart", "--mtp"],
+        ["serve", "--mtp"],
+        ["ask", "hello", "--mtp"],
+        ["run", "hello", "--mtp"],
+        ["chat", "--prompt", "hello", "--mtp"],
+    ]
+    for argv in mtp_cases:
+        assert parser.parse_args(argv).no_mtp is False
 
 
 def test_cli_response_cap_defaults_to_remaining_context():
@@ -671,6 +710,26 @@ def test_quickstart_generation_no_mtp_uses_ar(monkeypatch, tmp_path):
 
     assert captured == {"mode": "ar", "max_tokens": 88}
     assert payload["stats"]["generation_mode"] == "ar"
+    assert payload["stats"]["mtp_depth"] == 0
+    assert payload["stats"]["verify_calls"] == 0
+    assert payload["stats"]["accepted_by_depth"] == []
+    assert payload["stats"]["drafted_by_depth"] == []
+
+
+def test_quickstart_mtp_slash_command_toggles_next_turn(capsys):
+    args = SimpleNamespace(no_mtp=False)
+    runtime = SimpleNamespace(mtp_enabled=True)
+
+    assert public._handle_quickstart_mtp_command(args, "/mtp status", runtime=runtime) is True
+    assert public._handle_quickstart_mtp_command(args, "/mtp off", runtime=runtime) is True
+    assert args.no_mtp is True
+    assert public._handle_quickstart_mtp_command(args, "/mtp on", runtime=runtime) is True
+    assert args.no_mtp is False
+
+    captured = capsys.readouterr().out
+    assert "MTP: on" in captured
+    assert "MTP: off for the next turn" in captured
+    assert "MTP: on for the next turn" in captured
 
 
 def test_quickstart_generation_reasoning_on_passes_enable_thinking(monkeypatch, tmp_path):
@@ -1391,6 +1450,7 @@ def test_serve_dispatches_packaged_openai_server(monkeypatch, capsys):
     assert calls["cmd"][calls["cmd"].index("--stream-interval") + 1] == "4"
     assert calls["cmd"][calls["cmd"].index("--max-response-tokens") + 1] == "512"
     assert calls["cmd"][calls["cmd"].index("--model-id") + 1] == "mtplx-qwen36-27b-optimized-speed"
+    assert calls["cmd"][calls["cmd"].index("--generation-mode") + 1] == "mtp"
     assert "--no-enable-thinking" in calls["cmd"]
     assert "--no-stats-footer" in calls["cmd"]
     assert "--strict-warmup" in calls["cmd"]
@@ -1452,6 +1512,59 @@ def test_serve_uses_model_contract_depth_when_depth_not_explicit(monkeypatch):
         assert exc.code == 0
 
     assert calls["cmd"][calls["cmd"].index("--depth") + 1] == "2"
+
+
+def test_serve_no_mtp_dispatches_ar_generation_mode(monkeypatch):
+    calls = {}
+
+    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: (model, None))
+    monkeypatch.setattr(
+        public,
+        "_model_gate",
+        lambda model, unsafe_force_unverified=False, yes=False: (
+            {"compatibility": {"tier": "verified", "can_run": True, "exit_code": 0}},
+            None,
+        ),
+    )
+    monkeypatch.setattr(public, "_port_is_busy", lambda host, port: False)
+
+    def fake_execvpe(_executable, cmd, _env):
+        calls["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(public.os, "execvpe", fake_execvpe)
+    args = SimpleNamespace(
+        command="serve",
+        model="models/example",
+        cache_dir=None,
+        profile="performance-cold",
+        unsafe_force_unverified=False,
+        yes=True,
+        host="127.0.0.1",
+        port=8000,
+        depth=3,
+        no_mtp=True,
+        api_key=None,
+        rate_limit=0,
+        stream_interval=1,
+        max_response_tokens=None,
+        temperature=0.6,
+        top_p=0.95,
+        reasoning_parser="qwen3",
+        stats_footer=True,
+        warmup_tokens=0,
+        strict_warmup=False,
+        strict_fast_path=False,
+        max=False,
+        _cli_flags=set(),
+    )
+
+    try:
+        public.cmd_serve_public(args)
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    assert calls["cmd"][calls["cmd"].index("--generation-mode") + 1] == "ar"
 
 
 def test_bare_serve_invokes_server_onboarding_in_tty(monkeypatch):

@@ -309,6 +309,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: float | None = None
     top_k: int | None = None
     depth: int | None = None
+    generation_mode: str | None = None
     seed: int | None = None
     enable_thinking: bool | None = None
     stream: bool = False
@@ -324,6 +325,7 @@ class CompletionRequest(BaseModel):
     top_p: float | None = None
     top_k: int | None = None
     depth: int | None = None
+    generation_mode: str | None = None
     seed: int | None = None
     stream: bool = False
 
@@ -346,6 +348,7 @@ class AnthropicMessagesRequest(BaseModel):
     top_p: float | None = None
     top_k: int | None = None
     depth: int | None = None
+    generation_mode: str | None = None
     stream: bool = False
 
 
@@ -710,6 +713,7 @@ def _anthropic_to_chat_request(request: AnthropicMessagesRequest) -> ChatComplet
         top_p=request.top_p,
         top_k=request.top_k,
         depth=request.depth,
+        generation_mode=request.generation_mode,
         stream=False,
     )
 
@@ -1027,6 +1031,36 @@ def _request_metadata(model: BaseModel) -> dict[str, Any]:
     return metadata if isinstance(metadata, dict) else {}
 
 
+def _normalize_generation_mode(value: Any, *, default: str = "mtp") -> str:
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text not in {"mtp", "ar"}:
+        raise HTTPException(
+            status_code=400,
+            detail="generation_mode must be 'mtp' or 'ar'",
+        )
+    return text
+
+
+def _request_generation_mode_value(request: BaseModel) -> Any:
+    value = getattr(request, "generation_mode", None)
+    if value is None:
+        value = _request_extra(request, "generation_mode")
+    return value
+
+
+def _request_generation_mode_for_generation(state: ServerState, request: BaseModel) -> str:
+    default = _normalize_generation_mode(getattr(state.args, "generation_mode", "mtp"))
+    mode = _normalize_generation_mode(_request_generation_mode_value(request), default=default)
+    if mode == "mtp" and not bool(getattr(state.runtime, "mtp_enabled", False)):
+        raise HTTPException(
+            status_code=400,
+            detail="generation_mode 'mtp' requires a runtime loaded with MTP",
+        )
+    return mode
+
+
 def _request_depth_value(request: BaseModel) -> Any:
     for key in ("depth", "mtp_depth", "speculative_depth"):
         value = getattr(request, key, None)
@@ -1037,7 +1071,14 @@ def _request_depth_value(request: BaseModel) -> Any:
     return None
 
 
-def _request_depth_for_generation(state: ServerState, request: BaseModel) -> int:
+def _request_depth_for_generation(
+    state: ServerState,
+    request: BaseModel,
+    *,
+    generation_mode: str,
+) -> int:
+    if generation_mode == "ar":
+        return 0
     value = _request_depth_value(request)
     if value is None:
         return int(getattr(state.args, "depth", 3))
@@ -1281,6 +1322,7 @@ def _request_observability(
     headers: dict[str, str],
     metadata: dict[str, Any],
     session_source: str | None,
+    request_generation_mode: str,
     request_depth: int,
 ) -> dict[str, Any]:
     user_texts = [
@@ -1309,6 +1351,7 @@ def _request_observability(
         "request_metadata_keys": sorted(metadata.keys()),
         "request_session_source": session_source,
         "request_session_candidate_headers": candidate_headers,
+        "request_generation_mode": request_generation_mode,
         "request_depth": int(request_depth),
         "request_last_user_preview": user_texts[-1][:180] if user_texts else None,
         "request_last_user_chars": len(user_texts[-1]) if user_texts else 0,
@@ -1319,9 +1362,18 @@ def _policy_fingerprint(
     state: ServerState,
     *,
     thinking_enabled: bool,
+    generation_mode: str | None = None,
     depth: int | None = None,
 ) -> str:
-    effective_depth = int(depth if depth is not None else getattr(state.args, "depth", 3))
+    effective_mode = _normalize_generation_mode(
+        generation_mode,
+        default=getattr(state.args, "generation_mode", "mtp"),
+    )
+    effective_depth = (
+        0
+        if effective_mode == "ar"
+        else int(depth if depth is not None else getattr(state.args, "depth", 3))
+    )
     adaptive = _adaptive_config(state.args, max_depth=effective_depth)
     proposal_cache = _proposal_cache_config(state.args)
     online_hidden = _online_hidden_config(state.args)
@@ -1330,7 +1382,7 @@ def _policy_fingerprint(
             f"template={state.template_hash}",
             f"thinking={int(bool(thinking_enabled))}",
             f"strip_reasoning={int(bool(state.args.strip_assistant_reasoning_history))}",
-            f"generation_mode={getattr(state.args, 'generation_mode', 'mtp')}",
+            f"generation_mode={effective_mode}",
             f"depth={effective_depth}",
             "hidden_variant=post_norm",
             "mtp_history_policy=committed",
@@ -1577,6 +1629,7 @@ def _run_generation(
     top_p: float | None,
     top_k: int | None,
     seed: int | None,
+    generation_mode: str | None = None,
     depth: int | None = None,
     token_callback: Callable[[list[int]], None] | None = None,
     session_id: str | None = None,
@@ -1599,7 +1652,15 @@ def _run_generation(
         top_p=top_p,
         top_k=top_k,
     )
-    effective_depth = int(depth if depth is not None else getattr(state.args, "depth", 3))
+    effective_mode = _normalize_generation_mode(
+        generation_mode,
+        default=getattr(state.args, "generation_mode", "mtp"),
+    )
+    effective_depth = (
+        0
+        if effective_mode == "ar"
+        else int(depth if depth is not None else getattr(state.args, "depth", 3))
+    )
     started = time.perf_counter()
     token_times: list[float] = []
     lock_wait_time_s = 0.0
@@ -1625,6 +1686,7 @@ def _run_generation(
         "session_restore_mode": session_restore_mode,
         "background_request": bool(background_request),
         "cache_bypass": session_bank is None,
+        "generation_mode": effective_mode,
         **(request_observability or {}),
     }
     for attempt in range(max_attempts):
@@ -1649,7 +1711,7 @@ def _run_generation(
             state.lock.acquire()
         lock_wait_time_s += time.perf_counter() - lock_started
         try:
-            if state.args.generation_mode == "ar":
+            if effective_mode == "ar":
                 out = generate_ar(
                     state.runtime,
                     prompt_ids,
@@ -1773,13 +1835,28 @@ def _run_generation(
             session_cache_hit=session_cache_hit,
             cache_miss_reason=cache_miss_reason,
             session_restore_mode=session_restore_mode,
-            mtp_depth=effective_depth if state.args.generation_mode == "mtp" else 0,
+            mtp_depth=effective_depth if effective_mode == "mtp" else 0,
             generation_limits=generation_limits,
         )
+        envelope["generation_mode"] = effective_mode
+        if effective_mode == "ar":
+            envelope["mtp_depth"] = 0
+            envelope["verify_calls"] = 0
+            envelope["verify_time_s"] = 0.0
+            envelope["accepted_by_depth"] = []
+            envelope["draft_time_s"] = 0.0
         if request_observability:
             envelope.update(request_observability)
-        stats["generation_mode"] = state.args.generation_mode
+        stats["generation_mode"] = effective_mode
         stats.update(envelope)
+        if effective_mode == "ar":
+            stats["mtp_depth"] = 0
+            stats["verify_calls"] = 0
+            stats["verify_time_s"] = 0.0
+            stats["accepted_by_depth"] = []
+            stats["drafted_by_depth"] = []
+            stats["mean_accept_probability_by_depth"] = []
+            stats["draft_time_s"] = 0.0
         stats["server_elapsed_s"] = elapsed_s
         stats["server_tok_s"] = tok_s
         stats["server_seed"] = generation_seed
@@ -2192,6 +2269,7 @@ def _chat_ui_html(
     api_note = "API key required" if api_key_required else "local · no API key"
     default_depth = max(1, min(3, int(default_settings.get("depth", 3))))
     default_settings = {
+        "mtp_enabled": bool(default_settings.get("mtp_enabled", True)),
         "temperature": float(default_settings.get("temperature", 0.6)),
         "top_p": float(default_settings.get("top_p", 0.95)),
         "top_k": int(default_settings.get("top_k", 20)),
@@ -2347,6 +2425,32 @@ def _chat_ui_html(
     }
     .sb-row textarea { min-height: 64px; max-height: 200px; resize: vertical; line-height: 1.45; }
     .sb-row .help { color: var(--muted-2); font-size: 11px; margin-top: 5px; line-height: 1.4; }
+    .switch-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; margin-bottom: 12px;
+    }
+    .switch-row label { margin: 0; }
+    .switch {
+      position: relative; display: inline-flex; align-items: center;
+      width: 40px; height: 24px; flex: 0 0 auto;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch .track {
+      position: absolute; inset: 0;
+      border-radius: 999px;
+      background: var(--surface-2);
+      border: 1px solid var(--line);
+      transition: background 0.12s, border-color 0.12s;
+    }
+    .switch .thumb {
+      position: absolute; top: 4px; left: 4px;
+      width: 16px; height: 16px; border-radius: 50%;
+      background: var(--muted);
+      transition: transform 0.12s, background 0.12s;
+    }
+    .switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+    .switch input:checked + .track + .thumb { transform: translateX(16px); background: white; }
+    .switch input:focus-visible + .track { box-shadow: 0 0 0 3px var(--accent-soft); }
     .sb-row select {
       appearance: none; -webkit-appearance: none; padding-right: 28px;
       background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 4l3 3 3-3' stroke='%239ca3af' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
@@ -2383,6 +2487,7 @@ def _chat_ui_html(
       box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
       cursor: grab;
     }
+    input[type="range"]:disabled { cursor: default; opacity: 0.45; }
 
     .sb-actions { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
     .sb-btn {
@@ -2634,6 +2739,14 @@ def _chat_ui_html(
     </div>
     <div class="sb-section">
       <p class="sb-title">Speculative</p>
+      <div class="sb-row switch-row">
+        <label for="ctl-mtp">MTP <span class="v" id="val-mtp">on</span></label>
+        <span class="switch">
+          <input id="ctl-mtp" type="checkbox" checked>
+          <span class="track"></span>
+          <span class="thumb"></span>
+        </span>
+      </div>
       <div class="sb-row">
         <label for="ctl-depth">Draft depth <span class="v" id="val-depth">__DEPTH_VALUE__</span></label>
         <input id="ctl-depth" type="range" min="1" max="__DEPTH_MAX__" step="1" value="__DEPTH_VALUE__">
@@ -2723,7 +2836,7 @@ def _chat_ui_html(
     const SVG_STOP = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
 
     // ---------- settings ------------------------------------------------------
-    const SETTINGS_KEY = "mtplx.chat.settings.v3";
+    const SETTINGS_KEY = "mtplx.chat.settings.v4";
     const DEFAULTS = __DEFAULT_SETTINGS_JSON__;
     // RANGES is mutable so we can rewrite max_tokens.max after we discover
     // the model's real context window via /health. Hardcoding a 32768 cap
@@ -2780,6 +2893,7 @@ def _chat_ui_html(
       temperature: document.getElementById("ctl-temp"),
       top_p: document.getElementById("ctl-top-p"),
       top_k: document.getElementById("ctl-top-k"),
+      mtp_enabled: document.getElementById("ctl-mtp"),
       depth: document.getElementById("ctl-depth"),
       max_tokens: document.getElementById("ctl-max-tokens"),
       reasoning: document.getElementById("ctl-think"),
@@ -2789,6 +2903,7 @@ def _chat_ui_html(
       temperature: document.getElementById("val-temp"),
       top_p: document.getElementById("val-top-p"),
       top_k: document.getElementById("val-top-k"),
+      mtp_enabled: document.getElementById("val-mtp"),
       depth: document.getElementById("val-depth"),
       max_tokens: document.getElementById("val-max-tokens")
     };
@@ -2815,6 +2930,7 @@ def _chat_ui_html(
       ctlEls.temperature.value = clamp(s.temperature, RANGES.temperature.min, RANGES.temperature.max, DEFAULTS.temperature, false);
       ctlEls.top_p.value = clamp(s.top_p, RANGES.top_p.min, RANGES.top_p.max, DEFAULTS.top_p, false);
       ctlEls.top_k.value = clamp(s.top_k, RANGES.top_k.min, RANGES.top_k.max, DEFAULTS.top_k, true);
+      ctlEls.mtp_enabled.checked = s.mtp_enabled !== false;
       ctlEls.depth.value = clamp(s.depth, RANGES.depth.min, RANGES.depth.max, DEFAULTS.depth, true);
       ctlEls.max_tokens.value = clamp(s.max_tokens, RANGES.max_tokens.min, RANGES.max_tokens.max, DEFAULTS.max_tokens, true);
       ctlEls.reasoning.value = String(s.reasoning || "auto");
@@ -2827,7 +2943,10 @@ def _chat_ui_html(
       valEls.top_p.textContent = Number(ctlEls.top_p.value).toFixed(2);
       const tk = parseInt(ctlEls.top_k.value, 10) || 0;
       valEls.top_k.textContent = tk === 0 ? "off" : String(tk);
-      valEls.depth.textContent = String(parseInt(ctlEls.depth.value, 10) || 0);
+      const mtpOn = Boolean(ctlEls.mtp_enabled.checked);
+      valEls.mtp_enabled.textContent = mtpOn ? "on" : "off";
+      ctlEls.depth.disabled = !mtpOn;
+      valEls.depth.textContent = mtpOn ? String(parseInt(ctlEls.depth.value, 10) || 0) : "off";
       const mt = parseInt(ctlEls.max_tokens.value, 10) || 0;
       valEls.max_tokens.textContent = mt >= 1000 ? (mt / 1000).toFixed(1).replace(/\\.0$/, "") + "k" : String(mt);
     }
@@ -2836,8 +2955,13 @@ def _chat_ui_html(
         const el = ctlEls[key];
         const range = RANGES[key];
         if (!el || !range) continue;
+        if (key === "depth" && !ctlEls.mtp_enabled.checked) {
+          el.style.setProperty("--filled", "0%");
+          continue;
+        }
         const value = Number(el.value);
-        const pct = ((value - range.min) / (range.max - range.min)) * 100;
+        const span = range.max - range.min;
+        const pct = span > 0 ? ((value - range.min) / span) * 100 : 100;
         el.style.setProperty("--filled", pct.toFixed(2) + "%");
       }
     }
@@ -2846,6 +2970,7 @@ def _chat_ui_html(
         temperature: clamp(ctlEls.temperature.value, RANGES.temperature.min, RANGES.temperature.max, DEFAULTS.temperature, false),
         top_p: clamp(ctlEls.top_p.value, RANGES.top_p.min, RANGES.top_p.max, DEFAULTS.top_p, false),
         top_k: clamp(ctlEls.top_k.value, RANGES.top_k.min, RANGES.top_k.max, DEFAULTS.top_k, true),
+        mtp_enabled: Boolean(ctlEls.mtp_enabled.checked),
         depth: clamp(ctlEls.depth.value, RANGES.depth.min, RANGES.depth.max, DEFAULTS.depth, true),
         max_tokens: clamp(ctlEls.max_tokens.value, RANGES.max_tokens.min, RANGES.max_tokens.max, DEFAULTS.max_tokens, true),
         reasoning: ctlEls.reasoning.value || "auto",
@@ -3030,7 +3155,11 @@ def _chat_ui_html(
       if (!stats) return;
       const verifyMs = stats.verify_calls ? (1000 * Number(stats.verify_time_s || 0) / Number(stats.verify_calls)) : null;
       const tps = Number(stats.decode_tok_s ?? stats.request_tok_s);
+      const generationMode = String(stats.generation_mode || "").toLowerCase();
+      const mtpDepth = Number(stats.mtp_depth ?? stats.speculative_depth);
       const parts = [];
+      if (generationMode === "ar") parts.push("AR");
+      else if (generationMode === "mtp") parts.push("MTP depth " + (Number.isFinite(mtpDepth) ? mtpDepth : "?"));
       if (Number.isFinite(tps)) parts.push('<span class="stat-tps">' + tps.toFixed(1) + ' tok/s</span>');
       if (Number.isFinite(Number(stats.completion_tokens))) parts.push(Number(stats.completion_tokens) + ' tokens');
       if (Number.isFinite(Number(stats.reasoning_tokens)) && Number(stats.reasoning_tokens) > 0) parts.push(Number(stats.reasoning_tokens) + ' thinking');
@@ -3136,6 +3265,7 @@ def _chat_ui_html(
         stream: true,
         temperature: settingsNow.temperature,
         top_p: settingsNow.top_p,
+        generation_mode: settingsNow.mtp_enabled ? "mtp" : "ar",
         depth: settingsNow.depth,
         max_tokens: settingsNow.max_tokens
       };
@@ -3413,6 +3543,7 @@ def create_app(state: ServerState) -> FastAPI:
                     "top_p": float(state.args.top_p),
                     "top_k": int(state.args.top_k),
                     "depth": int(state.args.depth),
+                    "mtp_enabled": str(getattr(state.args, "generation_mode", "mtp")) == "mtp",
                     "max_tokens": int(state.args.max_response_tokens or 16384),
                     "reasoning": str(getattr(state.args, "reasoning", None) or "auto"),
                     "system": "",
@@ -3458,6 +3589,8 @@ def create_app(state: ServerState) -> FastAPI:
             "model": state.model_id,
             "model_path": str(state.runtime.model_path),
             "generation_mode": state.args.generation_mode,
+            "default_generation_mode": state.args.generation_mode,
+            "available_generation_modes": ["mtp", "ar"],
             "load_mtp": bool(state.args.load_mtp),
             "mtp_enabled": bool(state.runtime.mtp_enabled),
             "depth": state.args.depth,
@@ -3700,7 +3833,12 @@ def create_app(state: ServerState) -> FastAPI:
                 },
             )
         thinking_enabled = _thinking_enabled_for_request(state, request)
-        request_depth = _request_depth_for_generation(state, request)
+        request_generation_mode = _request_generation_mode_for_generation(state, request)
+        request_depth = _request_depth_for_generation(
+            state,
+            request,
+            generation_mode=request_generation_mode,
+        )
         prompt_ids = _encode_messages(
             state.runtime.tokenizer,
             request.messages,
@@ -3722,6 +3860,7 @@ def create_app(state: ServerState) -> FastAPI:
         policy_fingerprint = _policy_fingerprint(
             state,
             thinking_enabled=thinking_enabled,
+            generation_mode=request_generation_mode,
             depth=request_depth,
         )
         if not background and not cache_bypass:
@@ -3748,6 +3887,7 @@ def create_app(state: ServerState) -> FastAPI:
             headers=headers,
             metadata=metadata,
             session_source=session_source,
+            request_generation_mode=request_generation_mode,
             request_depth=request_depth,
         )
         model = request.model or state.model_id
@@ -3798,6 +3938,7 @@ def create_app(state: ServerState) -> FastAPI:
                                 top_p=request.top_p,
                                 top_k=request.top_k,
                                 seed=request.seed,
+                                generation_mode=request_generation_mode,
                                 depth=request_depth,
                                 token_callback=on_tokens,
                                 session_id=session_id,
@@ -3820,6 +3961,7 @@ def create_app(state: ServerState) -> FastAPI:
                                     top_p=request.top_p,
                                     top_k=request.top_k,
                                     seed=request.seed,
+                                    generation_mode=request_generation_mode,
                                     depth=request_depth,
                                     token_callback=on_tokens,
                                     session_id=session_id,
@@ -4142,6 +4284,7 @@ def create_app(state: ServerState) -> FastAPI:
                     top_p=request.top_p,
                     top_k=request.top_k,
                     seed=request.seed,
+                    generation_mode=request_generation_mode,
                     depth=request_depth,
                     session_id=session_id,
                     cache_miss_reason=cache_miss_reason,
@@ -4162,6 +4305,7 @@ def create_app(state: ServerState) -> FastAPI:
                     top_p=request.top_p,
                     top_k=request.top_k,
                     seed=request.seed,
+                    generation_mode=request_generation_mode,
                     depth=request_depth,
                     session_id=session_id,
                     cache_miss_reason=cache_miss_reason,
@@ -4279,7 +4423,12 @@ def create_app(state: ServerState) -> FastAPI:
     @app.post("/v1/completions")
     async def completions(request: CompletionRequest) -> Any:
         prompt_ids = _encode_prompt(state.runtime.tokenizer, request.prompt)
-        request_depth = _request_depth_for_generation(state, request)
+        request_generation_mode = _request_generation_mode_for_generation(state, request)
+        request_depth = _request_depth_for_generation(
+            state,
+            request,
+            generation_mode=request_generation_mode,
+        )
         generated = _run_generation(
             state,
             prompt_ids,
@@ -4288,6 +4437,7 @@ def create_app(state: ServerState) -> FastAPI:
             top_p=request.top_p,
             top_k=request.top_k,
             seed=request.seed,
+            generation_mode=request_generation_mode,
             depth=request_depth,
         )
         model = request.model or state.model_id
@@ -4380,7 +4530,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--generation-mode",
         choices=["mtp", "ar"],
         default="mtp",
-        help="Diagnostic generation mode. 'ar' disables native-MTP drafting but keeps the same target/runtime stack.",
+        help="Generation mode. 'ar' uses target-only AR generation while keeping the same loaded runtime.",
     )
     parser.add_argument(
         "--load-mtp",

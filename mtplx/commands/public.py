@@ -94,6 +94,9 @@ EXTERNAL_RUNTIME_ENV_KEYS = (
 )
 LOCALHOST_BINDS = {"", "127.0.0.1", "::1", "localhost"}
 MAX_PUBLIC_SPECULATIVE_DEPTH = 3
+GENERATION_MODE_MTP = "mtp"
+GENERATION_MODE_AR = "ar"
+GENERATION_MODES = {GENERATION_MODE_MTP, GENERATION_MODE_AR}
 
 
 def _print(value: Any) -> None:
@@ -327,6 +330,26 @@ def _validate_public_depth(args: Any, *, printer=print) -> int | None:
         return 2
     args.depth = depth
     return None
+
+
+def _normalize_generation_mode(value: Any) -> str:
+    text = str(value or GENERATION_MODE_MTP).strip().lower()
+    if text not in GENERATION_MODES:
+        raise ValueError("generation mode must be 'mtp' or 'ar'")
+    return text
+
+
+def _generation_mode_from_args(args: Any) -> str:
+    return GENERATION_MODE_AR if bool(getattr(args, "no_mtp", False)) else GENERATION_MODE_MTP
+
+
+def _set_generation_mode_on_args(args: Any, mode: str) -> None:
+    normalized = _normalize_generation_mode(mode)
+    setattr(args, "no_mtp", normalized == GENERATION_MODE_AR)
+
+
+def _generation_mode_label(mode: str) -> str:
+    return "AR target-only" if mode == GENERATION_MODE_AR else "MTP"
 
 
 def _format_bytes(size_bytes: int | float | None) -> str:
@@ -3178,6 +3201,8 @@ def cmd_serve_public(args: Any) -> int:
         str(args.port),
         "--depth",
         str(args.depth),
+        "--generation-mode",
+        _generation_mode_from_args(args),
         "--profile",
         profile.name,
         "--verify-strategy",
@@ -3376,8 +3401,17 @@ def _generate_one_shot_public(args: Any, *, command: str) -> tuple[int, dict[str
         return gate_exit, {"error": "model failed MTP primary gate", "model": inspection}, []
     profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
     apply_profile_env(profile.name)
-    draft_lm_head = _model_draft_lm_head_spec(inspection, profile)
-    draft_sampler = _model_draft_sampler_spec(inspection, profile)
+    generation_mode = _generation_mode_from_args(args)
+    draft_lm_head = (
+        _model_draft_lm_head_spec(inspection, profile)
+        if generation_mode == GENERATION_MODE_MTP
+        else None
+    )
+    draft_sampler = (
+        _model_draft_sampler_spec(inspection, profile)
+        if generation_mode == GENERATION_MODE_MTP
+        else None
+    )
 
     max_session: Any | None = None
     thermal: dict[str, Any] | None = None
@@ -3401,7 +3435,7 @@ def _generate_one_shot_public(args: Any, *, command: str) -> tuple[int, dict[str
             max_session = None
 
     from mtplx.benchmarks.schema import PromptCase, encode_prompt_case
-    from mtplx.generation import generate_mtpk
+    from mtplx.generation import generate_ar, generate_mtpk
     from mtplx.runtime import load
     from mtplx.sampling import SamplerConfig
 
@@ -3451,20 +3485,30 @@ def _generate_one_shot_public(args: Any, *, command: str) -> tuple[int, dict[str
             explicit_max_tokens=requested_max_tokens,
         )
         max_tokens_value = int(budget["effective_max_tokens"])
-        out = generate_mtpk(
-            rt,
-            prompt_ids,
-            max_tokens=max_tokens_value,
-            sampler=SamplerConfig(temperature=args.temperature, top_p=args.top_p, top_k=args.top_k),
-            draft_sampler=_draft_sampler_from_spec(draft_sampler),
-            speculative_depth=args.depth,
-            seed=args.seed,
-            mtp_hidden_variant="post_norm",
-            mtp_cache_policy="persistent",
-            mtp_history_policy="committed",
-            verify_strategy="capture_commit",
-            verify_core="linear-gdn-from-conv-tape",
-        )
+        sampler = SamplerConfig(temperature=args.temperature, top_p=args.top_p, top_k=args.top_k)
+        if generation_mode == GENERATION_MODE_AR:
+            out = generate_ar(
+                rt,
+                prompt_ids,
+                max_tokens=max_tokens_value,
+                sampler=sampler,
+                seed=args.seed,
+            )
+        else:
+            out = generate_mtpk(
+                rt,
+                prompt_ids,
+                max_tokens=max_tokens_value,
+                sampler=sampler,
+                draft_sampler=_draft_sampler_from_spec(draft_sampler),
+                speculative_depth=args.depth,
+                seed=args.seed,
+                mtp_hidden_variant="post_norm",
+                mtp_cache_policy="persistent",
+                mtp_history_policy="committed",
+                verify_strategy="capture_commit",
+                verify_core="linear-gdn-from-conv-tape",
+            )
     finally:
         if max_session is not None:
             max_session.stop()
@@ -3489,11 +3533,41 @@ def _generate_one_shot_public(args: Any, *, command: str) -> tuple[int, dict[str
             "remaining_context_tokens": budget["remaining_context_tokens"],
             "context_cap_applied": budget["context_cap_applied"],
             "reasoning": reasoning_mode,
+            "generation_mode": generation_mode,
+            "mtp_depth": 0 if generation_mode == GENERATION_MODE_AR else int(args.depth),
             "tok_s": out.stats.tok_s,
             "verify_ms_per_call": (
+                None
+                if generation_mode == GENERATION_MODE_AR
+                else
                 1000.0 * out.stats.verify_time_s / out.stats.verify_calls
                 if out.stats.verify_calls
                 else None
+            ),
+            "verify_calls": (
+                0
+                if generation_mode == GENERATION_MODE_AR
+                else int(getattr(out.stats, "verify_calls", 0) or 0)
+            ),
+            "verify_time_s": (
+                0.0
+                if generation_mode == GENERATION_MODE_AR
+                else float(getattr(out.stats, "verify_time_s", 0.0) or 0.0)
+            ),
+            "draft_time_s": (
+                0.0
+                if generation_mode == GENERATION_MODE_AR
+                else float(getattr(out.stats, "draft_time_s", 0.0) or 0.0)
+            ),
+            "accepted_by_depth": (
+                []
+                if generation_mode == GENERATION_MODE_AR
+                else list(getattr(out.stats, "accepted_by_depth", []) or [])
+            ),
+            "drafted_by_depth": (
+                []
+                if generation_mode == GENERATION_MODE_AR
+                else list(getattr(out.stats, "drafted_by_depth", []) or [])
             ),
         },
         "validations": [v.__dict__ for v in validations],
@@ -3521,8 +3595,11 @@ def cmd_run_public(args: Any) -> int:
             stats = payload["stats"]
             tok_s = stats.get("tok_s")
             tok_s_text = f"{tok_s:.2f}" if isinstance(tok_s, (int, float)) else "n/a"
+            mode = str(stats.get("generation_mode") or "mtp").upper()
+            mtp_depth = int(stats.get("mtp_depth") or 0)
             print(
                 f"\n[mtplx] profile={payload['profile']['name']} "
+                f"mode={mode} mtp_depth={mtp_depth} "
                 f"tokens={stats.get('generated_tokens')} tok_s={tok_s_text}"
             )
     return code
@@ -3575,6 +3652,37 @@ def _handle_quickstart_reasoning_command(args: Any, prompt: str) -> bool:
         _quickstart_line(f"Reasoning: {_reasoning_mode(args)}")
         return True
     _quickstart_line("usage: /reasoning on|off|auto")
+    return True
+
+
+def _handle_quickstart_mtp_command(args: Any, prompt: str, *, runtime: Any | None = None) -> bool:
+    parts = prompt.strip().split()
+    if not parts or parts[0].lower() not in {"/mtp", "--mtp"}:
+        return False
+    if len(parts) == 1 or parts[1].lower() == "status":
+        mode = _generation_mode_from_args(args)
+        _quickstart_line(
+            f"MTP: {'on' if mode == GENERATION_MODE_MTP else 'off'} "
+            f"({_generation_mode_label(mode)})"
+        )
+        return True
+    if len(parts) == 2 and parts[1].lower() in {"on", "off"}:
+        requested = GENERATION_MODE_MTP if parts[1].lower() == "on" else GENERATION_MODE_AR
+        if (
+            requested == GENERATION_MODE_MTP
+            and runtime is not None
+            and not bool(getattr(runtime, "mtp_enabled", False))
+        ):
+            _quickstart_line("MTP: unavailable for this loaded runtime")
+            return True
+        _set_generation_mode_on_args(args, requested)
+        _quickstart_line(
+            "MTP: on for the next turn"
+            if requested == GENERATION_MODE_MTP
+            else "MTP: off for the next turn (target-only AR generation)"
+        )
+        return True
+    _quickstart_line("usage: /mtp on|off|status")
     return True
 
 
@@ -3985,7 +4093,14 @@ def _quickstart_stats_line(payload: dict[str, Any]) -> str:
         if decode_elapsed_s is not None and decode_elapsed_s > 0.0
         else f"{generated_tokens} tokens"
     )
-    detail_parts = [verify_text]
+    detail_parts = []
+    generation_mode = str(stats.get("generation_mode") or "").lower()
+    if generation_mode in GENERATION_MODES:
+        mode_text = "AR" if generation_mode == GENERATION_MODE_AR else "MTP"
+        mtp_depth = int(stats.get("mtp_depth") or 0)
+        detail_parts.append(f"mode={mode_text}")
+        detail_parts.append(f"mtp_depth={mtp_depth}")
+    detail_parts.append(verify_text)
     verify_calls = stats.get("verify_calls")
     if isinstance(verify_calls, int) and verify_calls:
         detail_parts.append(f"{verify_calls} verify calls")
@@ -4072,8 +4187,9 @@ def _quickstart_generate(
         top_k=int(getattr(args, "top_k", 20)),
     )
     seed = int(getattr(args, "seed", 0)) + turn_index
+    generation_mode = _generation_mode_from_args(args)
     try:
-        if bool(getattr(args, "no_mtp", False)):
+        if generation_mode == GENERATION_MODE_AR:
             out = generate_ar(
                 rt,
                 prompt_ids,
@@ -4109,23 +4225,35 @@ def _quickstart_generate(
         "remaining_context_tokens": budget["remaining_context_tokens"],
         "context_cap_applied": budget["context_cap_applied"],
         "reasoning": reasoning_mode,
-        "generation_mode": "ar" if bool(getattr(args, "no_mtp", False)) else "mtp",
+        "generation_mode": generation_mode,
+        "mtp_depth": 0 if generation_mode == GENERATION_MODE_AR else int(getattr(args, "depth", 3)),
         "tok_s": out.stats.tok_s,
         "end_to_end_tok_s": out.stats.tok_s,
         "elapsed_s": out.stats.elapsed_s,
         "prompt_eval_time_s": out.stats.prompt_eval_time_s,
-        "verify_time_s": out.stats.verify_time_s,
+        "verify_time_s": 0.0 if generation_mode == GENERATION_MODE_AR else out.stats.verify_time_s,
         "target_forward_time_s": out.stats.target_forward_time_s,
         "repair_time_s": out.stats.repair_time_s,
-        "draft_time_s": out.stats.draft_time_s,
-        "verify_calls": out.stats.verify_calls,
-        "accepted_by_depth": list(out.stats.accepted_by_depth),
-        "drafted_by_depth": list(out.stats.drafted_by_depth),
+        "draft_time_s": 0.0 if generation_mode == GENERATION_MODE_AR else out.stats.draft_time_s,
+        "verify_calls": 0 if generation_mode == GENERATION_MODE_AR else out.stats.verify_calls,
+        "accepted_by_depth": (
+            []
+            if generation_mode == GENERATION_MODE_AR
+            else list(getattr(out.stats, "accepted_by_depth", []) or [])
+        ),
+        "drafted_by_depth": (
+            []
+            if generation_mode == GENERATION_MODE_AR
+            else list(getattr(out.stats, "drafted_by_depth", []) or [])
+        ),
         "correction_tokens": out.stats.correction_tokens,
         "bonus_tokens": out.stats.bonus_tokens,
         "stream_tok_s": _quickstart_token_window_rate(token_times),
         "ttft_s": (token_times[0] - request_started_s) if token_times else None,
         "verify_ms_per_call": (
+            None
+            if generation_mode == GENERATION_MODE_AR
+            else
             1000.0 * out.stats.verify_time_s / out.stats.verify_calls
             if out.stats.verify_calls
             else None
@@ -4164,6 +4292,7 @@ def _quickstart_openwebui_payload(args: Any) -> dict[str, Any]:
         "server_command": (
             f"mtplx quickstart --host {host} --port {port} "
             f"--model {shlex.quote(str(getattr(args, 'model', DEFAULT_RUNTIME_MODEL_DIR)))} "
+            f"{'--no-mtp ' if _generation_mode_from_args(args) == GENERATION_MODE_AR else ''}"
             "--no-stats-footer --open-browser"
         ),
         "openwebui_steps": [
@@ -4197,6 +4326,7 @@ def _quickstart_run_openwebui(args: Any, *, runtime_model: str, inspection: dict
         port=int(getattr(args, "port", 8000)),
         api_key=getattr(args, "api_key", None),
         depth=int(getattr(args, "depth", 3)),
+        no_mtp=bool(getattr(args, "no_mtp", False)),
         rate_limit=int(getattr(args, "rate_limit", 0)),
         stream_interval=int(getattr(args, "stream_interval", 1)),
         warmup_tokens=int(getattr(args, "warmup_tokens", 16)),
@@ -4245,9 +4375,9 @@ def _quickstart_run_terminal_chat(args: Any, *, runtime_model: str, inspection: 
 def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspection: dict[str, Any]) -> int:
     profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
     apply_profile_env(profile.name)
-    no_mtp = bool(getattr(args, "no_mtp", False))
-    draft_lm_head = None if no_mtp else _model_draft_lm_head_spec(inspection, profile)
-    draft_sampler = None if no_mtp else _model_draft_sampler_spec(inspection, profile)
+    generation_mode = _generation_mode_from_args(args)
+    draft_lm_head = _model_draft_lm_head_spec(inspection, profile)
+    draft_sampler = _model_draft_sampler_spec(inspection, profile)
 
     from mtplx.runtime import load
     from mtplx.ui import ModelLoadProgress, render_banner, render_startup_panel
@@ -4262,8 +4392,8 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
             profile_summary=_PROFILE_SHORT_SUMMARIES.get(profile.name),
             api_url="terminal chat (no server)",
             mode_label=(
-                "No-MTP AR"
-                if no_mtp
+                "AR target-only"
+                if generation_mode == GENERATION_MODE_AR
                 else
                 "Max MTP"
                 if getattr(args, "max", False)
@@ -4286,11 +4416,10 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
     quiet_progress = not sys.stdout.isatty()
     with ModelLoadProgress("Loading model", quiet=quiet_progress) as progress:
         progress.set_subtitle(f"profile {profile.name}")
-        rt = load(runtime_model, mtp=not no_mtp)
+        rt = load(runtime_model, mtp=True)
         progress.set_subtitle("ready")
     _quickstart_line(f"Model ready in {time.perf_counter() - started:.1f}s")
-    if no_mtp:
-        _quickstart_line("Generation mode: AR target-only; MTP sidecar/drafting disabled.")
+    _quickstart_line(f"Generation mode: {_generation_mode_label(generation_mode)}")
     draft_report = None
     if draft_lm_head is not None:
         _quickstart_line(
@@ -4314,8 +4443,11 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
     )
     _quickstart_line(f"Reasoning: {_reasoning_mode(args)}")
     if draft_report is not None:
-        _quickstart_line("Medium/Max speed path: draft-only LM head is active.")
-    if draft_sampler is not None:
+        if generation_mode == GENERATION_MODE_AR:
+            _quickstart_line("Draft-only LM head loaded for /mtp on; current AR mode bypasses it.")
+        else:
+            _quickstart_line("Medium/Max speed path: draft-only LM head is active.")
+    if draft_sampler is not None and generation_mode == GENERATION_MODE_MTP:
         _quickstart_line(
             "Draft sampler: "
             f"temp={float(draft_sampler['temperature']):.2f} "
@@ -4325,6 +4457,7 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
     _quickstart_line()
 
     history: list[dict[str, str]] = []
+    last_payload: dict[str, Any] | None = None
 
     def run_turn(
         prompt: str,
@@ -4336,7 +4469,14 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
         quality_gate: bool = True,
         response_label: str = "MTPLX",
     ) -> int:
+        nonlocal last_payload
         _quickstart_line("[4/4] generating response...")
+        active_mode = _generation_mode_from_args(args)
+        turn_label = (
+            f"MTPLX {_generation_mode_label(active_mode)}"
+            if response_label == "MTPLX"
+            else response_label
+        )
         payload = _quickstart_generate(
             rt=rt,
             inspection=inspection,
@@ -4347,12 +4487,13 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
             turn_index=turn_index,
             max_tokens=max_tokens,
             include_history=include_history,
-            stream_label=response_label,
+            stream_label=turn_label,
             draft_sampler=draft_sampler,
         )
+        last_payload = payload
         text = str(payload["text"])
         if not payload.get("streamed"):
-            _print_assistant_fallback(response_label, text)
+            _print_assistant_fallback(turn_label, text)
         if bool(getattr(args, "show_stats", True)):
             _quickstart_line()
             _print_stats_line(_quickstart_stats_line(payload))
@@ -4378,7 +4519,9 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
         _quickstart_line(f"try: {prompt_hint}")
         return 2
 
-    _quickstart_line("Chat is ready. Type /speed for a real TPS sample, /reasoning on|off|auto, or /exit to quit.")
+    _quickstart_line(
+        "Chat is ready. Type /mtp on|off|status, /stats, /speed, /reasoning on|off|auto, or /exit."
+    )
     turn_index = 0
     worst_code = 0
     while True:
@@ -4394,6 +4537,14 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
             _quickstart_line("bye")
             return worst_code
         if _handle_quickstart_reasoning_command(args, prompt):
+            continue
+        if _handle_quickstart_mtp_command(args, prompt, runtime=rt):
+            continue
+        if prompt.lower() in {"/stats", "stats"}:
+            if last_payload is None:
+                _quickstart_line("No stats yet.")
+            else:
+                _print_stats_line(_quickstart_stats_line(last_payload))
             continue
         if prompt.lower() in {"/speed", "speed", "/bench", "/benchmark"}:
             _quickstart_line(
@@ -4541,6 +4692,7 @@ def cmd_quickstart_public(args: Any) -> int:
             "model": model,
             "cache_dir": cache_dir,
             "profile": getattr(args, "profile", DEFAULT_PROFILE_NAME),
+            "generation_mode": _generation_mode_from_args(args),
             "max": bool(getattr(args, "max", False)),
             "download_if_missing": download,
             "terminal_chat": target == "terminal",
@@ -4558,6 +4710,7 @@ def cmd_quickstart_public(args: Any) -> int:
                 "mode: "
                 + ("Max (Medium path + fan boost)" if payload["max"] else "Medium")
             )
+            _quickstart_line(f"generation: {_generation_mode_label(payload['generation_mode'])}")
             _quickstart_line(f"download if missing: {str(download).lower()}")
             if target == "openwebui":
                 _quickstart_line(f"then: start local server -> open browser chat at {openwebui['chat_url']}")

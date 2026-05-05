@@ -1,3 +1,4 @@
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,14 @@ from mtplx.server.openai import _RateLimiter, create_app, parse_args
 
 
 class FakeExecutor:
+    def submit(self, fn, *args, **kwargs):
+        future: Future = Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except BaseException as exc:  # pragma: no cover - surfaced by caller
+            future.set_exception(exc)
+        return future
+
     def shutdown(self, **_kwargs):
         return None
 
@@ -24,13 +33,18 @@ def _fake_state(*, api_key: str | None = None, rate_limit: int = 0):
     return SimpleNamespace(
         args=args,
         model_id="mtplx-test-model",
-        runtime=SimpleNamespace(model_path=Path("models/example"), mtp_enabled=True),
+        runtime=SimpleNamespace(
+            model_path=Path("models/example"),
+            mtp_enabled=True,
+            tokenizer=SimpleNamespace(),
+        ),
         profile=get_profile(args.profile),
         context_window=4096,
         load_time_s=0.25,
         draft_lm_head={"installed": False, "reason": "test"},
         draft_head_identity="test-head",
         template_hash="test-template",
+        main_system_prompt_hash=None,
         fast_path_env_status={},
         profile_env_status={},
         mlx_cache_limit_status={"configured": False},
@@ -68,6 +82,7 @@ def test_openai_server_health_metrics_and_models_fake_state():
     assert 'id="ctl-temp"' in root.text
     assert 'id="ctl-top-p"' in root.text
     assert 'id="ctl-top-k" type="range"' in root.text
+    assert 'id="ctl-mtp" type="checkbox"' in root.text
     assert 'id="ctl-depth" type="range"' in root.text
     assert 'id="ctl-max-tokens" type="range"' in root.text
     assert 'id="ctl-system"' in root.text
@@ -85,11 +100,9 @@ def test_openai_server_health_metrics_and_models_fake_state():
     assert "SCROLL_PIN_THRESHOLD = 160" in root.text
     assert 'id="new-chat-btn"' in root.text
     assert "AbortController" in root.text
-    # SETTINGS_KEY bumped to v3 when context-window auto-detect landed; bumping
-    # the version invalidates stale saved settings that could be wedged in
-    # corrupted state (one of the causes of the user-reported "stuck on
-    # Thinking" repro after a max_tokens slider change).
-    assert "mtplx.chat.settings.v3" in root.text
+    # SETTINGS_KEY bumped to v4 when MTP on/off settings landed; bumping the
+    # version invalidates saved sidebar settings without a generation-mode bit.
+    assert "mtplx.chat.settings.v4" in root.text
     # Auto-detect of context length must be hooked up so the slider isn't
     # capped at a stale 32k for a 256k-context model.
     assert "discoverServerLimits" in root.text
@@ -103,6 +116,8 @@ def test_openai_server_health_metrics_and_models_fake_state():
     # Live tps element
     assert 'id="live-stats"' in root.text
     assert "tok/s" in root.text
+    assert '"mtp_enabled": true' in root.text
+    assert 'generation_mode: settingsNow.mtp_enabled ? "mtp" : "ar"' in root.text
     assert '"depth": 3' in root.text
     assert 'id="ctl-depth" type="range" min="1" max="3" step="1" value="3"' in root.text
     # Updated max-tokens default and cap.
@@ -169,7 +184,109 @@ def test_chat_ui_uses_server_depth_default():
 
     assert root.status_code == 200
     assert '"depth": 2' in root.text
+    assert '"mtp_enabled": true' in root.text
     assert 'id="ctl-depth" type="range" min="1" max="2" step="1" value="2"' in root.text
+
+
+def test_chat_generation_mode_request_override_routes_ar(monkeypatch):
+    captured: dict[str, object] = {}
+    state = _fake_state()
+    client = TestClient(create_app(state))
+
+    monkeypatch.setattr(openai, "_encode_messages", lambda *_args, **_kwargs: [1, 2, 3])
+
+    def fake_run_generation(_state, prompt_ids, **kwargs):
+        captured["prompt_ids"] = prompt_ids
+        captured["generation_mode"] = kwargs["generation_mode"]
+        captured["depth"] = kwargs["depth"]
+        return {
+            "text": "ok",
+            "tokens": [4],
+            "stats": {
+                "generation_mode": kwargs["generation_mode"],
+                "mtp_depth": kwargs["depth"],
+                "completion_tokens": 1,
+            },
+            "prompt_tokens": len(prompt_ids),
+            "completion_tokens": 1,
+            "finish_reason": "stop",
+        }
+
+    monkeypatch.setattr(openai, "_run_generation", fake_run_generation)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-mtplx-cache-mode": "bypass"},
+        json={
+            "messages": [{"role": "user", "content": "Say READY"}],
+            "max_tokens": 4,
+            "generation_mode": "ar",
+            "depth": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["generation_mode"] == "ar"
+    assert captured["depth"] == 0
+    assert response.json()["mtplx_stats"]["generation_mode"] == "ar"
+    assert response.json()["mtplx_stats"]["mtp_depth"] == 0
+
+
+def test_chat_generation_mode_request_override_routes_mtp_depth(monkeypatch):
+    captured: dict[str, object] = {}
+    client = TestClient(create_app(_fake_state()))
+
+    monkeypatch.setattr(openai, "_encode_messages", lambda *_args, **_kwargs: [1, 2, 3])
+
+    def fake_run_generation(_state, _prompt_ids, **kwargs):
+        captured["generation_mode"] = kwargs["generation_mode"]
+        captured["depth"] = kwargs["depth"]
+        return {
+            "text": "ok",
+            "tokens": [4],
+            "stats": {
+                "generation_mode": kwargs["generation_mode"],
+                "mtp_depth": kwargs["depth"],
+                "completion_tokens": 1,
+            },
+            "prompt_tokens": 3,
+            "completion_tokens": 1,
+            "finish_reason": "stop",
+        }
+
+    monkeypatch.setattr(openai, "_run_generation", fake_run_generation)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-mtplx-cache-mode": "bypass"},
+        json={
+            "messages": [{"role": "user", "content": "Say READY"}],
+            "max_tokens": 4,
+            "generation_mode": "mtp",
+            "depth": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {"generation_mode": "mtp", "depth": 1}
+    assert response.json()["mtplx_stats"]["generation_mode"] == "mtp"
+    assert response.json()["mtplx_stats"]["mtp_depth"] == 1
+
+
+def test_invalid_generation_mode_returns_400():
+    client = TestClient(create_app(_fake_state()))
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-mtplx-cache-mode": "bypass"},
+        json={
+            "messages": [{"role": "user", "content": "Say READY"}],
+            "generation_mode": "off",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "generation_mode must be 'mtp' or 'ar'"
 
 
 def test_server_state_emits_startup_progress(monkeypatch, capsys):

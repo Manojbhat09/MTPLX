@@ -81,6 +81,7 @@ Power-user shortcuts (any of these skip the wizard):
 ```bash
 mtplx start --fresh                         # re-run the wizard from scratch
 mtplx start cli                             # terminal chat directly
+mtplx start cli --no-mtp                    # target-only AR generation
 mtplx start --max                           # browser chat with fan boost
 mtplx start --model /path/to/model          # use a specific local or HF model
 mtplx pull Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed
@@ -94,6 +95,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"mtplx","messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
+
+Set `"generation_mode":"ar"` per request to compare target-only AR against the default native-MTP path without unloading the model.
 
 Homebrew writes a durable launcher so `mtplx` works from a normal new Terminal tab. The older script installer remains available if you prefer a user-local venv:
 

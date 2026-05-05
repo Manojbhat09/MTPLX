@@ -225,17 +225,24 @@ Power-user shortcuts (any of these skip the onboarding wizard):
   mtplx start --download              Pull the verified model from HF first
   mtplx start --model /path/...       Use a specific local or HF model
   mtplx start --prompt "hi"           One-shot ask and exit (non-interactive)
+  mtplx start cli --no-mtp            Use target-only AR generation
 
 Useful controls:
   --download       Download the selected/default model if missing
   --model PATH     Use a local model folder or HF repo id
   --profile safe   Use the conservative long-response profile
+  --mtp            Use native-MTP speculative generation (default)
+  --no-mtp         Use target-only AR generation; MTP can be turned back on
   --prompt TEXT    (cli) Ask once and exit instead of opening chat
   --max-tokens N   (cli) Optional response cap; default uses remaining context
   --no-stats       Hide the TPS footer
   --dry-run        Preview without loading MLX
 
 Inside terminal chat:
+  /mtp status      Show whether the next turn uses MTP or AR
+  /mtp off         Switch the next turn to target-only AR generation
+  /mtp on          Switch the next turn back to MTP without reloading
+  /stats           Print the last response stats again
   /speed           Run a 192-token comparison sample
   /exit            Quit
 
@@ -473,6 +480,25 @@ def _add_reasoning_arg(parser: argparse.ArgumentParser, *, default: str | None =
         help=(
             "Qwen thinking mode. CLI chat defaults to off for speed; "
             "server/browser defaults to auto unless set."
+        ),
+    )
+
+
+def _add_mtp_toggle_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--mtp",
+        action="store_false",
+        dest="no_mtp",
+        default=False,
+        help="Use native-MTP speculative generation. This is the default.",
+    )
+    parser.add_argument(
+        "--no-mtp",
+        action="store_true",
+        dest="no_mtp",
+        help=(
+            "Use target-only AR generation while keeping the same loaded runtime "
+            "where live switching is supported."
         ),
     )
 
@@ -1562,11 +1588,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_flow_p.add_argument("--top-p", type=float, default=0.95)
     start_flow_p.add_argument("--top-k", type=int, default=20)
     start_flow_p.add_argument("--depth", type=int, default=3)
-    start_flow_p.add_argument(
-        "--no-mtp",
-        action="store_true",
-        help="Terminal CLI only: load the model without MTP and use plain AR generation",
-    )
+    _add_mtp_toggle_args(start_flow_p)
     start_flow_p.add_argument("--seed", type=int, default=0)
     _add_reasoning_arg(start_flow_p)
     start_flow_p.add_argument("--no-stats", action="store_false", dest="show_stats", default=True, help="Hide speed stats after responses")
@@ -1634,6 +1656,7 @@ def build_parser() -> argparse.ArgumentParser:
     ask_p.add_argument("--top-p", type=float, default=0.95)
     ask_p.add_argument("--top-k", type=int, default=20)
     ask_p.add_argument("--depth", type=int, default=3)
+    _add_mtp_toggle_args(ask_p)
     ask_p.add_argument("--seed", type=int, default=0)
     _add_reasoning_arg(ask_p)
     ask_p.add_argument("--stats", action="store_false", dest="quiet", default=True, help="Show the MTPLX stats footer")
@@ -1660,6 +1683,7 @@ def build_parser() -> argparse.ArgumentParser:
     quickstart_server_p.add_argument("--host", default="127.0.0.1")
     quickstart_server_p.add_argument("--port", type=int, default=8000)
     quickstart_server_p.add_argument("--depth", type=int, default=3)
+    _add_mtp_toggle_args(quickstart_server_p)
     quickstart_server_p.add_argument(
         "--api-key",
         default=os.environ.get("MTPLX_AUTH"),
@@ -1839,6 +1863,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--top-p", type=float, default=0.95)
     run_p.add_argument("--top-k", type=int, default=20)
     run_p.add_argument("--depth", type=int, default=3)
+    _add_mtp_toggle_args(run_p)
     run_p.add_argument("--seed", type=int, default=0)
     _add_reasoning_arg(run_p)
     run_p.add_argument("--quiet", action="store_true", help="Hide the stats footer")
@@ -1864,6 +1889,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat_p.add_argument("--top-p", type=float, default=0.95)
     chat_p.add_argument("--top-k", type=int, default=20)
     chat_p.add_argument("--depth", type=int, default=3)
+    _add_mtp_toggle_args(chat_p)
     chat_p.add_argument("--seed", type=int, default=0)
     _add_reasoning_arg(chat_p)
     chat_p.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
@@ -1885,6 +1911,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve_p.add_argument("--host", default="127.0.0.1")
     serve_p.add_argument("--port", type=int, default=8000)
     serve_p.add_argument("--depth", type=int, default=3)
+    _add_mtp_toggle_args(serve_p)
     serve_p.add_argument(
         "--api-key",
         default=os.environ.get("MTPLX_AUTH"),

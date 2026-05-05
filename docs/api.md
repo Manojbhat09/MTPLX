@@ -5,7 +5,7 @@ MTPLX v0.1 targets OpenAI-compatible local serving first.
 ## `GET /health`
 
 Reports model load state, profile, exactness baseline, MLX/runtime information, fan mode, and warmup status.
-The payload includes `api_key_required`, `rate_limit_per_minute`, `stream_interval`, `warmup`, and `reasoning_parser` so client harnesses can confirm the active serving policy.
+The payload includes `generation_mode`, `load_mtp`, `mtp_enabled`, `depth`, `api_key_required`, `rate_limit_per_minute`, `stream_interval`, `warmup`, and `reasoning_parser` so client harnesses can confirm the active serving policy.
 
 ## `GET /metrics`
 
@@ -19,6 +19,7 @@ Lists cached and active models.
 
 OpenAI-compatible chat completions. Streaming uses server-sent events.
 Use `--stream-interval N` to batch committed-token SSE chunks when a client prefers less frequent events.
+Requests may set `generation_mode` to `"mtp"` or `"ar"`. `"ar"` uses target-only AR generation and reports `mtp_depth: 0`; it does not unload MTP weights, so the server can switch back to MTP on a later request.
 
 ## `POST /v1/completions`
 
@@ -54,6 +55,7 @@ mtplx serve --rate-limit 120
 mtplx serve --stream-interval 4
 mtplx serve --warmup-tokens 16
 mtplx serve --reasoning-parser qwen3
+mtplx serve --no-mtp
 ```
 
 Non-localhost binds require `--api-key`. Requests may authenticate with either:
