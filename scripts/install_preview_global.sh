@@ -11,7 +11,7 @@ a global `mtplx` launcher in ~/.local/bin. On Apple Silicon Homebrew installs,
 it also writes /opt/homebrew/bin/mtplx when that directory is writable.
 
 Environment:
-  MTPLX_PYTHON=/path/to/python3.13
+  MTPLX_PYTHON=/path/to/python3
   MTPLX_PREVIEW_VENV=~/.mtplx/preview-venv
   MTPLX_USER_BIN=~/.local/bin
 EOF
@@ -52,8 +52,28 @@ install_target="${wheel}[server]"
 python_bin="${MTPLX_PYTHON:-}"
 
 if [ -z "$python_bin" ]; then
-  for candidate in python3.13 python3.12 python3.11 python3; do
-    if command -v "$candidate" >/dev/null 2>&1; then
+  candidates=(
+    /opt/homebrew/bin/python3.14
+    /opt/homebrew/bin/python3.13
+    /opt/homebrew/bin/python3.12
+    /opt/homebrew/bin/python3.11
+    /opt/homebrew/bin/python3
+    /usr/local/bin/python3.14
+    /usr/local/bin/python3.13
+    /usr/local/bin/python3.12
+    /usr/local/bin/python3.11
+    /usr/local/bin/python3
+    python3.14
+    python3.13
+    python3.12
+    python3.11
+    python3
+  )
+  for candidate in "${candidates[@]}"; do
+    if [ -x "$candidate" ]; then
+      python_bin="$candidate"
+      break
+    elif command -v "$candidate" >/dev/null 2>&1; then
       python_bin="$(command -v "$candidate")"
       break
     fi
@@ -61,9 +81,21 @@ if [ -z "$python_bin" ]; then
 fi
 
 if [ -z "$python_bin" ]; then
-  echo "error: could not find python3.11, python3.12, python3.13, or python3" >&2
+  echo "error: could not find Python 3.11+." >&2
+  echo "Checked Homebrew paths (/opt/homebrew/bin, /usr/local/bin) and PATH." >&2
   exit 2
 fi
+
+"$python_bin" - <<'PY'
+import sys
+
+if sys.version_info < (3, 11):
+    print(
+        f"error: MTPLX needs Python 3.11+, found {sys.version.split()[0]}",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+PY
 
 "$python_bin" -m venv "$venv"
 "$venv/bin/python" -m pip install -U pip

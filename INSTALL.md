@@ -5,7 +5,7 @@ MTPLX is preview software for Apple Silicon Macs.
 ## Requirements
 
 - Apple Silicon Mac
-- Python 3.11, 3.12, or 3.13
+- Python 3.11+
 - macOS with MLX support
 - Enough disk for the selected model
 
@@ -18,10 +18,11 @@ curl -fsSL https://raw.githubusercontent.com/youssofal/MTPLX/main/scripts/instal
 mtplx help
 ```
 
-The installer uses `python3`, installs MTPLX from PyPI into `~/.mtplx/venv`,
-and writes a durable launcher at `~/.local/bin/mtplx`. On Apple Silicon
-Homebrew installs, it also writes `/opt/homebrew/bin/mtplx` when that directory
-is writable.
+The installer checks Homebrew Python paths directly, so it works even if a fresh
+Terminal tab has not put `/opt/homebrew/bin` on PATH yet. It installs MTPLX from
+PyPI into `~/.mtplx/venv` and writes a durable launcher at `~/.local/bin/mtplx`.
+On Apple Silicon Homebrew installs, it also writes `/opt/homebrew/bin/mtplx` when
+that directory is writable.
 
 Python-only install:
 

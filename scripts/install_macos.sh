@@ -12,7 +12,7 @@ launcher in ~/.local/bin. On Apple Silicon Homebrew installs, it also writes
 
 Environment:
   MTPLX_PACKAGE_SPEC=mtplx              Package spec to install, for example mtplx==0.1.0rc1
-  MTPLX_PYTHON=/path/to/python3.13      Python interpreter override
+  MTPLX_PYTHON=/path/to/python3         Python interpreter override
   MTPLX_VENV=~/.mtplx/venv              Install venv path
   MTPLX_USER_BIN=~/.local/bin           User launcher directory
   MTPLX_GLOBAL_BIN=/opt/homebrew/bin    Optional global launcher directory
@@ -38,8 +38,28 @@ launcher="$user_bin/mtplx"
 python_bin="${MTPLX_PYTHON:-}"
 
 if [ -z "$python_bin" ]; then
-  for candidate in python3.13 python3.12 python3.11 python3; do
-    if command -v "$candidate" >/dev/null 2>&1; then
+  candidates=(
+    /opt/homebrew/bin/python3.14
+    /opt/homebrew/bin/python3.13
+    /opt/homebrew/bin/python3.12
+    /opt/homebrew/bin/python3.11
+    /opt/homebrew/bin/python3
+    /usr/local/bin/python3.14
+    /usr/local/bin/python3.13
+    /usr/local/bin/python3.12
+    /usr/local/bin/python3.11
+    /usr/local/bin/python3
+    python3.14
+    python3.13
+    python3.12
+    python3.11
+    python3
+  )
+  for candidate in "${candidates[@]}"; do
+    if [ -x "$candidate" ]; then
+      python_bin="$candidate"
+      break
+    elif command -v "$candidate" >/dev/null 2>&1; then
       python_bin="$(command -v "$candidate")"
       break
     fi
@@ -47,7 +67,8 @@ if [ -z "$python_bin" ]; then
 fi
 
 if [ -z "$python_bin" ]; then
-  echo "error: could not find python3.11, python3.12, python3.13, or python3" >&2
+  echo "error: could not find Python 3.11+." >&2
+  echo "Checked Homebrew paths (/opt/homebrew/bin, /usr/local/bin) and PATH." >&2
   echo "Install Python 3.11+ first, then rerun this installer." >&2
   exit 2
 fi
