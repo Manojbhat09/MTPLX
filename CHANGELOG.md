@@ -2,6 +2,20 @@
 
 All notable user-facing changes are recorded here.
 
+## v0.1.6
+
+### Fixed
+
+- Fixed streamed tool-call responses so OpenAI-compatible agent clients receive structured tool calls instead of raw model markup.
+- Fixed paged-tail routing for streamed server responses.
+- Fixed public long-context benchmark defaults so `mtplx bench run` uses the Sustained direct-HTTP lane for long/product suites, while keeping `cold-long-code-192` and explicit `--profile performance-cold` on the Burst lane.
+
+### Release Notes
+
+- This is a small production hotfix over v0.1.5.
+- No Gemma assistant-pair runtime, model-weight, sampler, or benchmark-result claims are included in this release.
+- This release does not claim the v0.2 no-fan long-response decay target or a proven 200K-token production ceiling.
+
 ## v0.1.5
 
 ### Added

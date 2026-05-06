@@ -12,7 +12,7 @@
 [![PyPI](https://img.shields.io/pypi/v/mtplx?label=PyPI)](https://pypi.org/project/mtplx/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-black?logo=apple)](https://developer.apple.com/metal/)
-[![Status](https://img.shields.io/badge/status-v0.1.5-blue)](CHANGELOG.md)
+[![Status](https://img.shields.io/badge/status-v0.1.6-blue)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
 </div>
@@ -58,7 +58,7 @@ That's it. The wizard handles the default speed model (`Youssofal/Qwen3.6-27B-MT
 - **Idle-aware fan-backed modes.** Server tracks request activity; after 15 minutes of no chat, fans drop to auto, then ramp back up on the next message.
 - **Four-tier model compatibility contract.** `mtplx inspect <model>` reports: verified / arch-compatible-unverified / incompatible-architecture / no-MTP. No silent garbage runs.
 - **Lazy imports.** `mtplx --help`, `doctor`, `inspect`, `init`, `setup` work on a fresh venv *without MLX installed*. Generation and serving pull in MLX only when needed.
-- **v0.1.5 status: local and GitHub release gates green**, including the explicit Sustained / Sustained Max / Burst mode UX, long-context memory reduction, onboarding, browser UI, OpenAI server/tool-call compatibility, lazy-import survival, wheel build, and repository hygiene.
+- **v0.1.6 status: production hotfix release**, including streamed tool-call/server fixes plus the corrected Sustained default for long-context benchmark commands.
 
 > **Release honesty.** Burst is the old fan-backed headline lane and is capped in the UI at short contexts only. Sustained is the explicit long-context memory-safety lane; it is not an AR downgrade. Long no-fan decode decay remains the v0.2 deliverable; see [Roadmap](#roadmap).
 
