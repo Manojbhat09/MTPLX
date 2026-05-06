@@ -18,8 +18,8 @@ python3 -m pip install -U mtplx
 The GitHub release wheel remains available for reproducible installs:
 
 ```bash
-gh release download v0.1.4 --repo youssofal/mtplx --pattern 'mtplx-0.1.4-py3-none-any.whl'
-python3 -m pip install ./mtplx-0.1.4-py3-none-any.whl
+gh release download v0.1.5 --repo youssofal/mtplx --pattern 'mtplx-0.1.5-py3-none-any.whl'
+python3 -m pip install ./mtplx-0.1.5-py3-none-any.whl
 ```
 
 The commands above are no-MLX-safe except generation and serving. A missing MLX runtime should appear in `doctor` as an actionable dependency issue, not a traceback.

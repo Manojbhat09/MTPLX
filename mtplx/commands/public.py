@@ -5074,7 +5074,7 @@ def _write_fixture_runtime_contract(path: Path, *, arch_id: str, profile: str = 
     write_json(
         path / "mtplx_runtime.json",
         {
-            "mtplx_version": "0.1.4",
+            "mtplx_version": "0.1.5",
             "arch_id": arch_id,
             "mtp_depth_max": 3,
             "recommended_profile": profile,

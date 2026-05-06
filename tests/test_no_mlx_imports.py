@@ -67,7 +67,7 @@ def test_version_without_mlx(tmp_path: Path) -> None:
     proc = _run_no_mlx(tmp_path, ["-m", "mtplx.cli", "--version"])
 
     assert proc.returncode == 0, proc.stderr
-    assert "mtplx 0.1.4 (0.1.4)" in proc.stdout
+    assert "mtplx 0.1.5 (0.1.5)" in proc.stdout
 
 
 def test_cli_help_without_mlx(tmp_path: Path) -> None:

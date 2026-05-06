@@ -2,6 +2,27 @@
 
 All notable user-facing changes are recorded here.
 
+## v0.1.5
+
+### Added
+
+- Added explicit Sustained, Sustained Max, and Burst mode semantics across the CLI, onboarding wizard, quickstart paths, docs, and browser UI.
+- Added long-context Sustained runtime telemetry for paged-attention routing, dense-fallback avoidance, large-query fallback behavior, and phase-aware prefill/decode diagnostics.
+- Added opt-in Apple Silicon long-context QA coverage for Sustained memory and fallback regression checks.
+
+### Fixed
+
+- Fixed the 16K-32K long-context memory balloon by using chunked prefill, final-token logits, request-sized paged KV, dynamic paged-cache growth, and oversized SessionBank snapshot protection.
+- Fixed normal Sustained long-context prefill from silently materializing dense full K/V state after the paged threshold.
+- Fixed the 16K Sustained TPS regression by routing large-query paged attention through bounded paths instead of the old dense fallback.
+- Fixed stale mode wording in help/docs and surfaced the selected runtime mode in `/health` and the browser chat UI.
+
+### Release Notes
+
+- Sustained is the default long-context native-MTP user path. Sustained Max adds explicit fan boost. Burst remains the old performance-cold max-fan headline lane for short prompts and benchmarks.
+- Real QA showed the 32K Sustained path staying below the 35 GiB hard guard and the 16K Sustained Max decode gap recovering to within the release budget.
+- This release does not claim the v0.2 no-fan long-response decay target or a proven 200K-token production ceiling.
+
 ## v0.1.4
 
 ### Fixed
