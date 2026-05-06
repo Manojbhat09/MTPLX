@@ -3123,7 +3123,15 @@ def cmd_serve_public(args: Any) -> int:
         _print_serve_start_line(f"try: mtplx status")
         server_command = _server_command_name(args)
         _print_serve_start_line(f"try: stop the old mtplx {server_command} terminal with Ctrl-C")
-        _print_serve_start_line(f"try: mtplx {server_command} --port {int(args.port) + 1}")
+        profile_arg = (
+            f" --profile {getattr(args, 'profile')}"
+            if getattr(args, "profile", None)
+            else ""
+        )
+        max_arg = " --max" if bool(getattr(args, "max", False)) else ""
+        _print_serve_start_line(
+            f"try: mtplx {server_command}{profile_arg}{max_arg} --port {int(args.port) + 1}"
+        )
         return 2
     profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
     cache_dir = getattr(args, "cache_dir", None)
@@ -3209,8 +3217,9 @@ def cmd_serve_public(args: Any) -> int:
                 observed = fork_status.get("path") or fork_status.get("error") or "unknown"
                 _print_serve_start_line(f"      Found: {observed}")
                 server_command = _server_command_name(args)
-                _print_serve_start_line(f"try: mtplx {server_command} --profile safe")
-                _print_serve_start_line(f"try: mtplx {server_command} --profile performance-cold")
+                _print_serve_start_line(f"try: mtplx {server_command} --profile sustained")
+                _print_serve_start_line(f"try: mtplx {server_command} --profile stable")
+                _print_serve_start_line(f"try: mtplx {server_command} --profile performance-cold --max")
                 _print_serve_start_line("     (without --strict-fast-path, MTPLX starts in stock-MLX compatibility)")
                 return 2
             relax_mlx_fork_assert = True
@@ -3309,6 +3318,8 @@ def cmd_serve_public(args: Any) -> int:
         # are actually pinned. If args.max was just disabled above, fall
         # through to the no-fan-control path.
         if getattr(args, "max", False):
+            child_env = os.environ.copy()
+            child_env["MTPLX_FAN_MODE"] = "max"
             idle_minutes = int(getattr(args, "max_idle_min", 15))
             watchdog = _MaxIdleWatchdog(
                 host=str(getattr(args, "host", "127.0.0.1")),
@@ -3317,7 +3328,7 @@ def cmd_serve_public(args: Any) -> int:
             )
             watchdog.start()
             try:
-                proc = subprocess.run(cmd, env=os.environ.copy(), cwd=repo_root(), check=False)
+                proc = subprocess.run(cmd, env=child_env, cwd=repo_root(), check=False)
                 return int(proc.returncode)
             finally:
                 watchdog.stop()
@@ -4309,6 +4320,7 @@ def _quickstart_openwebui_payload(args: Any) -> dict[str, Any]:
     port = int(getattr(args, "port", 8000))
     model_id = str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID)
     base = f"http://{_connect_host_for_bind(host)}:{port}"
+    profile = str(getattr(args, "profile", None) or "sustained")
     return {
         "integration": "openwebui",
         "server_url": base,
@@ -4320,6 +4332,8 @@ def _quickstart_openwebui_payload(args: Any) -> dict[str, Any]:
         "server_command": (
             f"mtplx quickstart --host {host} --port {port} "
             f"--model {shlex.quote(str(getattr(args, 'model', DEFAULT_RUNTIME_MODEL_DIR)))} "
+            f"--profile {profile} "
+            f"{'--max ' if bool(getattr(args, 'max', False)) else ''}"
             f"{'--no-mtp ' if _generation_mode_from_args(args) == GENERATION_MODE_AR else ''}"
             "--no-stats-footer --open-browser"
         ),
@@ -4346,7 +4360,7 @@ def _quickstart_run_openwebui(args: Any, *, runtime_model: str, inspection: dict
     serve_args = SimpleNamespace(
         model=runtime_model,
         cache_dir=getattr(args, "cache_dir", None),
-        profile=getattr(args, "profile", None) or "performance-cold",
+        profile=getattr(args, "profile", None) or "sustained",
         model_id=getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID,
         unsafe_force_unverified=bool(getattr(args, "unsafe_force_unverified", False)),
         yes=True,
@@ -4940,7 +4954,7 @@ def cmd_integrate_public(args: Any) -> int:
             "docker_api_base_url": _openwebui_docker_api_base_url(int(args.port)),
             "model_id": model_id,
             "server_command": (
-                f"mtplx quickstart --host {args.host} --port {args.port} "
+                f"mtplx quickstart --profile sustained --host {args.host} --port {args.port} "
                 "--no-stats-footer"
             ),
             "docker_command": _shell_join(docker_command),
@@ -4971,7 +4985,7 @@ def cmd_integrate_public(args: Any) -> int:
                 "ANTHROPIC_API_KEY": f"${args.api_key_env}",
             },
             "server_command": (
-                f"mtplx quickstart --host {args.host} --port {args.port} "
+                f"mtplx quickstart --profile sustained --host {args.host} --port {args.port} "
                 "--no-stats-footer"
             ),
             "smoke": {

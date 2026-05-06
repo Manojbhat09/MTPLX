@@ -396,6 +396,28 @@ def _startup_chat_url(args: argparse.Namespace) -> str:
     return _startup_server_url(args) + "/"
 
 
+def _health_runtime_mode_label(
+    profile_name: str | None,
+    generation_mode: str | None,
+    *,
+    fan_boost_active: bool,
+) -> str:
+    mode = "AR" if str(generation_mode or "").lower() == "ar" else "MTP"
+    if profile_name == "sustained" and fan_boost_active:
+        return f"Sustained Max {mode}"
+    if profile_name == "sustained":
+        return f"Sustained {mode}"
+    if profile_name == "performance-cold" and fan_boost_active:
+        return f"Burst {mode}"
+    if profile_name == "performance-cold":
+        return f"Performance-cold {mode}"
+    if profile_name == "stable":
+        return f"Stable {mode}"
+    if profile_name:
+        return f"{profile_name} {mode}"
+    return mode
+
+
 def _open_browser_later(url: str, *, delay_s: float = 1.0) -> None:
     def open_url() -> None:
         try:
@@ -3178,6 +3200,20 @@ def _chat_ui_html(
     .topbar-meta .sep { color: var(--muted-2); margin: 0 8px; }
     .topbar-meta .dim { color: var(--muted-2); }
     .topbar-actions { display: flex; align-items: center; gap: 4px; }
+    .runtime-pill {
+      display: inline-flex; align-items: center;
+      min-height: 24px;
+      padding: 0 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: var(--surface);
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    .runtime-pill[hidden] { display: none; }
     .icon-btn {
       width: 32px; height: 32px;
       border: 0; border-radius: 8px;
@@ -3238,7 +3274,7 @@ def _chat_ui_html(
       display: flex; align-items: center; justify-content: space-between;
       gap: 12px; margin-bottom: 12px;
     }
-    .switch-row label { margin: 0; }
+    .switch-row label { margin: 0; display: inline-flex; align-items: baseline; gap: 6px; }
     .switch {
       position: relative; display: inline-flex; align-items: center;
       width: 40px; height: 24px; flex: 0 0 auto;
@@ -3511,6 +3547,7 @@ def _chat_ui_html(
     @media (max-width: 900px) {
       header.topbar { padding: 0 12px; }
       .topbar-meta { display: none; }
+      .runtime-pill { max-width: 45vw; overflow: hidden; text-overflow: ellipsis; }
       #messages { padding: 18px 14px 6px; }
       .composer-wrap { padding: 10px 14px 14px; }
     }
@@ -3521,6 +3558,7 @@ def _chat_ui_html(
     <span class="brand"><span class="logo">M</span>MTPLX</span>
     <span class="topbar-meta"><span>__MODEL__</span><span class="sep">·</span><span class="dim">__API_NOTE__</span><span class="sep">·</span><span class="dim">__SERVER_URL__/v1</span></span>
     <div class="topbar-actions">
+      <span id="runtime-pill" class="runtime-pill" hidden>Runtime</span>
       <button id="sidebar-toggle" class="icon-btn" title="Toggle settings" aria-label="Toggle settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       </button>
@@ -3634,6 +3672,7 @@ def _chat_ui_html(
     const newChatBtn = document.getElementById("new-chat-btn");
     const sidebarToggleBtn = document.getElementById("sidebar-toggle");
     const sidebarEl = document.getElementById("sidebar");
+    const runtimePillEl = document.getElementById("runtime-pill");
     const history = [];
     let activeAbort = null;
     let pinnedToBottom = true;
@@ -3663,11 +3702,30 @@ def _chat_ui_html(
       if (n >= 1000) return (n / 1000).toFixed(1).replace(/\\.0$/, "") + "k";
       return String(n);
     }
+    function runtimeLabelFromHealth(health) {
+      if (health && health.runtime_mode) return String(health.runtime_mode);
+      const profileName = health && health.profile && health.profile.name ? String(health.profile.name) : "";
+      const mode = String((health && health.generation_mode) || "").toLowerCase() === "ar" ? "AR" : "MTP";
+      const fanBoost = Boolean(health && (health.fan_boost_active || health.fan_mode === "max"));
+      if (profileName === "sustained" && fanBoost) return "Sustained Max " + mode;
+      if (profileName === "sustained") return "Sustained " + mode;
+      if (profileName === "performance-cold" && fanBoost) return "Burst " + mode;
+      if (profileName === "performance-cold") return "Performance-cold " + mode;
+      if (profileName === "stable") return "Stable " + mode;
+      return profileName ? profileName + " " + mode : mode;
+    }
+    function applyRuntimeHealth(health) {
+      if (!runtimePillEl || !health) return;
+      runtimePillEl.textContent = runtimeLabelFromHealth(health);
+      runtimePillEl.hidden = false;
+      runtimePillEl.title = runtimePillEl.textContent;
+    }
     async function discoverServerLimits() {
       try {
         const res = await fetch("/health", {cache: "no-store"});
         if (!res.ok) throw new Error("health " + res.status);
         const health = await res.json();
+        applyRuntimeHealth(health);
         const ctx = parseInt(health.context_window, 10);
         const serverCap = parseInt(health.max_response_tokens, 10);
         if (Number.isFinite(ctx) && ctx > 0) {
@@ -4411,12 +4469,22 @@ def create_app(state: ServerState) -> FastAPI:
             foreground_active = int(state.foreground_count())
         else:
             foreground_active = int(getattr(state, "foreground_active", 0) or 0)
+        fan_mode = str(os.environ.get("MTPLX_FAN_MODE") or "auto").lower()
+        fan_boost_active = fan_mode == "max"
+        runtime_mode = _health_runtime_mode_label(
+            state.profile.name,
+            state.args.generation_mode,
+            fan_boost_active=fan_boost_active,
+        )
         return {
             "ok": True,
             "model": state.model_id,
             "model_path": str(state.runtime.model_path),
             "generation_mode": state.args.generation_mode,
             "default_generation_mode": state.args.generation_mode,
+            "runtime_mode": runtime_mode,
+            "fan_mode": fan_mode,
+            "fan_boost_active": fan_boost_active,
             "available_generation_modes": ["mtp", "ar"],
             "load_mtp": bool(state.args.load_mtp),
             "mtp_enabled": bool(state.runtime.mtp_enabled),
@@ -5944,8 +6012,9 @@ def main(argv: list[str] | None = None) -> None:
         if str(exc).startswith("Patched MLX qmv fork is not active:"):
             _startup_line("error: fast MLX fork is not active")
             _startup_line(str(exc))
-            _startup_line("try: mtplx start --profile safe")
-            _startup_line("try: mtplx start --profile performance-cold")
+            _startup_line("try: mtplx start --profile sustained")
+            _startup_line("try: mtplx start --profile stable")
+            _startup_line("try: mtplx start --profile performance-cold --max")
             _startup_line(
                 "     (public start disables the strict fork assert when the fork is missing)"
             )

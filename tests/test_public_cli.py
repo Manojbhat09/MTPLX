@@ -842,6 +842,7 @@ def test_quickstart_openwebui_dry_run_json(monkeypatch, tmp_path, capsys):
     assert payload["openwebui"]["chat_url"] == "http://127.0.0.1:18012/"
     assert "Open chat UI: http://127.0.0.1:18012/" in payload["openwebui"]["openwebui_steps"]
     assert "OpenAI-compatible API base URL: http://127.0.0.1:18012/v1" in payload["openwebui"]["openwebui_steps"]
+    assert "--profile sustained" in payload["openwebui"]["server_command"]
     assert "--no-stats-footer" in payload["openwebui"]["server_command"]
     assert "--open-browser" in payload["openwebui"]["server_command"]
 
@@ -1302,8 +1303,10 @@ def test_product_helper_commands_parse():
     assert start_openwebui_strict.strict_fast_path is True
     assert quickstart.command == "quickstart"
     assert quickstart.port == 18012
+    assert quickstart.profile == "sustained"
     assert quickstart_alias.command == "quick-start"
     assert quickstart_alias.port == 18013
+    assert quickstart_alias.profile == "sustained"
     assert setup.command == "setup"
     assert setup.dry_run is True
     assert pull_default.command == "pull"
@@ -2014,7 +2017,7 @@ def test_serve_reports_busy_port_before_model_resolution(monkeypatch, capsys):
     assert DISPLAY_VERSION in captured
     assert "error: port 8000 is already in use" in captured
     assert "stop the old mtplx quickstart terminal with Ctrl-C" in captured
-    assert "try: mtplx quickstart --port 8001" in captured
+    assert "try: mtplx quickstart --profile stable --port 8001" in captured
 
 
 def test_quickstart_openwebui_reuses_existing_server(monkeypatch, capsys):

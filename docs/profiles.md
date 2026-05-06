@@ -2,9 +2,12 @@
 
 | Profile | Purpose |
 |---|---|
-| `performance-cold` | Medium mode: native-MTP speed path, about 2.2x burst over the same model with MTP off, not sustained without fan control. |
+| `sustained` | Default `mtplx start` mode: native-MTP long-context path with chunked prefill, final-token logits, request-sized paged KV, and the normal Apple fan controller. |
+| `sustained` + `--max` | Sustained Max: the same long-context path with ThermalForge/TG Pro fans pinned while MTPLX runs. |
+| `performance-cold` + `--max` | Burst: old max-fan headline lane, not recommended beyond 8K context. |
+| `performance-cold` | Legacy burst path without fan boost. Kept for explicit flags and compatibility; not shown in first-run onboarding. |
 | `stable` | Hidden conservative alias for the exact/staged long-reply path and compatibility fallback. |
 | `exact` | QA and release exactness checks. |
-| `max-diagnostic` | Max-style fan-controlled diagnostics. Product Max is `performance-cold` plus explicit `--max`. |
+| `max-diagnostic` | Fan-control diagnostics only. Product modes are Sustained, Sustained Max, and Burst. |
 
 `--max` is separate from profiles. It is opt-in and must restore fan state on exit when supported.

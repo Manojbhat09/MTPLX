@@ -1166,8 +1166,8 @@ def run_serve_onboarding_screens(
 def ensure_thermal_control_installed() -> bool:
     """Detect a fan controller; offer to install ThermalForge if absent.
 
-    Returns ``True`` when fan control is available after this call (so Max
-    mode is honest), ``False`` otherwise. The caller is expected to drop
+    Returns ``True`` when fan control is available after this call (so a
+    fan-backed mode is honest), ``False`` otherwise. The caller is expected to drop
     ``args.max`` when this returns ``False``.
 
     The chooser screen mirrors the rest of the onboarding (numbered options,

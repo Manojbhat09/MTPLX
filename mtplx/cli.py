@@ -174,7 +174,8 @@ def _format_public_help() -> str:
 {_heading("Examples")}
   mtplx start                       Interactive setup, then chat
   mtplx start --fresh               Re-run the onboarding (new model/mode/surface)
-  mtplx quickstart --max --port 8000  Server with ThermalForge fan boost
+  mtplx start --max --port 8000       Sustained Max browser chat with fan boost
+  mtplx quickstart --profile sustained --port 8000  API server only, no chat
 
   {footer}
 """
@@ -294,7 +295,7 @@ def _format_verbose_help() -> str:
   mtplx start                       Open the local chat in your browser
   mtplx start cli                   Chat in this terminal instead
   mtplx start --download            Pull the verified model from Hugging Face
-  mtplx quickstart --port 8000      Run the OpenAI/Anthropic server only
+  mtplx quickstart --profile sustained --port 8000  Run the API server only
   mtplx connect openwebui           Print Open WebUI integration settings
   mtplx ask "Write a tiny FastAPI app"
   mtplx inspect Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed
@@ -792,7 +793,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             "config_path": str(config_path),
             "next_steps": [
                 "mtplx status",
-                "mtplx quickstart --port 8000",
+                "mtplx quickstart --profile sustained --port 8000",
                 "mtplx connect openwebui",
             ],
         }
@@ -802,7 +803,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             print("MTPLX setup")
             print(f"config already exists: {config_path}")
             print("next: mtplx status")
-            print("next: mtplx quickstart --port 8000")
+            print("next: mtplx quickstart --profile sustained --port 8000")
             print("Use --force to rewrite the config.")
         return 0
     args.write = True
@@ -811,7 +812,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
 
 def _cmd_connect(args: argparse.Namespace) -> int:
     if not args.integration:
-        server_command = f"mtplx quickstart --host {args.host} --port {args.port}"
+        server_command = f"mtplx quickstart --profile sustained --host {args.host} --port {args.port}"
         payload = {
             "action": "connect",
             "integrations": [
@@ -1681,7 +1682,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Download a Hugging Face model before starting if it is not cached",
     )
-    quickstart_server_p.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
+    quickstart_server_p.add_argument(
+        "--profile",
+        choices=PROFILE_CHOICES,
+        default="sustained",
+        help="Runtime profile. Direct server quickstart defaults to Sustained; use --profile performance-cold --max for Burst.",
+    )
     quickstart_server_p.add_argument("--unsafe-force-unverified", action="store_true")
     quickstart_server_p.add_argument("--yes", action="store_true", help="Confirm unsafe non-interactive actions")
     quickstart_server_p.add_argument("--host", default="127.0.0.1")
@@ -1713,7 +1719,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="stats_footer",
         help="Keep returned text clean for UI clients. This is the default for quickstart.",
     )
-    quickstart_server_p.add_argument("--max", action="store_true", help="Opt into ThermalForge/TG Pro performance fan profile for the server lifetime")
+    quickstart_server_p.add_argument(
+        "--max",
+        action="store_true",
+        help="Opt into ThermalForge/TG Pro fan control for the server lifetime; with the quickstart default this is Sustained Max",
+    )
     quickstart_server_p.add_argument("--open-browser", action="store_true", help="Open the local browser chat after the server starts")
     quickstart_server_p.add_argument(
         "--max-idle-min",
@@ -2009,7 +2019,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         choices=(*PROFILE_CHOICES, "native-mtp-60"),
         help=(
-            "Runtime profile for product benchmark actions. Defaults to safe; "
+            "Runtime profile for product benchmark actions. Defaults to Sustained for context runs; "
             "native-mtp-60 is a legacy alias for performance-cold."
         ),
     )

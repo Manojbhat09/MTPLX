@@ -15,6 +15,33 @@ from mtplx.server import openai
 from mtplx.server.openai import _RateLimiter, create_app, parse_args
 
 
+def test_runtime_mode_label_distinguishes_sustained_max_and_burst():
+    assert (
+        openai._health_runtime_mode_label(
+            "sustained", "mtp", fan_boost_active=False
+        )
+        == "Sustained MTP"
+    )
+    assert (
+        openai._health_runtime_mode_label(
+            "sustained", "mtp", fan_boost_active=True
+        )
+        == "Sustained Max MTP"
+    )
+    assert (
+        openai._health_runtime_mode_label(
+            "performance-cold", "mtp", fan_boost_active=True
+        )
+        == "Burst MTP"
+    )
+    assert (
+        openai._health_runtime_mode_label(
+            "sustained", "ar", fan_boost_active=False
+        )
+        == "Sustained AR"
+    )
+
+
 class FakeExecutor:
     def submit(self, fn, *args, **kwargs):
         future: Future = Future()

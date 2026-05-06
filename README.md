@@ -85,10 +85,10 @@ mtplx start --fresh                         # re-run the wizard from scratch
 mtplx start cli                             # terminal chat directly
 mtplx start cli --no-mtp                    # target-only AR generation
 mtplx start --profile sustained             # long-context native-MTP mode
-mtplx start --max                           # browser chat with fan boost
+mtplx start --max                           # Sustained Max browser chat with fan boost
 mtplx start --model /path/to/model          # use a specific local or HF model
 mtplx pull Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed
-mtplx quickstart --port 8000                # API server only, no chat
+mtplx quickstart --profile sustained --port 8000  # API server only, no chat
 ```
 
 OpenAI-compatible smoke test:
