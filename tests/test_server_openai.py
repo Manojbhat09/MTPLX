@@ -15,6 +15,33 @@ from mtplx.server import openai
 from mtplx.server.openai import _RateLimiter, create_app, parse_args
 
 
+def test_runtime_mode_label_distinguishes_sustained_max_and_burst():
+    assert (
+        openai._health_runtime_mode_label(
+            "sustained", "mtp", fan_boost_active=False
+        )
+        == "Sustained MTP"
+    )
+    assert (
+        openai._health_runtime_mode_label(
+            "sustained", "mtp", fan_boost_active=True
+        )
+        == "Sustained Max MTP"
+    )
+    assert (
+        openai._health_runtime_mode_label(
+            "performance-cold", "mtp", fan_boost_active=True
+        )
+        == "Burst MTP"
+    )
+    assert (
+        openai._health_runtime_mode_label(
+            "sustained", "ar", fan_boost_active=False
+        )
+        == "Sustained AR"
+    )
+
+
 class FakeExecutor:
     def submit(self, fn, *args, **kwargs):
         future: Future = Future()
@@ -324,6 +351,25 @@ def test_chat_generation_mode_request_override_routes_ar(monkeypatch):
     assert captured["depth"] == 0
     assert response.json()["mtplx_stats"]["generation_mode"] == "ar"
     assert response.json()["mtplx_stats"]["mtp_depth"] == 0
+
+
+def test_generation_truth_stats_distinguish_stock_ar_from_target_ar():
+    target_state = _fake_state()
+    target_state.args.load_mtp = True
+    target_state.runtime.mtp_enabled = True
+    target_state.draft_lm_head = {"draft_only": {"bits": 4}}
+
+    stock_state = _fake_state()
+    stock_state.args.load_mtp = False
+    stock_state.runtime.mtp_enabled = False
+
+    target = openai._generation_truth_stats(target_state, "ar")
+    assert target["benchmark_mode"] == "mtplx_mtp_loaded_target_ar"
+    assert target["draft_head_installed"] is True
+    stock = openai._generation_truth_stats(stock_state, "ar")
+    assert stock["benchmark_mode"] == "mtplx_stock_ar_unloaded"
+    assert stock["load_mtp"] is False
+    assert stock["runtime_mtp_enabled"] is False
 
 
 def test_chat_generation_mode_request_override_routes_mtp_depth(monkeypatch):
@@ -915,7 +961,7 @@ def test_server_state_emits_startup_progress(monkeypatch, capsys):
     state = openai.ServerState(args)
 
     captured = capsys.readouterr().out
-    assert "[4/6] Preparing Medium MTP runtime" in captured
+    assert "[4/6] Preparing Burst MTP runtime" in captured
     assert "[5/6] Loading model weights: models/example" in captured
     assert "This is the long step" in captured
     assert "Model load in progress (this may take a minute)" in captured

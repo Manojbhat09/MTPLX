@@ -340,11 +340,17 @@ def _normalize_generation_mode(value: Any) -> str:
 
 
 def _generation_mode_from_args(args: Any) -> str:
+    if bool(getattr(args, "stock_ar", False)):
+        return GENERATION_MODE_AR
+    explicit = getattr(args, "generation_mode", None)
+    if explicit is not None:
+        return _normalize_generation_mode(explicit)
     return GENERATION_MODE_AR if bool(getattr(args, "no_mtp", False)) else GENERATION_MODE_MTP
 
 
 def _set_generation_mode_on_args(args: Any, mode: str) -> None:
     normalized = _normalize_generation_mode(mode)
+    setattr(args, "generation_mode", normalized)
     setattr(args, "no_mtp", normalized == GENERATION_MODE_AR)
 
 
@@ -902,7 +908,7 @@ def _print_inspect_human(inspection: dict[str, Any]) -> None:
 
 def cmd_bench_public(args: Any) -> int:
     action = args.bench_action
-    if action == "run":
+    if action in {"run", "context"}:
         return _cmd_bench_run(args)
     if action == "nightly":
         return _cmd_bench_nightly(args)
@@ -1034,7 +1040,7 @@ def _cmd_bench_run(args: Any) -> int:
         _print(
             {
                 "dry_run": True,
-                "action": "bench run",
+                "action": f"bench {getattr(args, 'bench_action', None) or 'run'}",
                 "model": model,
                 "suite": suite,
                 "prompt_suite": prompt_suite,
@@ -1185,6 +1191,13 @@ def _direct_http_bench_command(
         test_name = "long_code_uncapped"
     if test_name not in {"flappy", "python_modules_long", "long_code_uncapped", "long_code"}:
         test_name = "flappy"
+    generation_mode = _generation_mode_from_args(args)
+    load_mtp_flag = "--no-load-mtp" if bool(getattr(args, "stock_ar", False)) else "--load-mtp"
+    ablation_profile = (
+        "sustained"
+        if getattr(args, "profile", None) == "sustained"
+        else LONG_RESPONSE_DIRECT_PROFILE
+    )
     command = [
         sys.executable,
         str(repo_root() / "scripts" / "run_context_degradation_diagnostics.py"),
@@ -1202,8 +1215,8 @@ def _direct_http_bench_command(
         "--model-id",
         Path(model).name,
         "--generation-mode",
-        "mtp",
-        "--load-mtp",
+        generation_mode,
+        load_mtp_flag,
         "--depth",
         "3",
         "--verify-strategy",
@@ -1211,7 +1224,7 @@ def _direct_http_bench_command(
         "--verify-core",
         "linear-gdn-from-conv-tape",
         "--profiles",
-        LONG_RESPONSE_DIRECT_PROFILE,
+        ablation_profile,
         "--tests",
         test_name,
         "--temperature",
@@ -2956,10 +2969,23 @@ def _print_serve_start_line(text: str = "") -> None:
 
 _PROFILE_SHORT_SUMMARIES = {
     "safe": "Stable: exact/staged long-reply path, no fan control",
-    "performance-cold": "Medium: native-MTP speed path, ~2.2x burst (not sustained)",
+    "performance-cold": "Burst: max-fan short-context lane, not recommended beyond 8K context",
+    "sustained": "Sustained: long-context native-MTP path with bounded memory",
     "exact": "QA-only exact paged verifier",
-    "max-diagnostic": "Max: Medium path with fan control",
+    "max-diagnostic": "Diagnostic fan-control profile",
 }
+
+
+def _runtime_mode_display(profile_name: str, *, max_mode: bool = False) -> str:
+    if profile_name == "sustained" and max_mode:
+        return "Sustained Max MTP"
+    if profile_name == "sustained":
+        return "Sustained MTP"
+    if profile_name == "performance-cold" and max_mode:
+        return "Burst MTP"
+    if profile_name == "performance-cold":
+        return "Performance-cold MTP"
+    return str(profile_name)
 
 
 def _print_serve_start_banner(args: Any) -> None:
@@ -2970,7 +2996,7 @@ def _print_serve_start_banner(args: Any) -> None:
     port = int(getattr(args, "port", 8000))
     profile_name = getattr(args, "profile", None) or DEFAULT_PROFILE_NAME
     warmup_tokens = int(getattr(args, "warmup_tokens", 16) or 0)
-    mode_label = "Medium MTP" if profile_name == "performance-cold" else profile_name
+    mode_label = _runtime_mode_display(profile_name, max_mode=bool(getattr(args, "max", False)))
     model_label = getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
     runtime_model = getattr(args, "model", DEFAULT_RUNTIME_MODEL_DIR)
     api_url = f"{_server_url(host, port)}/v1"
@@ -3097,7 +3123,15 @@ def cmd_serve_public(args: Any) -> int:
         _print_serve_start_line(f"try: mtplx status")
         server_command = _server_command_name(args)
         _print_serve_start_line(f"try: stop the old mtplx {server_command} terminal with Ctrl-C")
-        _print_serve_start_line(f"try: mtplx {server_command} --port {int(args.port) + 1}")
+        profile_arg = (
+            f" --profile {getattr(args, 'profile')}"
+            if getattr(args, "profile", None)
+            else ""
+        )
+        max_arg = " --max" if bool(getattr(args, "max", False)) else ""
+        _print_serve_start_line(
+            f"try: mtplx {server_command}{profile_arg}{max_arg} --port {int(args.port) + 1}"
+        )
         return 2
     profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
     cache_dir = getattr(args, "cache_dir", None)
@@ -3183,8 +3217,9 @@ def cmd_serve_public(args: Any) -> int:
                 observed = fork_status.get("path") or fork_status.get("error") or "unknown"
                 _print_serve_start_line(f"      Found: {observed}")
                 server_command = _server_command_name(args)
-                _print_serve_start_line(f"try: mtplx {server_command} --profile safe")
-                _print_serve_start_line(f"try: mtplx {server_command} --profile performance-cold")
+                _print_serve_start_line(f"try: mtplx {server_command} --profile sustained")
+                _print_serve_start_line(f"try: mtplx {server_command} --profile stable")
+                _print_serve_start_line(f"try: mtplx {server_command} --profile performance-cold --max")
                 _print_serve_start_line("     (without --strict-fast-path, MTPLX starts in stock-MLX compatibility)")
                 return 2
             relax_mlx_fork_assert = True
@@ -3237,6 +3272,8 @@ def cmd_serve_public(args: Any) -> int:
         )
     if bool(getattr(args, "open_browser", False)):
         cmd.append("--open-browser")
+    if bool(getattr(args, "stock_ar", False)):
+        cmd.append("--stock-ar")
     if relax_mlx_fork_assert:
         cmd.append("--no-strict-mlx-fork-assert")
     if api_key:
@@ -3274,13 +3311,15 @@ def cmd_serve_public(args: Any) -> int:
             actionable = verified.get("actionable")
             if actionable:
                 _emit(f"[max]   action: {actionable}")
-            _emit("[max] continuing the server WITHOUT fan boost (Max behaves like Medium).")
+            _emit("[max] continuing the server WITHOUT fan boost.")
             _emit("")
             args.max = False  # don't lie to the watchdog about fan state
         # Only spin up the idle watchdog when verification confirmed fans
         # are actually pinned. If args.max was just disabled above, fall
         # through to the no-fan-control path.
         if getattr(args, "max", False):
+            child_env = os.environ.copy()
+            child_env["MTPLX_FAN_MODE"] = "max"
             idle_minutes = int(getattr(args, "max_idle_min", 15))
             watchdog = _MaxIdleWatchdog(
                 host=str(getattr(args, "host", "127.0.0.1")),
@@ -3289,7 +3328,7 @@ def cmd_serve_public(args: Any) -> int:
             )
             watchdog.start()
             try:
-                proc = subprocess.run(cmd, env=os.environ.copy(), cwd=repo_root(), check=False)
+                proc = subprocess.run(cmd, env=child_env, cwd=repo_root(), check=False)
                 return int(proc.returncode)
             finally:
                 watchdog.stop()
@@ -4281,6 +4320,7 @@ def _quickstart_openwebui_payload(args: Any) -> dict[str, Any]:
     port = int(getattr(args, "port", 8000))
     model_id = str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID)
     base = f"http://{_connect_host_for_bind(host)}:{port}"
+    profile = str(getattr(args, "profile", None) or "sustained")
     return {
         "integration": "openwebui",
         "server_url": base,
@@ -4292,6 +4332,8 @@ def _quickstart_openwebui_payload(args: Any) -> dict[str, Any]:
         "server_command": (
             f"mtplx quickstart --host {host} --port {port} "
             f"--model {shlex.quote(str(getattr(args, 'model', DEFAULT_RUNTIME_MODEL_DIR)))} "
+            f"--profile {profile} "
+            f"{'--max ' if bool(getattr(args, 'max', False)) else ''}"
             f"{'--no-mtp ' if _generation_mode_from_args(args) == GENERATION_MODE_AR else ''}"
             "--no-stats-footer --open-browser"
         ),
@@ -4318,7 +4360,7 @@ def _quickstart_run_openwebui(args: Any, *, runtime_model: str, inspection: dict
     serve_args = SimpleNamespace(
         model=runtime_model,
         cache_dir=getattr(args, "cache_dir", None),
-        profile=getattr(args, "profile", None) or "performance-cold",
+        profile=getattr(args, "profile", None) or "sustained",
         model_id=getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID,
         unsafe_force_unverified=bool(getattr(args, "unsafe_force_unverified", False)),
         yes=True,
@@ -4395,11 +4437,7 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
                 "AR target-only"
                 if generation_mode == GENERATION_MODE_AR
                 else
-                "Max MTP"
-                if getattr(args, "max", False)
-                else "Medium MTP"
-                if profile.name == "performance-cold"
-                else profile.name
+                _runtime_mode_display(profile.name, max_mode=bool(getattr(args, "max", False)))
             ),
             extra_lines=[
                 ("Sampler", (
@@ -4446,7 +4484,7 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
         if generation_mode == GENERATION_MODE_AR:
             _quickstart_line("Draft-only LM head loaded for /mtp on; current AR mode bypasses it.")
         else:
-            _quickstart_line("Medium/Max speed path: draft-only LM head is active.")
+            _quickstart_line("Native-MTP speed path: draft-only LM head is active.")
     if draft_sampler is not None and generation_mode == GENERATION_MODE_MTP:
         _quickstart_line(
             "Draft sampler: "
@@ -4641,9 +4679,9 @@ def cmd_quickstart_public(args: Any) -> int:
         if choice.get("max"):
             args.max = True
         else:
-            # If the onboarding declined Max (e.g. ThermalForge install was
-            # refused or failed) make sure --max from a stale config or shell
-            # alias does not silently re-enable it.
+            # If onboarding declined a fan-backed mode (e.g. ThermalForge
+            # install was refused or failed), make sure --max from a stale
+            # config or shell alias does not silently re-enable it.
             args.max = False
         chosen_target = choice.get("target")
         if chosen_target:
@@ -4708,7 +4746,10 @@ def cmd_quickstart_public(args: Any) -> int:
             _quickstart_line(f"profile: {payload['profile']}")
             _quickstart_line(
                 "mode: "
-                + ("Max (Medium path + fan boost)" if payload["max"] else "Medium")
+                + _runtime_mode_display(
+                    str(payload["profile"]),
+                    max_mode=bool(payload["max"]),
+                )
             )
             _quickstart_line(f"generation: {_generation_mode_label(payload['generation_mode'])}")
             _quickstart_line(f"download if missing: {str(download).lower()}")
@@ -4913,7 +4954,7 @@ def cmd_integrate_public(args: Any) -> int:
             "docker_api_base_url": _openwebui_docker_api_base_url(int(args.port)),
             "model_id": model_id,
             "server_command": (
-                f"mtplx quickstart --host {args.host} --port {args.port} "
+                f"mtplx quickstart --profile sustained --host {args.host} --port {args.port} "
                 "--no-stats-footer"
             ),
             "docker_command": _shell_join(docker_command),
@@ -4944,7 +4985,7 @@ def cmd_integrate_public(args: Any) -> int:
                 "ANTHROPIC_API_KEY": f"${args.api_key_env}",
             },
             "server_command": (
-                f"mtplx quickstart --host {args.host} --port {args.port} "
+                f"mtplx quickstart --profile sustained --host {args.host} --port {args.port} "
                 "--no-stats-footer"
             ),
             "smoke": {

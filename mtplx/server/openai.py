@@ -23,7 +23,7 @@ import time
 import uuid
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from pathlib import Path
@@ -43,6 +43,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, ConfigDict, Field
 
 from mtplx.adaptive import AdaptiveDepthPolicy, ExpectedValueDepthPolicy
+from mtplx.attention_context import attention_phase
 from mtplx.cache_state import snapshot_cache
 from mtplx.mtp_patch import MTPContract
 from mtplx.sampling import SamplerConfig
@@ -395,6 +396,28 @@ def _startup_chat_url(args: argparse.Namespace) -> str:
     return _startup_server_url(args) + "/"
 
 
+def _health_runtime_mode_label(
+    profile_name: str | None,
+    generation_mode: str | None,
+    *,
+    fan_boost_active: bool,
+) -> str:
+    mode = "AR" if str(generation_mode or "").lower() == "ar" else "MTP"
+    if profile_name == "sustained" and fan_boost_active:
+        return f"Sustained Max {mode}"
+    if profile_name == "sustained":
+        return f"Sustained {mode}"
+    if profile_name == "performance-cold" and fan_boost_active:
+        return f"Burst {mode}"
+    if profile_name == "performance-cold":
+        return f"Performance-cold {mode}"
+    if profile_name == "stable":
+        return f"Stable {mode}"
+    if profile_name:
+        return f"{profile_name} {mode}"
+    return mode
+
+
 def _open_browser_later(url: str, *, delay_s: float = 1.0) -> None:
     def open_url() -> None:
         try:
@@ -458,11 +481,10 @@ class ServerState:
         self.foreground_active = 0
         self.rate_limiter = _RateLimiter(args.rate_limit)
         self.profile = get_profile(args.profile)
-        runtime_label = (
-            "Medium MTP"
-            if self.profile.name == "performance-cold"
-            else self.profile.name
-        )
+        runtime_label = {
+            "performance-cold": "Burst MTP",
+            "sustained": "Sustained MTP",
+        }.get(self.profile.name, self.profile.name)
         _startup_line(f"[4/6] Preparing {runtime_label} runtime")
         if args.generation_mode == "mtp" and not args.load_mtp:
             raise ValueError("--generation-mode mtp requires --load-mtp")
@@ -1606,8 +1628,93 @@ def _stream_heartbeat_payload(
     }
 
 
+@contextmanager
+def _temporary_env(updates: dict[str, str | None]):
+    previous = {key: os.environ.get(key) for key in updates}
+    try:
+        for key, value in updates.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = str(value)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _dynamic_paged_kv_env(
+    *,
+    prompt_tokens: int,
+    max_new_tokens: int,
+    mtp_depth: int,
+) -> dict[str, str]:
+    needed = max(0, int(prompt_tokens)) + max(0, int(max_new_tokens)) + max(0, int(mtp_depth))
+    return {"MTPLX_DYNAMIC_PAGED_KV_TOKENS": str(needed)}
+
+
+def _generation_truth_stats(state: "ServerState", effective_mode: str) -> dict[str, Any]:
+    load_mtp = bool(getattr(state.args, "load_mtp", True))
+    runtime_mtp_enabled = bool(getattr(state.runtime, "mtp_enabled", False))
+    draft_head = getattr(state, "draft_lm_head", None)
+    draft_head_installed = (
+        bool(draft_head.get("installed", "draft_only" in draft_head))
+        if isinstance(draft_head, dict)
+        else bool(draft_head)
+    )
+    if effective_mode == "mtp" and load_mtp and runtime_mtp_enabled:
+        benchmark_mode = "mtplx_mtp_loaded_mtp_decode"
+    elif effective_mode == "ar" and load_mtp and runtime_mtp_enabled:
+        benchmark_mode = "mtplx_mtp_loaded_target_ar"
+    elif effective_mode == "ar" and not load_mtp and not runtime_mtp_enabled:
+        benchmark_mode = "mtplx_stock_ar_unloaded"
+    else:
+        benchmark_mode = "mtplx_unclassified"
+    return {
+        "benchmark_mode": benchmark_mode,
+        "load_mtp": load_mtp,
+        "runtime_mtp_enabled": runtime_mtp_enabled,
+        "draft_head_installed": draft_head_installed,
+        "profile": getattr(getattr(state, "profile", None), "name", None),
+    }
+
+
 PUBLIC_MTPLX_STATS_KEYS = (
     "mode",
+    "profile",
+    "benchmark_mode",
+    "load_mtp",
+    "runtime_mtp_enabled",
+    "draft_head_installed",
+    "ar_return_hidden",
+    "forward_ar_hidden_calls",
+    "forward_ar_plain_calls",
+    "mtp_forward_calls",
+    "make_mtp_cache_calls",
+    "update_mtp_cache_calls",
+    "mtp_history_append_calls",
+    "full_logits_tokens_emitted",
+    "final_logits_tokens_emitted",
+    "logits_tokens_emitted",
+    "prefill_chunk_size",
+    "prefill_chunks",
+    "paged_kv_capacity_tokens",
+    "paged_kv_num_blocks",
+    "paged_active_array_calls",
+    "attention_dense_fallback_calls",
+    "prefill_dense_fallback_calls",
+    "decode_dense_fallback_calls",
+    "ar_dense_fallback_calls",
+    "postcommit_dense_fallback_calls",
+    "paged_attention_bailouts_by_phase_reason",
+    "paged_attention_large_q_path",
+    "large_q_split_sdpa_fallback_calls",
+    "partitioned_paged_calls",
+    "sessionbank_snapshot_bytes",
+    "sessionbank_skipped_oversized_snapshot",
     "generation_mode",
     "generated_tokens",
     "prompt_tokens",
@@ -1908,12 +2015,13 @@ def _store_retokenized_history_snapshot(
     state.begin_foreground()
     state.lock.acquire()
     try:
-        prompt_state = restore_or_prefill_prompt_state(
-            state.runtime,
-            history_ids,
-            mtp_hidden_variant="post_norm",
-            mtp_history_policy="committed",
-        )
+        with attention_phase("postcommit"):
+            prompt_state = restore_or_prefill_prompt_state(
+                state.runtime,
+                history_ids,
+                mtp_hidden_variant="post_norm",
+                mtp_history_policy="committed",
+            )
         mtp_snapshot = (
             snapshot_cache(prompt_state.committed_mtp_cache)
             if prompt_state.committed_mtp_cache is not None
@@ -1939,6 +2047,13 @@ def _store_retokenized_history_snapshot(
     finally:
         state.lock.release()
         state.end_foreground()
+    if entry is None:
+        return {
+            "stored": False,
+            "mode": "retokenized_history",
+            "reason": "sessionbank_snapshot_skipped",
+            "elapsed_s": time.perf_counter() - started,
+        }
     return {
         "stored": True,
         "mode": "retokenized_history",
@@ -2133,6 +2248,13 @@ def _store_generation_final_history_snapshot(
         )
     finally:
         state.lock.release()
+    if entry is None:
+        return {
+            "stored": False,
+            "mode": compatibility["mode"],
+            "reason": "sessionbank_snapshot_skipped",
+            "elapsed_s": time.perf_counter() - started,
+        }
     return {
         "stored": True,
         "mode": compatibility["mode"],
@@ -2365,73 +2487,79 @@ def _run_generation(
             state.lock.acquire()
         lock_wait_time_s += time.perf_counter() - lock_started
         try:
-            if effective_mode == "ar":
-                out = generate_ar(
-                    state.runtime,
-                    prompt_ids,
-                    max_tokens=response_max,
-                    sampler=sampler,
-                    seed=generation_seed,
-                    token_callback=record_tokens,
-                    trace_label=trace_label,
-                    trace_metadata=trace_metadata,
-                )
-            else:
-                adaptive_policy = _make_adaptive_policy(
-                    state.args, max_depth=effective_depth
-                )
-                out = generate_mtpk(
-                    state.runtime,
-                    prompt_ids,
-                    max_tokens=response_max,
-                    sampler=sampler,
-                    draft_sampler=state.draft_sampler,
-                    speculative_depth=effective_depth,
-                    seed=generation_seed,
-                    mtp_hidden_variant="post_norm",
-                    mtp_cache_policy="persistent",
-                    mtp_history_policy="committed",
-                    verify_strategy=state.args.verify_strategy,
-                    verify_core=state.args.verify_core,
-                    token_callback=record_tokens,
-                    session_bank=session_bank,
-                    session_restore_mode=_session_bank_restore_mode(
-                        session_restore_mode
-                    ),
-                    session_template_hash=session_template_hash,
-                    session_draft_head_identity=session_draft_head_identity,
-                    session_policy_fingerprint=session_policy_fingerprint,
-                    capture_final_state=session_bank is not None,
-                    trace_label=trace_label,
-                    trace_metadata=trace_metadata,
-                    adaptive_policy=adaptive_policy,
-                    online_correction_cache=bool(state.args.online_correction_cache),
-                    online_correction_cache_min_depth=int(
-                        state.args.online_correction_cache_min_depth
-                    ),
-                    online_correction_cache_key=str(
-                        state.args.online_correction_cache_key
-                    ),
-                    prompt_correction_cache=bool(state.args.prompt_correction_cache),
-                    prompt_correction_cache_min_depth=int(
-                        state.args.prompt_correction_cache_min_depth
-                    ),
-                    online_hidden_corrector_alpha=float(
-                        state.args.online_hidden_corrector_alpha
-                    ),
-                    online_hidden_corrector_decay=float(
-                        state.args.online_hidden_corrector_decay
-                    ),
-                    online_hidden_corrector_warmup=int(
-                        state.args.online_hidden_corrector_warmup
-                    ),
-                    online_hidden_corrector_max_feed_depth=(
-                        state.args.online_hidden_corrector_max_feed_depth
-                    ),
-                    online_hidden_corrector_key=str(
-                        state.args.online_hidden_corrector_key
-                    ),
-                )
+            dynamic_kv_env = _dynamic_paged_kv_env(
+                prompt_tokens=len(prompt_ids),
+                max_new_tokens=response_max,
+                mtp_depth=effective_depth,
+            )
+            with _temporary_env(dynamic_kv_env):
+                if effective_mode == "ar":
+                    out = generate_ar(
+                        state.runtime,
+                        prompt_ids,
+                        max_tokens=response_max,
+                        sampler=sampler,
+                        seed=generation_seed,
+                        token_callback=record_tokens,
+                        trace_label=trace_label,
+                        trace_metadata=trace_metadata,
+                    )
+                else:
+                    adaptive_policy = _make_adaptive_policy(
+                        state.args, max_depth=effective_depth
+                    )
+                    out = generate_mtpk(
+                        state.runtime,
+                        prompt_ids,
+                        max_tokens=response_max,
+                        sampler=sampler,
+                        draft_sampler=state.draft_sampler,
+                        speculative_depth=effective_depth,
+                        seed=generation_seed,
+                        mtp_hidden_variant="post_norm",
+                        mtp_cache_policy="persistent",
+                        mtp_history_policy="committed",
+                        verify_strategy=state.args.verify_strategy,
+                        verify_core=state.args.verify_core,
+                        token_callback=record_tokens,
+                        session_bank=session_bank,
+                        session_restore_mode=_session_bank_restore_mode(
+                            session_restore_mode
+                        ),
+                        session_template_hash=session_template_hash,
+                        session_draft_head_identity=session_draft_head_identity,
+                        session_policy_fingerprint=session_policy_fingerprint,
+                        capture_final_state=session_bank is not None,
+                        trace_label=trace_label,
+                        trace_metadata=trace_metadata,
+                        adaptive_policy=adaptive_policy,
+                        online_correction_cache=bool(state.args.online_correction_cache),
+                        online_correction_cache_min_depth=int(
+                            state.args.online_correction_cache_min_depth
+                        ),
+                        online_correction_cache_key=str(
+                            state.args.online_correction_cache_key
+                        ),
+                        prompt_correction_cache=bool(state.args.prompt_correction_cache),
+                        prompt_correction_cache_min_depth=int(
+                            state.args.prompt_correction_cache_min_depth
+                        ),
+                        online_hidden_corrector_alpha=float(
+                            state.args.online_hidden_corrector_alpha
+                        ),
+                        online_hidden_corrector_decay=float(
+                            state.args.online_hidden_corrector_decay
+                        ),
+                        online_hidden_corrector_warmup=int(
+                            state.args.online_hidden_corrector_warmup
+                        ),
+                        online_hidden_corrector_max_feed_depth=(
+                            state.args.online_hidden_corrector_max_feed_depth
+                        ),
+                        online_hidden_corrector_key=str(
+                            state.args.online_hidden_corrector_key
+                        ),
+                    )
         finally:
             state.lock.release()
             if not background_request:
@@ -2488,6 +2616,12 @@ def _run_generation(
                 if mtp_snapshot is not None
                 else None,
             )
+            stats["sessionbank_snapshot_bytes"] = int(
+                getattr(session_bank, "last_put_nbytes", 0) or 0
+            )
+            stats["sessionbank_skipped_oversized_snapshot"] = bool(
+                getattr(session_bank, "last_put_skipped_oversized_snapshot", False)
+            )
         envelope = _metrics_envelope(
             stats=stats,
             prompt_tokens=len(prompt_ids),
@@ -2514,6 +2648,7 @@ def _run_generation(
             envelope.update(request_observability)
         stats["generation_mode"] = effective_mode
         stats.update(envelope)
+        stats.update(_generation_truth_stats(state, effective_mode))
         if effective_mode == "ar":
             stats["mtp_depth"] = 0
             stats["verify_calls"] = 0
@@ -3065,6 +3200,20 @@ def _chat_ui_html(
     .topbar-meta .sep { color: var(--muted-2); margin: 0 8px; }
     .topbar-meta .dim { color: var(--muted-2); }
     .topbar-actions { display: flex; align-items: center; gap: 4px; }
+    .runtime-pill {
+      display: inline-flex; align-items: center;
+      min-height: 24px;
+      padding: 0 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: var(--surface);
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    .runtime-pill[hidden] { display: none; }
     .icon-btn {
       width: 32px; height: 32px;
       border: 0; border-radius: 8px;
@@ -3125,7 +3274,7 @@ def _chat_ui_html(
       display: flex; align-items: center; justify-content: space-between;
       gap: 12px; margin-bottom: 12px;
     }
-    .switch-row label { margin: 0; }
+    .switch-row label { margin: 0; display: inline-flex; align-items: baseline; gap: 6px; }
     .switch {
       position: relative; display: inline-flex; align-items: center;
       width: 40px; height: 24px; flex: 0 0 auto;
@@ -3398,6 +3547,7 @@ def _chat_ui_html(
     @media (max-width: 900px) {
       header.topbar { padding: 0 12px; }
       .topbar-meta { display: none; }
+      .runtime-pill { max-width: 45vw; overflow: hidden; text-overflow: ellipsis; }
       #messages { padding: 18px 14px 6px; }
       .composer-wrap { padding: 10px 14px 14px; }
     }
@@ -3408,6 +3558,7 @@ def _chat_ui_html(
     <span class="brand"><span class="logo">M</span>MTPLX</span>
     <span class="topbar-meta"><span>__MODEL__</span><span class="sep">·</span><span class="dim">__API_NOTE__</span><span class="sep">·</span><span class="dim">__SERVER_URL__/v1</span></span>
     <div class="topbar-actions">
+      <span id="runtime-pill" class="runtime-pill" hidden>Runtime</span>
       <button id="sidebar-toggle" class="icon-btn" title="Toggle settings" aria-label="Toggle settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       </button>
@@ -3521,6 +3672,7 @@ def _chat_ui_html(
     const newChatBtn = document.getElementById("new-chat-btn");
     const sidebarToggleBtn = document.getElementById("sidebar-toggle");
     const sidebarEl = document.getElementById("sidebar");
+    const runtimePillEl = document.getElementById("runtime-pill");
     const history = [];
     let activeAbort = null;
     let pinnedToBottom = true;
@@ -3550,11 +3702,30 @@ def _chat_ui_html(
       if (n >= 1000) return (n / 1000).toFixed(1).replace(/\\.0$/, "") + "k";
       return String(n);
     }
+    function runtimeLabelFromHealth(health) {
+      if (health && health.runtime_mode) return String(health.runtime_mode);
+      const profileName = health && health.profile && health.profile.name ? String(health.profile.name) : "";
+      const mode = String((health && health.generation_mode) || "").toLowerCase() === "ar" ? "AR" : "MTP";
+      const fanBoost = Boolean(health && (health.fan_boost_active || health.fan_mode === "max"));
+      if (profileName === "sustained" && fanBoost) return "Sustained Max " + mode;
+      if (profileName === "sustained") return "Sustained " + mode;
+      if (profileName === "performance-cold" && fanBoost) return "Burst " + mode;
+      if (profileName === "performance-cold") return "Performance-cold " + mode;
+      if (profileName === "stable") return "Stable " + mode;
+      return profileName ? profileName + " " + mode : mode;
+    }
+    function applyRuntimeHealth(health) {
+      if (!runtimePillEl || !health) return;
+      runtimePillEl.textContent = runtimeLabelFromHealth(health);
+      runtimePillEl.hidden = false;
+      runtimePillEl.title = runtimePillEl.textContent;
+    }
     async function discoverServerLimits() {
       try {
         const res = await fetch("/health", {cache: "no-store"});
         if (!res.ok) throw new Error("health " + res.status);
         const health = await res.json();
+        applyRuntimeHealth(health);
         const ctx = parseInt(health.context_window, 10);
         const serverCap = parseInt(health.max_response_tokens, 10);
         if (Number.isFinite(ctx) && ctx > 0) {
@@ -4298,12 +4469,22 @@ def create_app(state: ServerState) -> FastAPI:
             foreground_active = int(state.foreground_count())
         else:
             foreground_active = int(getattr(state, "foreground_active", 0) or 0)
+        fan_mode = str(os.environ.get("MTPLX_FAN_MODE") or "auto").lower()
+        fan_boost_active = fan_mode == "max"
+        runtime_mode = _health_runtime_mode_label(
+            state.profile.name,
+            state.args.generation_mode,
+            fan_boost_active=fan_boost_active,
+        )
         return {
             "ok": True,
             "model": state.model_id,
             "model_path": str(state.runtime.model_path),
             "generation_mode": state.args.generation_mode,
             "default_generation_mode": state.args.generation_mode,
+            "runtime_mode": runtime_mode,
+            "fan_mode": fan_mode,
+            "fan_boost_active": fan_boost_active,
             "available_generation_modes": ["mtp", "ar"],
             "load_mtp": bool(state.args.load_mtp),
             "mtp_enabled": bool(state.runtime.mtp_enabled),
@@ -5609,6 +5790,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Generation mode. 'ar' uses target-only AR generation while keeping the same loaded runtime.",
     )
     parser.add_argument(
+        "--stock-ar",
+        action="store_true",
+        help=(
+            "Diagnostic only: run target AR without loading the MTP sidecar. "
+            "Equivalent to --generation-mode ar --no-load-mtp."
+        ),
+    )
+    parser.add_argument(
         "--load-mtp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -5807,7 +5996,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Open the local MTPLX browser chat UI after startup.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.stock_ar:
+        args.generation_mode = "ar"
+        args.load_mtp = False
+    return args
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -5819,8 +6012,9 @@ def main(argv: list[str] | None = None) -> None:
         if str(exc).startswith("Patched MLX qmv fork is not active:"):
             _startup_line("error: fast MLX fork is not active")
             _startup_line(str(exc))
-            _startup_line("try: mtplx start --profile safe")
-            _startup_line("try: mtplx start --profile performance-cold")
+            _startup_line("try: mtplx start --profile sustained")
+            _startup_line("try: mtplx start --profile stable")
+            _startup_line("try: mtplx start --profile performance-cold --max")
             _startup_line(
                 "     (public start disables the strict fork assert when the fork is missing)"
             )

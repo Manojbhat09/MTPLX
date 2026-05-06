@@ -174,7 +174,8 @@ def _format_public_help() -> str:
 {_heading("Examples")}
   mtplx start                       Interactive setup, then chat
   mtplx start --fresh               Re-run the onboarding (new model/mode/surface)
-  mtplx quickstart --max --port 8000  Server with ThermalForge fan boost (Max)
+  mtplx start --max --port 8000       Sustained Max browser chat with fan boost
+  mtplx quickstart --profile sustained --port 8000  API server only, no chat
 
   {footer}
 """
@@ -215,13 +216,15 @@ On later runs it offers "same as last time?" so the chat is one keypress away.
 
 What gets asked:
   1. Model — your configured model, the verified default, custom HF, or local
-  2. Mode  — Medium or Max (Stable remains available via --profile safe)
+  2. Mode  — Sustained, Sustained Max, or Burst (Stable remains available via --profile safe)
   3. Where — Web UI (default) or terminal CLI
 
 Power-user shortcuts (any of these skip the onboarding wizard):
   mtplx start --fresh                 Walk the onboarding again from scratch
   mtplx start cli                     Skip onboarding; terminal chat directly
-  mtplx start --max                   Run with ThermalForge fan boost on
+  mtplx start --max                   Sustained Max: long-context mode with ThermalForge fan boost
+  mtplx start --profile performance-cold --max
+                                      Burst: old max-fan lane, max 8K context
   mtplx start --download              Pull the verified model from HF first
   mtplx start --model /path/...       Use a specific local or HF model
   mtplx start --prompt "hi"           One-shot ask and exit (non-interactive)
@@ -230,7 +233,9 @@ Power-user shortcuts (any of these skip the onboarding wizard):
 Useful controls:
   --download       Download the selected/default model if missing
   --model PATH     Use a local model folder or HF repo id
-  --profile safe   Use the conservative long-response profile
+  --profile sustained
+                  Use the explicit long-context memory-safe native-MTP profile
+  --profile safe   Use the compatibility long-response profile
   --mtp            Use native-MTP speculative generation (default)
   --no-mtp         Use target-only AR generation; MTP can be turned back on
   --prompt TEXT    (cli) Ask once and exit instead of opening chat
@@ -290,7 +295,7 @@ def _format_verbose_help() -> str:
   mtplx start                       Open the local chat in your browser
   mtplx start cli                   Chat in this terminal instead
   mtplx start --download            Pull the verified model from Hugging Face
-  mtplx quickstart --port 8000      Run the OpenAI/Anthropic server only
+  mtplx quickstart --profile sustained --port 8000  Run the API server only
   mtplx connect openwebui           Print Open WebUI integration settings
   mtplx ask "Write a tiny FastAPI app"
   mtplx inspect Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed
@@ -773,7 +778,7 @@ def _cmd_profiles(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"library default: {DEFAULT_PROFILE_NAME}")
-    print("start default: performance-cold (Medium)")
+    print("start default: sustained")
     for profile in payload["profiles"]:
         print(f"{profile['name']}: {profile['summary']}")
     return 0
@@ -788,7 +793,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             "config_path": str(config_path),
             "next_steps": [
                 "mtplx status",
-                "mtplx quickstart --port 8000",
+                "mtplx quickstart --profile sustained --port 8000",
                 "mtplx connect openwebui",
             ],
         }
@@ -798,7 +803,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             print("MTPLX setup")
             print(f"config already exists: {config_path}")
             print("next: mtplx status")
-            print("next: mtplx quickstart --port 8000")
+            print("next: mtplx quickstart --profile sustained --port 8000")
             print("Use --force to rewrite the config.")
         return 0
     args.write = True
@@ -807,7 +812,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
 
 def _cmd_connect(args: argparse.Namespace) -> int:
     if not args.integration:
-        server_command = f"mtplx quickstart --host {args.host} --port {args.port}"
+        server_command = f"mtplx quickstart --profile sustained --host {args.host} --port {args.port}"
         payload = {
             "action": "connect",
             "integrations": [
@@ -1550,7 +1555,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_flow_p = sub.add_parser(
         "start",
         help="Interactive setup → chat (model · mode · web/CLI)",
-        usage="mtplx start [cli|web] [--fresh] [--max] [--profile safe] [--model PATH_OR_REPO] [--prompt TEXT]",
+        usage="mtplx start [cli|web] [--fresh] [--max] [--profile sustained] [--model PATH_OR_REPO] [--prompt TEXT]",
         description="Walk through model / mode / surface in three quick steps, then chat. Returning users get a 'same as last time?' prompt. Use --fresh to redo the onboarding, or pass any of --model / --profile / --max / cli|web to skip it entirely.",
     )
     start_flow_p.add_argument(
@@ -1570,8 +1575,8 @@ def build_parser() -> argparse.ArgumentParser:
     start_flow_p.add_argument(
         "--profile",
         choices=PROFILE_CHOICES,
-        default="performance-cold",
-        help="Runtime profile; start defaults to Medium. Use safe for the hidden Stable path.",
+        default="sustained",
+        help="Runtime profile; start defaults to Sustained. Use --profile performance-cold --max for Burst.",
     )
     start_flow_p.add_argument("--download", action="store_true", help="Download the selected/default model if it is missing")
     start_flow_p.add_argument("--yes", action="store_true", help="Use defaults without interactive model prompts")
@@ -1607,7 +1612,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fail Open WebUI startup if the optional fast MLX fork is not active",
     )
-    start_flow_p.add_argument("--max", action="store_true", help="Opt into ThermalForge/TG Pro performance fan profile for Open WebUI server")
+    start_flow_p.add_argument("--max", action="store_true", help="Opt into ThermalForge/TG Pro fan control; with the start default this is Sustained Max")
     start_flow_p.add_argument(
         "--max-idle-min",
         type=int,
@@ -1677,7 +1682,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Download a Hugging Face model before starting if it is not cached",
     )
-    quickstart_server_p.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
+    quickstart_server_p.add_argument(
+        "--profile",
+        choices=PROFILE_CHOICES,
+        default="sustained",
+        help="Runtime profile. Direct server quickstart defaults to Sustained; use --profile performance-cold --max for Burst.",
+    )
     quickstart_server_p.add_argument("--unsafe-force-unverified", action="store_true")
     quickstart_server_p.add_argument("--yes", action="store_true", help="Confirm unsafe non-interactive actions")
     quickstart_server_p.add_argument("--host", default="127.0.0.1")
@@ -1709,7 +1719,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="stats_footer",
         help="Keep returned text clean for UI clients. This is the default for quickstart.",
     )
-    quickstart_server_p.add_argument("--max", action="store_true", help="Opt into ThermalForge/TG Pro performance fan profile for the server lifetime")
+    quickstart_server_p.add_argument(
+        "--max",
+        action="store_true",
+        help="Opt into ThermalForge/TG Pro fan control for the server lifetime; with the quickstart default this is Sustained Max",
+    )
     quickstart_server_p.add_argument("--open-browser", action="store_true", help="Open the local browser chat after the server starts")
     quickstart_server_p.add_argument(
         "--max-idle-min",
@@ -1913,6 +1927,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve_p.add_argument("--depth", type=int, default=3)
     _add_mtp_toggle_args(serve_p)
     serve_p.add_argument(
+        "--stock-ar",
+        action="store_true",
+        help="Diagnostic only: target AR without loading the MTP sidecar.",
+    )
+    serve_p.add_argument(
         "--api-key",
         default=os.environ.get("MTPLX_AUTH"),
         help="Require Bearer or X-API-Key auth. Required for non-localhost binds.",
@@ -1992,7 +2011,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench_p.add_argument(
         "bench_action",
         nargs="?",
-        choices=["run", "nightly", "compare", "serve", "reference", "reference-vllm"],
+        choices=["run", "context", "nightly", "compare", "serve", "reference", "reference-vllm"],
         help="Public benchmark action. Omit for legacy benchmark flags.",
     )
     bench_p.add_argument("--backend", default="manifest")
@@ -2000,7 +2019,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         choices=(*PROFILE_CHOICES, "native-mtp-60"),
         help=(
-            "Runtime profile for product benchmark actions. Defaults to safe; "
+            "Runtime profile for product benchmark actions. Defaults to Sustained for context runs; "
             "native-mtp-60 is a legacy alias for performance-cold."
         ),
     )
@@ -2028,6 +2047,17 @@ def build_parser() -> argparse.ArgumentParser:
     bench_p.add_argument("--no-fanmax", action="store_true", help="Mark run as no-fan product candidate")
     bench_p.add_argument("--fanmax", action="store_true", help="Mark run as fan-controlled diagnostic")
     bench_p.add_argument("--max", action="store_true", dest="fanmax", help="Alias for --fanmax")
+    bench_p.add_argument(
+        "--generation-mode",
+        choices=["mtp", "ar"],
+        default=None,
+        help="Benchmark decode mode. AR here is target-only unless --stock-ar is also set.",
+    )
+    bench_p.add_argument(
+        "--stock-ar",
+        action="store_true",
+        help="Diagnostic benchmark mode: AR with no MTP sidecar loaded.",
+    )
     bench_p.add_argument("--unsafe-force-unverified", action="store_true")
     bench_p.add_argument("--yes", action="store_true", help="Confirm unsafe non-interactive actions")
     bench_p.add_argument("--dry-run", action="store_true")
