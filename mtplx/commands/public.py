@@ -75,6 +75,16 @@ LONG_RESPONSE_DIRECT_PROFILE = (
     "vllm_metal_paged_attn_partitioned_block_16_blocks_1024_"
     "partition_threshold_2048_impl_mlx_vector_paged"
 )
+BENCH_COLD_DEFAULT_SUITES = {"cold-long-code-192"}
+BENCH_SUSTAINED_DEFAULT_SUITES = {
+    "flappy",
+    "long_code_uncapped",
+    "long-code-uncapped",
+    "python_modules_long",
+    "python-modules-long",
+}
+BENCH_SUSTAINED_LENGTH_SENSITIVE_SUITES = {"long_code", "long-code"}
+BENCH_SUSTAINED_MAX_TOKENS_THRESHOLD = 512
 EXTERNAL_RUNTIME_ENV_KEYS = (
     "MTPLX_VERIFY_OUTPUT_DEPENDS",
     "MTPLX_VERIFY_OUTPUT_DEPENDS_AFTER_TOKENS",
@@ -1010,7 +1020,8 @@ def cmd_remove_public(args: Any) -> int:
 def _cmd_bench_run(args: Any) -> int:
     model = args.model or DEFAULT_CHAMPION
     suite = args.suite or "default"
-    selected_profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
+    selected_profile = get_profile(_bench_run_profile_name(args, suite=suite))
+    args.profile = selected_profile.name
     prompt_suite = prompt_suite_path(suite)
     run_id = args.run_id or f"cli-bench-{suite}-{time.strftime('%Y%m%d-%H%M%S')}"
     output_dir = Path(args.output_dir or "outputs/cli/bench") / run_id
@@ -1177,6 +1188,26 @@ def _cmd_bench_run(args: Any) -> int:
     return 0
 
 
+def _bench_run_profile_name(args: Any, *, suite: str) -> str:
+    requested = getattr(args, "profile", None)
+    if requested:
+        return str(requested)
+    if suite in BENCH_COLD_DEFAULT_SUITES:
+        return "performance-cold"
+    if suite in BENCH_SUSTAINED_DEFAULT_SUITES:
+        return "sustained"
+    try:
+        max_tokens = int(getattr(args, "max_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        max_tokens = 0
+    if (
+        suite in BENCH_SUSTAINED_LENGTH_SENSITIVE_SUITES
+        and max_tokens > BENCH_SUSTAINED_MAX_TOKENS_THRESHOLD
+    ):
+        return "sustained"
+    return DEFAULT_PROFILE_NAME
+
+
 def _direct_http_bench_command(
     args: Any,
     *,
@@ -1186,9 +1217,14 @@ def _direct_http_bench_command(
     output_dir: Path,
     seed: int,
 ) -> list[str]:
-    test_name = "python_modules_long" if suite in {"python_modules_long", "python-modules-long"} else suite
-    if test_name == "long_code_uncapped":
+    if suite in {"python_modules_long", "python-modules-long"}:
+        test_name = "python_modules_long"
+    elif suite in {"long_code_uncapped", "long-code-uncapped"}:
         test_name = "long_code_uncapped"
+    elif suite in {"long_code", "long-code", "cold-long-code-192"}:
+        test_name = "long_code"
+    else:
+        test_name = suite
     if test_name not in {"flappy", "python_modules_long", "long_code_uncapped", "long_code"}:
         test_name = "flappy"
     generation_mode = _generation_mode_from_args(args)
@@ -1414,9 +1450,7 @@ def _cmd_bench_run_direct_http(
 
 
 def _nightly_tasks(args: Any) -> list[dict[str, Any]]:
-    sustained_profile = get_profile(
-        getattr(args, "profile", None) or DEFAULT_PROFILE_NAME
-    ).name
+    sustained_profile = get_profile(getattr(args, "profile", None) or "sustained").name
     return [
         {
             "label": "cold-long-code-192",

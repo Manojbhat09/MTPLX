@@ -923,15 +923,67 @@ def test_public_bench_run_dry_run(capsys):
         ]
     )
 
-    captured = capsys.readouterr().out
+    payload = json.loads(capsys.readouterr().out)
     assert code == 0
-    assert '"action": "bench run"' in captured
-    assert '"automatic": true' in captured
-    assert '"harness": "depth-sweep"' in captured
-    assert '"seed": 0' in captured
-    assert '"direct_http_command": null' in captured
-    assert '"runtime_profile": "native_mtp_60_cold"' in captured
-    assert '"MTPLX_LAZY_VERIFY_LOGITS": "1"' in captured
+    assert payload["action"] == "bench run"
+    assert payload["exactness_smoke"]["automatic"] is True
+    assert payload["profile"]["name"] == "sustained"
+    assert payload["harness"] == "direct-http"
+    assert payload["runtime_profile"] == "native_mtp_sustained"
+    assert payload["runtime_env"]["MTPLX_SUSTAINED_PREFILL"] == "1"
+    assert payload["direct_http_command"] is not None
+    assert "--profiles" in payload["direct_http_command"]
+    assert (
+        payload["direct_http_command"][payload["direct_http_command"].index("--profiles") + 1]
+        == "sustained"
+    )
+
+
+def test_public_bench_long_context_default_is_sustained(capsys):
+    code = main(
+        [
+            "bench",
+            "run",
+            "--model",
+            "models/not-loaded-in-dry-run",
+            "--suite",
+            "long_code_uncapped",
+            "--dry-run",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["profile"]["name"] == "sustained"
+    assert payload["harness"] == "direct-http"
+    assert payload["runtime_profile"] == "native_mtp_sustained"
+    assert (
+        payload["direct_http_command"][payload["direct_http_command"].index("--profiles") + 1]
+        == "sustained"
+    )
+
+
+def test_public_bench_long_code_dash_alias_uses_sustained_direct_test(capsys):
+    code = main(
+        [
+            "bench",
+            "run",
+            "--model",
+            "models/not-loaded-in-dry-run",
+            "--suite",
+            "long-code",
+            "--max-tokens",
+            "1024",
+            "--dry-run",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    command = payload["direct_http_command"]
+    assert code == 0
+    assert payload["profile"]["name"] == "sustained"
+    assert command[command.index("--profiles") + 1] == "sustained"
+    assert command[command.index("--tests") + 1] == "long_code"
 
 
 def test_public_bench_run_dry_run_records_external_kernel_env(monkeypatch, capsys):
@@ -1023,6 +1075,29 @@ def test_public_bench_performance_cold_is_explicit(capsys):
     assert payload["runtime_profile"] == "native_mtp_60_cold"
     assert payload["runtime_env"]["MTPLX_LAZY_VERIFY_LOGITS"] == "1"
     assert "MTPLX_TARGET_LAYER_EVAL_SCHEDULE" not in payload["runtime_env"]
+
+
+def test_public_bench_explicit_performance_cold_overrides_long_context_default(capsys):
+    code = main(
+        [
+            "bench",
+            "run",
+            "--model",
+            "models/not-loaded-in-dry-run",
+            "--suite",
+            "long_code_uncapped",
+            "--profile",
+            "performance-cold",
+            "--dry-run",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["profile"]["name"] == "performance-cold"
+    assert payload["harness"] == "depth-sweep"
+    assert payload["runtime_profile"] == "native_mtp_60_cold"
+    assert payload["direct_http_command"] is None
 
 
 def test_public_qa_distribution_parser_dry_shape():
@@ -1157,9 +1232,9 @@ def test_bench_nightly_dry_run_lists_kernel_gate_tasks(capsys):
     assert payload["full_exactness_command"][0:2] == ["qa", "exactness"]
     assert [task["profile"] for task in payload["tasks"]] == [
         "performance-cold",
-        "performance-cold",
-        "performance-cold",
-        "performance-cold",
+        "sustained",
+        "sustained",
+        "sustained",
     ]
     flappy_6k_command = payload["tasks"][1]["direct_http_command"]
     assert "--python-bin" in flappy_6k_command
