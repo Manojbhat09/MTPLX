@@ -17,6 +17,7 @@ from mtplx.generation import (
     _prefill_committed_mtp_history_streaming,
     _sustained_prefill_layout,
     generate_ar,
+    restore_or_prefill_prompt_state,
 )
 from mtplx.mtp_patch import MTPContract
 from mtplx.runtime import MTPLXRuntime
@@ -204,6 +205,37 @@ def test_auto_sustained_prefill_policy_keeps_dense_decode_through_128k(monkeypat
     assert _sustained_prefill_layout() == "contiguous_then_repage"
     assert _prefill_chunk_cache_cleanup_every() == 2
     assert _clear_cache_every() == 0
+
+
+def test_non_sustained_long_context_prefill_is_blocked_before_full_hidden_eval(monkeypatch):
+    monkeypatch.delenv("MTPLX_SUSTAINED_PREFILL", raising=False)
+    monkeypatch.delenv("MTPLX_ALLOW_UNSAFE_LONG_CONTEXT_PREFILL", raising=False)
+    monkeypatch.setenv("MTPLX_UNSAFE_LONG_CONTEXT_PREFILL_GUARD_TOKENS", "8")
+    model = TinyModel()
+
+    with pytest.raises(RuntimeError, match="Blocked unsafe long-context MTP prefill path"):
+        restore_or_prefill_prompt_state(
+            _runtime(model, mtp_enabled=True),
+            list(range(8)),
+            mtp_history_policy="committed",
+        )
+
+    assert model.calls == []
+
+
+def test_non_sustained_long_context_prefill_guard_has_explicit_escape_hatch(monkeypatch):
+    monkeypatch.delenv("MTPLX_SUSTAINED_PREFILL", raising=False)
+    monkeypatch.setenv("MTPLX_ALLOW_UNSAFE_LONG_CONTEXT_PREFILL", "1")
+    monkeypatch.setenv("MTPLX_UNSAFE_LONG_CONTEXT_PREFILL_GUARD_TOKENS", "8")
+    model = TinyModel()
+
+    restore_or_prefill_prompt_state(
+        _runtime(model, mtp_enabled=True),
+        list(range(8)),
+        mtp_history_policy="committed",
+    )
+
+    assert model.calls
 
 
 def test_generate_ar_does_not_request_hidden_by_default(monkeypatch):

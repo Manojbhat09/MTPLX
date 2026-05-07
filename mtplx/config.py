@@ -120,7 +120,11 @@ def _apply_cache_default(args: Any, config: UserConfig) -> None:
 
 
 def _apply_profile_default(args: Any, config: UserConfig) -> None:
-    if "profile" in getattr(args, "_cli_flags", set()):
+    cli_flags = getattr(args, "_cli_flags", set())
+    if "profile" in cli_flags:
+        return
+    command = getattr(args, "command", None)
+    if command in {"start", "serve", "quickstart", "quick-start"} and "max" in cli_flags:
         return
     current = getattr(args, "profile", None)
     if config.profile and current == DEFAULT_PROFILE_NAME:

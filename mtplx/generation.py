@@ -354,6 +354,35 @@ def _prefill_stock_cache_only_enabled() -> bool:
     )
 
 
+def _unsafe_long_context_prefill_guard_tokens() -> int:
+    raw = os.environ.get("MTPLX_UNSAFE_LONG_CONTEXT_PREFILL_GUARD_TOKENS")
+    if raw is None or not str(raw).strip():
+        return 16384
+    try:
+        return max(0, int(str(raw).strip()))
+    except ValueError:
+        return 16384
+
+
+def _unsafe_long_context_prefill_allowed() -> bool:
+    return _env_truthy("MTPLX_ALLOW_UNSAFE_LONG_CONTEXT_PREFILL")
+
+
+def _assert_safe_long_context_prefill(prompt_tokens: int) -> None:
+    if _sustained_prefill_enabled() or _unsafe_long_context_prefill_allowed():
+        return
+    threshold = _unsafe_long_context_prefill_guard_tokens()
+    if threshold <= 0 or int(prompt_tokens) < threshold:
+        return
+    raise RuntimeError(
+        "Blocked unsafe long-context MTP prefill path: "
+        f"{int(prompt_tokens)} prompt tokens would use the non-Sustained full "
+        "hidden/logits prefill route. Start MTPLX with `--profile sustained` "
+        "or run `mtplx config set profile sustained`. To intentionally run "
+        "this diagnostic path, set MTPLX_ALLOW_UNSAFE_LONG_CONTEXT_PREFILL=1."
+    )
+
+
 def _prefill_omlx_external_enabled() -> bool:
     return _env_truthy("MTPLX_PREFILL_OMLX_EXTERNAL")
 
@@ -1404,6 +1433,7 @@ def restore_or_prefill_prompt_state(
             )
             prompt_eval_time = target_time + prompt_history_time
         else:
+            _assert_safe_long_context_prefill(len(prompt_ids))
             cache, logits, hidden, prompt_hidden, target_time = _prefill_with_hidden_sequence(
                 rt,
                 prompt_ids,

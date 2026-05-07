@@ -4,6 +4,8 @@ All notable user-facing changes are recorded here.
 
 ## Unreleased
 
+## v0.2.1
+
 ### Added
 
 - Added two operator-tunable environment variables for SessionBank capacity:
@@ -17,6 +19,16 @@ All notable user-facing changes are recorded here.
 
 ### Fixed
 
+- Fixed `mtplx quickstart --max`, `mtplx serve --max`, and `mtplx start --max`
+  so a stale `~/.mtplx/config.toml` value like `profile = "performance-cold"`
+  cannot silently override the v0.2 Sustained Max default. Users who really
+  want the short-context Burst lane can still opt in explicitly with
+  `--profile performance-cold --max`.
+- Added a long-context runtime guard that blocks non-Sustained MTP prefill
+  above 16K prompt tokens before it can materialize full prompt hidden/logits
+  tensors. This turns the old catastrophic memory path into a clear error that
+  tells the user to start MTPLX with `--profile sustained` or run
+  `mtplx config set profile sustained`.
 - Fixed `_ToolAwareContentStreamTranslator` so it correctly handles assistant
   responses that emit preamble text *before* a `<tool_call>` block. Previously
   the splitter locked into `mode="content"` on the first non-marker byte and
