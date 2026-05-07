@@ -2302,6 +2302,10 @@ def _store_generation_final_history_snapshot(
     }
 
 
+_IDLE_POSTCOMMIT_MAX_WAIT_S = 30.0
+_IDLE_POSTCOMMIT_POLL_INTERVAL_S = 0.25
+
+
 def _schedule_idle_postcommit_snapshot(
     state: ServerState,
     *,
@@ -2313,41 +2317,88 @@ def _schedule_idle_postcommit_snapshot(
     policy_fingerprint: str,
     unsafe_reason: str,
 ) -> dict[str, Any]:
+    """Schedule a background SessionBank commit for a response the
+    generation-final compatibility check rejected as unsafe (most commonly
+    because the response contained tool_calls, which carries a non-trivial
+    next-turn retokenization risk).
+
+    The retokenized-history path canonicalises tool_call responses into the
+    exact prefix the next request will send, so the commit is safe - it just
+    must not run on the request thread (would extend stream latency). This
+    function dispatches that work to the postcommit executor, where it waits
+    for the foreground to go idle and then runs the synchronous retokenized
+    commit. If the foreground stays busy past the deadline we abandon, since
+    a later commit would race the next turn's prefill.
+    """
     pending = {
         "stored": False,
         "mode": "async_pending",
         "reason": unsafe_reason,
     }
 
-    def async_postcommit() -> None:
-        result = {
-            "stored": False,
-            "mode": "abandoned_foreground_busy",
-            "reason": "idle_only_fallback_skipped_to_protect_foreground_latency",
-        }
+    def _log(outcome: dict[str, Any]) -> None:
         try:
-            if state.has_foreground() or state.lock.locked():
-                result = {
-                    "stored": False,
-                    "mode": "deferred_foreground_busy",
-                    "reason": "foreground_or_model_lock_busy",
-                }
             print(
                 "[mtplx] idle async session postcommit "
                 + json.dumps(
                     {
                         "session_id": session_id,
                         "unsafe_reason": unsafe_reason,
-                        **result,
+                        **outcome,
                     },
                     sort_keys=True,
+                    default=str,
                 ),
                 flush=True,
             )
+        except BaseException:
+            # Logging must never bring down the executor; fail silently.
+            pass
+
+    def async_postcommit() -> None:
+        deadline = time.monotonic() + _IDLE_POSTCOMMIT_MAX_WAIT_S
+        try:
+            # Wait for the foreground request to release the model. We poll
+            # both the foreground flag and the model lock; if either is held
+            # the next prefill is imminent or already running and committing
+            # now would either stall it or race it. We bound the wait so a
+            # back-pressured server never accumulates a backlog of stale
+            # commit work.
+            while state.has_foreground() or state.lock.locked():
+                if time.monotonic() >= deadline:
+                    _log(
+                        {
+                            "stored": False,
+                            "mode": "abandoned_foreground_busy",
+                            "reason": "foreground_busy_past_deadline",
+                        }
+                    )
+                    return
+                time.sleep(_IDLE_POSTCOMMIT_POLL_INTERVAL_S)
+
+            # Foreground is idle. Run the canonical retokenized commit. The
+            # function below acquires the model lock internally, encodes the
+            # canonical chat history (including any assistant tool_calls in
+            # their next-turn-equivalent form), prefills it, and writes a
+            # bank entry. Cost is dominated by the prefill of the suffix
+            # delta over what the bank already has for this session.
+            postcommit = _store_retokenized_history_snapshot(
+                state,
+                session_id=session_id,
+                messages=messages,
+                assistant_content=assistant_content,
+                assistant_tool_calls=assistant_tool_calls,
+                thinking_enabled=thinking_enabled,
+                policy_fingerprint=policy_fingerprint,
+            )
+            _log(postcommit)
         except BaseException as exc:
-            print(
-                f"[mtplx] async session postcommit failed: {exc!r}",
-                flush=True,
+            _log(
+                {
+                    "stored": False,
+                    "mode": "async_error",
+                    "reason": f"async_postcommit_raised:{type(exc).__name__}",
+                }
             )
 
     executor = getattr(state, "postcommit_executor", None)

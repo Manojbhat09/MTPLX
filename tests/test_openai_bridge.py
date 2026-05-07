@@ -254,8 +254,28 @@ def test_generation_final_postcommit_rejects_tool_call_history_rewrite():
     assert state.sessions.bank.puts == []
 
 
-def test_idle_async_postcommit_reports_pending_without_foreground_work(capsys):
+def test_idle_async_postcommit_returns_pending_and_dispatches_retokenized_commit(
+    capsys, monkeypatch
+):
+    """When the foreground is idle the async postcommit should attempt the
+    retokenized commit (not silently abandon as the old build did)."""
     state = _postcommit_state()
+
+    captured_calls = []
+
+    def fake_retokenized_commit(state, **kwargs):
+        captured_calls.append(kwargs)
+        return {
+            "stored": True,
+            "mode": "retokenized_history",
+            "prefix_len": 5,
+            "nbytes": 123,
+        }
+
+    monkeypatch.setattr(
+        "mtplx.server.openai._store_retokenized_history_snapshot",
+        fake_retokenized_commit,
+    )
 
     pending = _schedule_idle_postcommit_snapshot(
         state,
@@ -272,7 +292,100 @@ def test_idle_async_postcommit_reports_pending_without_foreground_work(capsys):
         "mode": "async_pending",
         "reason": "retokenized_history_mismatch",
     }
-    assert "abandoned_foreground_busy" in capsys.readouterr().out
+    assert len(captured_calls) == 1
+    assert captured_calls[0]["session_id"] == "session-1"
+    assert captured_calls[0]["assistant_content"] == "ok"
+    log = capsys.readouterr().out
+    assert '"stored": true' in log
+    assert "retokenized_history" in log
+
+
+def test_idle_async_postcommit_attempts_commit_for_tool_call_responses(
+    capsys, monkeypatch
+):
+    """Tool-call responses must reach the retokenized commit path. This is the
+    regression case for the async-postcommit fix: the unpatched build would
+    log 'abandoned_foreground_busy' and never call bank.put."""
+    state = _postcommit_state()
+
+    captured_calls = []
+
+    def fake_retokenized_commit(state, **kwargs):
+        captured_calls.append(kwargs)
+        return {"stored": True, "mode": "retokenized_history", "prefix_len": 8}
+
+    monkeypatch.setattr(
+        "mtplx.server.openai._store_retokenized_history_snapshot",
+        fake_retokenized_commit,
+    )
+
+    pending = _schedule_idle_postcommit_snapshot(
+        state,
+        session_id="session-tool",
+        messages=[ChatMessage(role="user", content="call lookup")],
+        assistant_content="",
+        assistant_tool_calls=[
+            {"type": "function", "function": {"name": "lookup", "arguments": {}}}
+        ],
+        thinking_enabled=False,
+        policy_fingerprint="policy",
+        unsafe_reason="tool_call_history_rewrite",
+    )
+
+    assert pending["mode"] == "async_pending"
+    assert pending["reason"] == "tool_call_history_rewrite"
+    assert len(captured_calls) == 1
+    # Tool calls must be forwarded so the canonical encoding includes them.
+    assert captured_calls[0]["assistant_tool_calls"] == [
+        {"type": "function", "function": {"name": "lookup", "arguments": {}}}
+    ]
+    log = capsys.readouterr().out
+    assert "tool_call_history_rewrite" in log
+    assert '"stored": true' in log
+
+
+def test_idle_async_postcommit_abandons_when_foreground_stays_busy(
+    capsys, monkeypatch
+):
+    """If the foreground never goes idle, the async commit must abandon
+    rather than block forever."""
+    state = _postcommit_state()
+    state.has_foreground = lambda: True  # always busy
+
+    # Make the wait short so the test stays fast.
+    monkeypatch.setattr(
+        "mtplx.server.openai._IDLE_POSTCOMMIT_MAX_WAIT_S", 0.1
+    )
+    monkeypatch.setattr(
+        "mtplx.server.openai._IDLE_POSTCOMMIT_POLL_INTERVAL_S", 0.05
+    )
+
+    called = []
+
+    def should_not_be_called(state, **kwargs):
+        called.append(kwargs)
+        return {"stored": True}
+
+    monkeypatch.setattr(
+        "mtplx.server.openai._store_retokenized_history_snapshot",
+        should_not_be_called,
+    )
+
+    pending = _schedule_idle_postcommit_snapshot(
+        state,
+        session_id="session-busy",
+        messages=[ChatMessage(role="user", content="hi")],
+        assistant_content="ok",
+        thinking_enabled=False,
+        policy_fingerprint="policy",
+        unsafe_reason="retokenized_history_mismatch",
+    )
+
+    assert pending["mode"] == "async_pending"
+    assert called == []
+    log = capsys.readouterr().out
+    assert "abandoned_foreground_busy" in log
+    assert "foreground_busy_past_deadline" in log
 
 
 def test_server_security_requires_api_key_for_non_localhost_bind():
