@@ -233,6 +233,9 @@ def _attach_runtime_diagnostics(
     stats.prefill_omlx_external_calls = int(
         counters.get("prefill_omlx_external_calls", 0)
     )
+    stats.prefill_external_emit_logits_enabled = (
+        _prefill_external_emit_logits_enabled()
+    )
     stats.prefill_external_cache_only_calls = int(
         counters.get("prefill_external_cache_only_calls", 0)
     )
@@ -359,21 +362,41 @@ def _prefill_external_cache_only_enabled() -> bool:
     return _prefill_omlx_external_enabled() or _prefill_stock_cache_only_enabled()
 
 
-def _prefill_cache_only_forward(rt: MTPLXRuntime, token_ids: list[int], cache: Any) -> Any:
+def _prefill_external_emit_logits_enabled() -> bool:
+    return not _env_falsey("MTPLX_PREFILL_EXTERNAL_EMIT_LOGITS")
+
+
+def _batched_token_array(token_ids: Any) -> mx.array:
+    if hasattr(token_ids, "shape") and hasattr(token_ids, "dtype"):
+        if len(token_ids.shape) == 1:
+            return token_ids[None]
+        return token_ids
+    return mx.array([token_ids])
+
+
+def _prefill_cache_only_forward(rt: MTPLXRuntime, token_ids: Any, cache: Any) -> Any:
+    token_array = _batched_token_array(token_ids)
     if not _prefill_external_cache_only_enabled():
         return rt.forward_ar(
-            mx.array([token_ids]),
+            token_array,
             cache=cache,
             return_hidden=False,
             emit_logits=not _final_logits_prefill_enabled(),
         )
-    unused_logits = rt.model(mx.array([token_ids]), cache=cache)
-    del unused_logits
     _runtime_count(rt, "prefill_external_cache_only_calls")
     if _prefill_stock_cache_only_enabled():
         _runtime_count(rt, "prefill_stock_cache_only_calls")
     if _prefill_omlx_external_enabled():
         _runtime_count(rt, "prefill_omlx_external_calls")
+    if not _prefill_external_emit_logits_enabled():
+        return rt.forward_ar(
+            token_array,
+            cache=cache,
+            return_hidden=False,
+            emit_logits=False,
+        )
+    unused_logits = rt.model(token_array, cache=cache)
+    del unused_logits
     return None
 
 
@@ -397,6 +420,18 @@ def _iter_prefill_chunks(token_ids: list[int]) -> list[list[int]]:
         return [token_ids]
     chunk_size = _prefill_chunk_size()
     return [token_ids[start : start + chunk_size] for start in range(0, len(token_ids), chunk_size)]
+
+
+def _iter_prefill_chunk_spans(token_count: int) -> list[tuple[int, int]]:
+    if token_count <= 0:
+        return []
+    if not _sustained_prefill_enabled():
+        return [(0, token_count)]
+    chunk_size = _prefill_chunk_size()
+    return [
+        (start, min(token_count, start + chunk_size))
+        for start in range(0, token_count, chunk_size)
+    ]
 
 
 def _sustained_prefill_layout() -> str:
@@ -429,6 +464,20 @@ def _verify_hidden_mode() -> str:
         os.environ.get("MTPLX_VERIFY_HIDDEN_MODE") or "default"
     ).strip().lower().replace("-", "_")
     return raw or "default"
+
+
+def _clear_cache_every() -> int:
+    raw = (os.environ.get("MTPLX_CLEAR_CACHE_EVERY") or "0").strip().lower()
+    if raw == "auto":
+        context_tokens = _env_int("MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS", 0)
+        threshold = _env_int("MTPLX_CLEAR_CACHE_EVERY_CONTEXT_THRESHOLD", 98304)
+        if context_tokens >= threshold and _contiguous_dense_decode_prefill_enabled():
+            return max(0, _env_int("MTPLX_CLEAR_CACHE_EVERY_LONG_CONTEXT", 16))
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
 
 
 def _contiguous_then_repage_prefill_enabled() -> bool:
@@ -915,7 +964,7 @@ class _DecodeTrace:
             "skip_verify_snapshot": bool(os.environ.get("MTPLX_SKIP_VERIFY_SNAPSHOT")),
             "mtp_history_materialize_every": int(mtp_history_materialize_every),
             "mtp_history_materialize_events": int(mtp_history_materialize_events),
-            "clear_cache_every": int(os.environ.get("MTPLX_CLEAR_CACHE_EVERY") or 0),
+            "clear_cache_every": int(_clear_cache_every()),
             "clear_cache_events_total": int(totals["clear_cache_events"]),
             "clear_cache_events_delta": clear_cache_events_delta,
             "clear_cache_time_s_total": float(totals["clear_cache_time_s"]),
@@ -1044,6 +1093,7 @@ class GenerationStats:
     prefill_stock_cache_only_calls: int = 0
     prefill_omlx_external_enabled: bool = False
     prefill_omlx_external_calls: int = 0
+    prefill_external_emit_logits_enabled: bool = True
     prefill_external_cache_only_calls: int = 0
     paged_kv_capacity_tokens: int = 0
     paged_kv_num_blocks: int = 0
@@ -1731,10 +1781,13 @@ def _prefill(rt: MTPLXRuntime, prompt_ids: list[int], *, return_hidden: bool):
     final_logits_only = _final_logits_prefill_enabled()
 
     if len(prompt_ids) > 1:
-        for chunk in _iter_prefill_chunks(prompt_ids[:-1]):
+        body = prompt_ids[:-1]
+        body_array = mx.array([body])
+        for start, end in _iter_prefill_chunk_spans(len(body)):
+            chunk_array = body_array[:, start:end]
             started = time.perf_counter()
             with attention_phase("prefill"):
-                prefill = _prefill_cache_only_forward(rt, chunk, cache)
+                prefill = _prefill_cache_only_forward(rt, chunk_array, cache)
             if prefill is None:
                 _eval_cache_roots(cache)
             else:
@@ -1789,9 +1842,12 @@ def _prefill_committed_mtp_history_streaming(
         mtp_history_position_base = max(0, history_start_token_index - 1)
 
     cursor = 0
-    for chunk in _iter_prefill_chunks(body):
+    body_array = mx.array([body]) if body else None
+    for start, end in _iter_prefill_chunk_spans(len(body)):
+        chunk_array = body_array[:, start:end]
+        chunk_len = end - start
         token_start_index = cursor + 1
-        token_end_index = token_start_index + len(chunk)
+        token_end_index = token_start_index + chunk_len
         needs_history_hidden = (
             history_window_tokens is None
             or token_end_index > history_start_token_index
@@ -1800,7 +1856,7 @@ def _prefill_committed_mtp_history_streaming(
         with attention_phase("prefill"):
             if needs_history_hidden:
                 logits_chunk, hidden_chunk = rt.forward_ar(
-                    mx.array([chunk]),
+                    chunk_array,
                     cache=cache,
                     return_hidden=True,
                     hidden_variant=mtp_hidden_variant,
@@ -1808,7 +1864,7 @@ def _prefill_committed_mtp_history_streaming(
                 )
             else:
                 hidden_chunk = None
-                logits_chunk = _prefill_cache_only_forward(rt, chunk, cache)
+                logits_chunk = _prefill_cache_only_forward(rt, chunk_array, cache)
         if hidden_chunk is None:
             if logits_chunk is None:
                 _eval_cache_roots(cache)
@@ -1822,7 +1878,7 @@ def _prefill_committed_mtp_history_streaming(
         _runtime_count(rt, "prefill_chunks")
 
         if hidden_chunk is not None:
-            token_ids = prompt_ids[token_start_index : token_start_index + len(chunk)]
+            token_ids = prompt_ids[token_start_index : token_start_index + chunk_len]
             slice_start = max(0, history_start_token_index - token_start_index)
             if slice_start < len(token_ids):
                 sliced_token_ids = token_ids[slice_start:]
@@ -1844,7 +1900,7 @@ def _prefill_committed_mtp_history_streaming(
                     ),
                     force_eval=True,
                 )
-        cursor += len(chunk)
+        cursor += chunk_len
         del hidden_chunk
         del logits_chunk
         target_forward_time += _prefill_chunk_cache_cleanup(rt)
@@ -3029,10 +3085,7 @@ def generate_mtpk(
 
     mtp_history_tokens_since_materialize = 0
     mtp_history_materialize_events = 0
-    clear_cache_every = max(
-        0,
-        int(os.environ.get("MTPLX_CLEAR_CACHE_EVERY") or 0),
-    )
+    clear_cache_every = _clear_cache_every()
     clear_cache_tokens_since = 0
     clear_cache_observed_tokens = 0
     clear_cache_events = 0
@@ -3353,6 +3406,10 @@ def generate_mtpk(
         if clear_cache_tokens_since < clear_cache_every:
             return
         started_clear = time.perf_counter()
+        try:
+            mx.synchronize()
+        except RuntimeError:
+            pass
         mx.clear_cache()
         clear_cache_time_s += time.perf_counter() - started_clear
         clear_cache_events += 1

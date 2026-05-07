@@ -2242,6 +2242,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     bench_p.add_argument(
+        "--no-prefill-cache-cleanup",
+        action="store_true",
+        help=(
+            "Diagnostic only: disable MTPLX_PREFILL_CHUNK_CACHE_CLEANUP after "
+            "profile env is applied."
+        ),
+    )
+    bench_p.add_argument(
         "--prefill-cache-cleanup-every",
         help=(
             "Diagnostic override for MTPLX_PREFILL_CHUNK_CACHE_CLEANUP_EVERY "
@@ -2254,6 +2262,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Diagnostic override for MTPLX_PREFILL_CHUNK_SIZE after profile env "
             "is applied."
+        ),
+    )
+    bench_p.add_argument(
+        "--clear-cache-every",
+        type=int,
+        help=(
+            "Diagnostic override for MTPLX_CLEAR_CACHE_EVERY during generation "
+            "after profile env is applied."
         ),
     )
     bench_p.add_argument(
@@ -2312,6 +2328,14 @@ def build_parser() -> argparse.ArgumentParser:
             "Diagnostic only: add the context row index to --seed. By default "
             "the ladder uses one seed so rows compare context length rather "
             "than different sampling trajectories."
+        ),
+    )
+    bench_p.add_argument(
+        "--no-inter-context-cache-cleanup",
+        action="store_true",
+        help=(
+            "Diagnostic only: do not synchronize and clear MLX's reusable cache "
+            "between prefill-ladder context rows."
         ),
     )
     bench_p.add_argument("--adaptive", action="store_true")

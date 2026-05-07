@@ -8,6 +8,7 @@ import os
 import shlex
 import subprocess
 import time
+import gc
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -325,6 +326,15 @@ def _apply_mtp_history_window_override(args: Any) -> int | None:
 
 def _apply_prefill_cache_cleanup_override(args: Any) -> bool:
     enabled = bool(getattr(args, "prefill_cache_cleanup", False))
+    disabled = bool(getattr(args, "no_prefill_cache_cleanup", False))
+    if enabled and disabled:
+        raise ValueError(
+            "--prefill-cache-cleanup and --no-prefill-cache-cleanup cannot be "
+            "used together"
+        )
+    if disabled:
+        os.environ["MTPLX_PREFILL_CHUNK_CACHE_CLEANUP"] = "0"
+        return True
     if enabled:
         os.environ["MTPLX_PREFILL_CHUNK_CACHE_CLEANUP"] = "1"
     return enabled
@@ -361,6 +371,17 @@ def _apply_prefill_chunk_size_override(args: Any) -> int | None:
         raise ValueError("--prefill-chunk-size must be positive")
     os.environ["MTPLX_PREFILL_CHUNK_SIZE"] = str(chunk_size)
     return chunk_size
+
+
+def _apply_clear_cache_every_override(args: Any) -> int | None:
+    raw = getattr(args, "clear_cache_every", None)
+    if raw is None:
+        return None
+    every = int(raw)
+    if every < 0:
+        raise ValueError("--clear-cache-every must be non-negative")
+    os.environ["MTPLX_CLEAR_CACHE_EVERY"] = str(every)
+    return every
 
 
 def _apply_defer_verify_hidden_override(args: Any) -> str | None:
@@ -536,8 +557,12 @@ def _env_snapshot() -> dict[str, str]:
         "MTPLX_PREFILL_CHUNK_CACHE_CLEANUP",
         "MTPLX_PREFILL_CHUNK_CACHE_CLEANUP_EVERY",
         "MTPLX_PREFILL_OMLX_EXTERNAL",
+        "MTPLX_PREFILL_EXTERNAL_EMIT_LOGITS",
         "MTPLX_PREFILL_STOCK_CACHE_ONLY",
         UNSAFE_STOCK_CACHE_ONLY_ALLOW_ENV,
+        "MTPLX_CLEAR_CACHE_EVERY",
+        "MTPLX_CLEAR_CACHE_EVERY_CONTEXT_THRESHOLD",
+        "MTPLX_CLEAR_CACHE_EVERY_LONG_CONTEXT",
         "MTPLX_SUSTAINED_PREFILL",
         "MTPLX_SUSTAINED_PREFILL_LAYOUT",
         "MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT",
@@ -576,6 +601,27 @@ def _stats_value(stats: Any, key: str, default: Any = 0) -> Any:
     if isinstance(stats, dict):
         return stats.get(key, default)
     return getattr(stats, key, default)
+
+
+def _sync_and_clear_cache_between_contexts() -> float:
+    """Drain MLX work and clear reusable buffers between ladder rows.
+
+    This is deliberately benchmark-harness hygiene, not timed model work. It
+    mirrors oMLX's safety rule: synchronize first, then clear, so we do not
+    release buffers still referenced by in-flight Metal command buffers.
+    """
+    started = time.perf_counter()
+    try:
+        import mlx.core as mx
+
+        try:
+            mx.synchronize()
+        except RuntimeError:
+            pass
+        mx.clear_cache()
+    finally:
+        gc.collect()
+    return time.perf_counter() - started
 
 
 def _int_stats_or_env(
@@ -707,6 +753,9 @@ def _row_from_output(
         "prefill_omlx_external_calls": int(
             _stats_value(stats, "prefill_omlx_external_calls", 0) or 0
         ),
+        "prefill_external_emit_logits_enabled": bool(
+            _stats_value(stats, "prefill_external_emit_logits_enabled", True)
+        ),
         "prefill_external_cache_only_calls": int(
             _stats_value(stats, "prefill_external_cache_only_calls", 0) or 0
         ),
@@ -806,10 +855,19 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
     mtp_history_policy_requested = str(getattr(args, "mtp_history_policy", "") or "").strip().lower().replace("-", "_")
     mtp_history_window_requested = getattr(args, "mtp_history_window", None)
     prefill_cache_cleanup_requested = bool(getattr(args, "prefill_cache_cleanup", False))
+    no_prefill_cache_cleanup_requested = bool(
+        getattr(args, "no_prefill_cache_cleanup", False)
+    )
+    if prefill_cache_cleanup_requested and no_prefill_cache_cleanup_requested:
+        raise ValueError(
+            "--prefill-cache-cleanup and --no-prefill-cache-cleanup cannot be "
+            "used together"
+        )
     prefill_cache_cleanup_every_requested = getattr(
         args, "prefill_cache_cleanup_every", None
     )
     prefill_chunk_size_requested = getattr(args, "prefill_chunk_size", None)
+    clear_cache_every_requested = getattr(args, "clear_cache_every", None)
     defer_verify_hidden_requested = bool(
         getattr(args, "defer_verify_hidden_eval", False)
     )
@@ -844,6 +902,8 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
         profile_env["MTPLX_MTP_HISTORY_LAST_WINDOW"] = str(mtp_history_window_value)
     if prefill_cache_cleanup_requested:
         profile_env["MTPLX_PREFILL_CHUNK_CACHE_CLEANUP"] = "1"
+    if no_prefill_cache_cleanup_requested:
+        profile_env["MTPLX_PREFILL_CHUNK_CACHE_CLEANUP"] = "0"
     if prefill_cache_cleanup_every_requested is not None:
         cleanup_every_text = str(prefill_cache_cleanup_every_requested).strip().lower()
         if cleanup_every_text == "auto":
@@ -860,6 +920,11 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
         if prefill_chunk_size_value <= 0:
             raise ValueError("--prefill-chunk-size must be positive")
         profile_env["MTPLX_PREFILL_CHUNK_SIZE"] = str(prefill_chunk_size_value)
+    if clear_cache_every_requested is not None:
+        clear_cache_every_value = int(clear_cache_every_requested)
+        if clear_cache_every_value < 0:
+            raise ValueError("--clear-cache-every must be non-negative")
+        profile_env["MTPLX_CLEAR_CACHE_EVERY"] = str(clear_cache_every_value)
     if defer_verify_hidden_requested:
         profile_env["MTPLX_DEFER_VERIFY_HIDDEN_EVAL"] = "1"
     elif no_defer_verify_hidden_requested:
@@ -880,6 +945,12 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
         "seed": int(getattr(args, "seed", None) or 0),
         "vary_seed_by_context": bool(getattr(args, "vary_seed_by_context", False)),
         "contexts": contexts,
+        "inter_context_cache_cleanup": {
+            "enabled": not bool(getattr(args, "no_inter_context_cache_cleanup", False)),
+            "events": 0,
+            "time_s": 0.0,
+            "method": "mx.synchronize_default_then_clear_cache",
+        },
         "hardware": inspect_hardware(),
         "env": profile_env,
         "prefill_layout": {
@@ -959,6 +1030,7 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
     prefill_cache_cleanup = _apply_prefill_cache_cleanup_override(args)
     prefill_cache_cleanup_every = _apply_prefill_cache_cleanup_every_override(args)
     prefill_chunk_size = _apply_prefill_chunk_size_override(args)
+    clear_cache_every = _apply_clear_cache_every_override(args)
     defer_verify_hidden = _apply_defer_verify_hidden_override(args)
     verify_hidden_mode = _apply_verify_hidden_mode_override(args)
     batch_target_arrays = _apply_batch_target_arrays_override(args)
@@ -970,12 +1042,16 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
         payload["mtp_history_policy_override"] = mtp_history_policy
     if mtp_history_window is not None:
         payload["mtp_history_window_override"] = mtp_history_window
-    if prefill_cache_cleanup and not prefill_cache_cleanup_requested:
+    if no_prefill_cache_cleanup_requested:
+        payload["prefill_cache_cleanup_override"] = False
+    elif prefill_cache_cleanup and not prefill_cache_cleanup_requested:
         payload["prefill_cache_cleanup_override"] = True
     if prefill_cache_cleanup_every is not None:
         payload["prefill_cache_cleanup_every_override"] = prefill_cache_cleanup_every
     if prefill_chunk_size is not None:
         payload["prefill_chunk_size_override"] = prefill_chunk_size
+    if clear_cache_every is not None:
+        payload["clear_cache_every_override"] = clear_cache_every
     if defer_verify_hidden is not None:
         payload["defer_verify_hidden_eval_override"] = defer_verify_hidden == "1"
     if verify_hidden_mode and verify_hidden_mode != verify_hidden_mode_requested:
@@ -1013,6 +1089,9 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
         depth = int(getattr(args, "speculative_depth", 0) or 3)
         seed_base = int(getattr(args, "seed", None) or 0)
         vary_seed_by_context = bool(getattr(args, "vary_seed_by_context", False))
+        inter_context_cleanup_enabled = not bool(
+            getattr(args, "no_inter_context_cache_cleanup", False)
+        )
         for index, context_tokens in enumerate(contexts):
             try:
                 import mlx.core as mx
@@ -1075,6 +1154,12 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
             row["requested_prefill_layout"] = prefill_layout
             row["seed"] = row_seed
             payload["rows"].append(row)
+            if inter_context_cleanup_enabled and index < len(contexts) - 1:
+                cleanup_time = _sync_and_clear_cache_between_contexts()
+                cleanup_meta = payload["inter_context_cache_cleanup"]
+                cleanup_meta["events"] = int(cleanup_meta["events"]) + 1
+                cleanup_meta["time_s"] = float(cleanup_meta["time_s"]) + cleanup_time
+                row["post_row_inter_context_cache_cleanup_time_s"] = cleanup_time
     finally:
         if max_session is not None:
             max_session.stop()

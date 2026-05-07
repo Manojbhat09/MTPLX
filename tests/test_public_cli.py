@@ -107,6 +107,8 @@ def test_bench_prefill_ladder_dry_run_json(monkeypatch, capsys):
     assert payload["dry_run"] is True
     assert payload["seed"] == 0
     assert payload["vary_seed_by_context"] is False
+    assert payload["inter_context_cache_cleanup"]["enabled"] is True
+    assert payload["inter_context_cache_cleanup"]["events"] == 0
     assert payload["contexts"] == [512, 1024]
     assert payload["rows"] == []
     assert payload["prompt"]["style"] == "coding-agent"

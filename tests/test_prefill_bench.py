@@ -72,9 +72,12 @@ def test_token_ids_for_context_accepts_custom_tail() -> None:
 def test_run_prefill_ladder_fake_runtime_records_release_valid_prompt(
     monkeypatch,
 ) -> None:
+    import mtplx.prefill_bench as prefill_bench
+
     tokenizer = _CharTokenizer()
     tail = "\n\n# Final user request\nPatch the benchmark harness.\n"
     captured: dict[str, object] = {}
+    cleanup_calls = {"count": 0}
 
     def fake_load(model: str, *, mtp: bool):
         assert model == "fake-model"
@@ -112,11 +115,16 @@ def test_run_prefill_ladder_fake_runtime_records_release_valid_prompt(
 
     monkeypatch.setattr(runtime, "load", fake_load)
     monkeypatch.setattr(generation, "generate_mtpk", fake_generate_mtpk)
+    monkeypatch.setattr(
+        prefill_bench,
+        "_sync_and_clear_cache_between_contexts",
+        lambda: cleanup_calls.__setitem__("count", cleanup_calls["count"] + 1) or 0.123,
+    )
     before_env = dict(os.environ)
     try:
         payload = run_prefill_ladder(
             Namespace(
-                contexts="512",
+                contexts="512,1k",
                 full=False,
                 profile="sustained",
                 model="fake-model",
@@ -152,6 +160,10 @@ def test_run_prefill_ladder_fake_runtime_records_release_valid_prompt(
     assert payload["prefill_layout"]["env_value"] == "contiguous_dense_decode"
     assert payload["seed"] == 0
     assert payload["vary_seed_by_context"] is False
+    assert payload["inter_context_cache_cleanup"]["enabled"] is True
+    assert payload["inter_context_cache_cleanup"]["events"] == 1
+    assert payload["inter_context_cache_cleanup"]["time_s"] == 0.123
+    assert cleanup_calls["count"] == 1
     assert payload["prompt"]["release_valid"] is True
     assert payload["prompt"]["format"] == "chat"
     assert payload["prompt"]["enable_thinking"] is False
@@ -160,6 +172,7 @@ def test_run_prefill_ladder_fake_runtime_records_release_valid_prompt(
         "recommended_plugged_in_commands"
     ][0]
     row = payload["rows"][0]
+    assert row["post_row_inter_context_cache_cleanup_time_s"] == 0.123
     assert row["requested_prefill_layout"] == "contiguous-dense-decode"
     assert row["prompt_release_valid"] is True
     assert row["prompt_tail_preserved"] is True

@@ -7,6 +7,7 @@ import mlx.core as mx
 import pytest
 
 from mtplx.generation import (
+    _clear_cache_every,
     _defer_verify_hidden_eval_enabled,
     _make_target_prefill_cache,
     _maybe_repage_target_prefill_cache,
@@ -173,26 +174,36 @@ def test_contiguous_dense_decode_cache_layout_does_not_repage(monkeypatch):
     assert os.environ["MTPLX_BLOCK_OWNED_ATTN_KV"] == "1"
 
 
-def test_auto_sustained_prefill_policy_caps_dense_decode_to_64k(monkeypatch):
+def test_auto_sustained_prefill_policy_keeps_dense_decode_through_128k(monkeypatch):
     monkeypatch.setenv("MTPLX_SUSTAINED_PREFILL_LAYOUT", "auto")
-    monkeypatch.setenv("MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT", "65536")
+    monkeypatch.setenv("MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT", "131072")
     monkeypatch.setenv("MTPLX_PREFILL_CHUNK_SIZE", "auto")
-    monkeypatch.setenv("MTPLX_PREFILL_CHUNK_SIZE_DENSE", "4096")
+    monkeypatch.setenv("MTPLX_PREFILL_CHUNK_SIZE_DENSE", "2048")
     monkeypatch.setenv("MTPLX_PREFILL_CHUNK_SIZE_REPAGE", "2048")
     monkeypatch.setenv("MTPLX_PREFILL_CHUNK_CACHE_CLEANUP_EVERY", "auto")
     monkeypatch.setenv("MTPLX_DEFER_VERIFY_HIDDEN_EVAL", "auto")
+    monkeypatch.setenv("MTPLX_CLEAR_CACHE_EVERY", "auto")
+    monkeypatch.setenv("MTPLX_CLEAR_CACHE_EVERY_CONTEXT_THRESHOLD", "98304")
+    monkeypatch.setenv("MTPLX_CLEAR_CACHE_EVERY_LONG_CONTEXT", "16")
 
     monkeypatch.setenv("MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS", "65536")
     assert _sustained_prefill_layout() == "contiguous_dense_decode"
-    assert _prefill_chunk_size() == 4096
+    assert _prefill_chunk_size() == 2048
     assert _prefill_chunk_cache_cleanup_every() == 1
     assert _defer_verify_hidden_eval_enabled() is True
+    assert _clear_cache_every() == 0
 
     monkeypatch.setenv("MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS", "131072")
-    assert _sustained_prefill_layout() == "contiguous_then_repage"
+    assert _sustained_prefill_layout() == "contiguous_dense_decode"
     assert _prefill_chunk_size() == 2048
+    assert _prefill_chunk_cache_cleanup_every() == 1
+    assert _defer_verify_hidden_eval_enabled() is True
+    assert _clear_cache_every() == 16
+
+    monkeypatch.setenv("MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS", "196608")
+    assert _sustained_prefill_layout() == "contiguous_then_repage"
     assert _prefill_chunk_cache_cleanup_every() == 2
-    assert _defer_verify_hidden_eval_enabled() is False
+    assert _clear_cache_every() == 0
 
 
 def test_generate_ar_does_not_request_hidden_by_default(monkeypatch):
