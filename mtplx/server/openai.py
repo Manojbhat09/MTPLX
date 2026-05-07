@@ -2044,6 +2044,7 @@ def _store_retokenized_history_snapshot(
     assistant_tool_calls: list[dict[str, Any]] | None = None,
     thinking_enabled: bool,
     policy_fingerprint: str,
+    acquire_model_lock_blocking: bool = True,
 ) -> dict[str, Any]:
     if session_id is None:
         return {"stored": False, "reason": "no_session_id"}
@@ -2066,7 +2067,15 @@ def _store_retokenized_history_snapshot(
         return {"stored": False, "reason": "empty_boundary_prefix"}
     started = time.perf_counter()
     state.begin_foreground()
-    state.lock.acquire()
+    acquired = state.lock.acquire(blocking=bool(acquire_model_lock_blocking))
+    if not acquired:
+        state.end_foreground()
+        return {
+            "stored": False,
+            "mode": "retokenized_history",
+            "reason": "model_lock_busy_before_retokenized_commit",
+            "elapsed_s": time.perf_counter() - started,
+        }
     try:
         with attention_phase("postcommit"):
             prompt_state = restore_or_prefill_prompt_state(
@@ -2394,12 +2403,10 @@ def _schedule_idle_postcommit_snapshot(
                     return
                 time.sleep(_IDLE_POSTCOMMIT_POLL_INTERVAL_S)
 
-            # Foreground is idle. Run the canonical retokenized commit. The
-            # function below acquires the model lock internally, encodes the
-            # canonical chat history (including any assistant tool_calls in
-            # their next-turn-equivalent form), prefills it, and writes a
-            # bank entry. Cost is dominated by the prefill of the suffix
-            # delta over what the bank already has for this session.
+            # Foreground is idle. Run the canonical retokenized commit with a
+            # non-blocking lock acquire, so a foreground request that wins the
+            # race after the idle check is never delayed by background cache
+            # maintenance.
             postcommit = _store_retokenized_history_snapshot(
                 state,
                 session_id=session_id,
@@ -2408,6 +2415,7 @@ def _schedule_idle_postcommit_snapshot(
                 assistant_tool_calls=assistant_tool_calls,
                 thinking_enabled=thinking_enabled,
                 policy_fingerprint=policy_fingerprint,
+                acquire_model_lock_blocking=False,
             )
             _log(postcommit)
         except BaseException as exc:

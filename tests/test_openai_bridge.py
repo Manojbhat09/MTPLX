@@ -295,6 +295,7 @@ def test_idle_async_postcommit_returns_pending_and_dispatches_retokenized_commit
     assert len(captured_calls) == 1
     assert captured_calls[0]["session_id"] == "session-1"
     assert captured_calls[0]["assistant_content"] == "ok"
+    assert captured_calls[0]["acquire_model_lock_blocking"] is False
     log = capsys.readouterr().out
     assert '"stored": true' in log
     assert "retokenized_history" in log
@@ -339,6 +340,7 @@ def test_idle_async_postcommit_attempts_commit_for_tool_call_responses(
     assert captured_calls[0]["assistant_tool_calls"] == [
         {"type": "function", "function": {"name": "lookup", "arguments": {}}}
     ]
+    assert captured_calls[0]["acquire_model_lock_blocking"] is False
     log = capsys.readouterr().out
     assert "tool_call_history_rewrite" in log
     assert '"stored": true' in log
