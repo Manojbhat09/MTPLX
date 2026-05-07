@@ -7,6 +7,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+from mtplx.version import DISPLAY_VERSION, __version__
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BLOCK_MLX = textwrap.dedent(
@@ -67,7 +69,7 @@ def test_version_without_mlx(tmp_path: Path) -> None:
     proc = _run_no_mlx(tmp_path, ["-m", "mtplx.cli", "--version"])
 
     assert proc.returncode == 0, proc.stderr
-    assert "mtplx 0.2.0 (0.2.0)" in proc.stdout
+    assert f"mtplx {DISPLAY_VERSION} ({__version__})" in proc.stdout
 
 
 def test_cli_help_without_mlx(tmp_path: Path) -> None:
