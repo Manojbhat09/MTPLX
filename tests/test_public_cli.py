@@ -47,6 +47,78 @@ def test_empty_cli_shows_friendly_consumer_help(capsys):
     assert "capture-commit-equivalence" not in captured
 
 
+def test_hardware_inspect_json(monkeypatch, capsys):
+    import mtplx.hardware as hardware
+
+    monkeypatch.setattr(
+        hardware,
+        "inspect_hardware",
+        lambda: {
+            "chip": "Apple M5 Max",
+            "macos_version": "26.2",
+            "mlx_version": "0.31.0",
+            "hardware_acceleration_eligible": True,
+            "hardware_acceleration_confirmed": False,
+            "warnings": ["Eligibility is not proof."],
+        },
+    )
+
+    code = main(["hardware", "inspect", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["chip"] == "Apple M5 Max"
+    assert payload["hardware_acceleration_eligible"] is True
+    assert payload["hardware_acceleration_confirmed"] is False
+
+
+def test_bench_prefill_ladder_dry_run_json(monkeypatch, capsys):
+    import mtplx.prefill_bench as prefill_bench
+
+    monkeypatch.setattr(
+        prefill_bench,
+        "inspect_hardware",
+        lambda: {
+            "chip": "Apple M5 Max",
+            "hardware_acceleration_eligible": True,
+            "hardware_acceleration_confirmed": False,
+        },
+    )
+
+    code = main(
+        [
+            "bench",
+            "prefill-ladder",
+            "--contexts",
+            "512,1k",
+            "--max-tokens",
+            "8",
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["kind"] == "prefill_ladder"
+    assert payload["dry_run"] is True
+    assert payload["contexts"] == [512, 1024]
+    assert payload["rows"] == []
+    assert payload["prompt"]["style"] == "coding-agent"
+    assert payload["prompt"]["format"] == "chat"
+    assert payload["prompt"]["enable_thinking"] is False
+    assert payload["prompt"]["policy"] == "coding_agent_tail_v2"
+    assert payload["prompt"]["tail_sha256"]
+    assert payload["prompt"]["release_valid"] is True
+    assert payload["prefill_layout"]["requested"] == "profile"
+    assert payload["prefill_layout"]["env_value"] is None
+    assert payload["recommended_plugged_in_commands"]
+    assert "--prompt-format chat" in payload["recommended_plugged_in_commands"][0]
+    assert "--disable-thinking" in payload["recommended_plugged_in_commands"][0]
+    assert payload["profile"]["env"]["MTPLX_LAZY_VERIFY_LOGITS"] == "1"
+    assert payload["profile"]["env"]["MTPLX_BATCH_TARGET_ARRAYS"] == "1"
+
+
 def test_shell_banner_env_suppresses_compact_help_ascii(monkeypatch, capsys):
     monkeypatch.setenv("MTPLX_SHELL_BANNER_SHOWN", "1")
 

@@ -11,3 +11,8 @@ research that use or build on MTPLX:
 
 If MTPLX informs academic or technical writing, please cite the repository using
 the included CITATION.cff metadata.
+
+This distribution includes a vendored standalone subset of vllm-metal's
+Apache-2.0 licensed Metal paged-attention kernels under vllm_metal/metal.
+The vendored subset is used only for local MLX/Metal kernel dispatch and does
+not include or depend on the vLLM serving stack.

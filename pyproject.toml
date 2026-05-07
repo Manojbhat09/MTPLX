@@ -16,6 +16,7 @@ dependencies = [
   "huggingface-hub>=0.36",
   "mlx>=0.31,<0.32; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "mlx-lm>=0.31,<0.32; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "nanobind>=2; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "numpy>=2",
   "pydantic>=2",
   "rich>=14",
@@ -61,10 +62,16 @@ dev = [
 mtplx = "mtplx.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["mtplx*"]
+include = ["mtplx*", "vllm_metal*"]
 
 [tool.setuptools.package-data]
 "mtplx.benchmarks" = ["prompts/*.jsonl"]
+"vllm_metal.metal" = [
+  "README.md",
+  "*.cpp",
+  "kernels_v1/*.metal",
+  "kernels_v2/*.metal",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

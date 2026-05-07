@@ -6,7 +6,12 @@ from pathlib import Path
 import mlx.core as mx
 import pytest
 
-from mtplx.generation import _prefill, generate_ar
+from mtplx.generation import (
+    _make_target_prefill_cache,
+    _maybe_repage_target_prefill_cache,
+    _prefill,
+    generate_ar,
+)
 from mtplx.mtp_patch import MTPContract
 from mtplx.runtime import MTPLXRuntime
 from mtplx.sampling import SamplerConfig
@@ -85,6 +90,70 @@ def _runtime(model: TinyModel, *, mtp_enabled: bool = True) -> MTPLXRuntime:
     )
 
 
+def test_contiguous_then_repage_cache_layout_restores_paged_env(monkeypatch):
+    cache: list[object] = []
+    events: list[tuple[str, str | None]] = []
+
+    class Runtime:
+        def make_cache(self):
+            events.append(("make_cache", os.environ.get("MTPLX_VLLM_METAL_PAGED_ATTN")))
+            return cache
+
+    def configure(received_cache):
+        events.append(("repage", os.environ.get("MTPLX_VLLM_METAL_PAGED_ATTN")))
+        assert received_cache is cache
+        return {"enabled": 1, "entries": 0, "skipped": 0}
+
+    monkeypatch.setenv("MTPLX_SUSTAINED_PREFILL_LAYOUT", "contiguous_then_repage")
+    monkeypatch.setenv("MTPLX_VLLM_METAL_PAGED_ATTN", "1")
+    monkeypatch.setenv("MTPLX_OWNED_ATTN_KV", "1")
+    monkeypatch.setenv("MTPLX_BLOCK_OWNED_ATTN_KV", "1")
+    monkeypatch.setattr(
+        "mtplx.cache_state.configure_tail_owned_attention_kv_cache",
+        configure,
+    )
+
+    made_cache = _make_target_prefill_cache(Runtime())
+    elapsed = _maybe_repage_target_prefill_cache(made_cache)
+
+    assert elapsed >= 0.0
+    assert events == [("make_cache", "0"), ("repage", "1")]
+    assert os.environ["MTPLX_VLLM_METAL_PAGED_ATTN"] == "1"
+    assert os.environ["MTPLX_OWNED_ATTN_KV"] == "1"
+    assert os.environ["MTPLX_BLOCK_OWNED_ATTN_KV"] == "1"
+
+
+def test_contiguous_dense_decode_cache_layout_does_not_repage(monkeypatch):
+    cache: list[object] = []
+    events: list[tuple[str, str | None]] = []
+
+    class Runtime:
+        def make_cache(self):
+            events.append(("make_cache", os.environ.get("MTPLX_VLLM_METAL_PAGED_ATTN")))
+            return cache
+
+    def configure(_received_cache):
+        raise AssertionError("dense decode layout must not repage after prefill")
+
+    monkeypatch.setenv("MTPLX_SUSTAINED_PREFILL_LAYOUT", "contiguous_dense_decode")
+    monkeypatch.setenv("MTPLX_VLLM_METAL_PAGED_ATTN", "1")
+    monkeypatch.setenv("MTPLX_OWNED_ATTN_KV", "1")
+    monkeypatch.setenv("MTPLX_BLOCK_OWNED_ATTN_KV", "1")
+    monkeypatch.setattr(
+        "mtplx.cache_state.configure_tail_owned_attention_kv_cache",
+        configure,
+    )
+
+    made_cache = _make_target_prefill_cache(Runtime())
+    elapsed = _maybe_repage_target_prefill_cache(made_cache)
+
+    assert elapsed == 0.0
+    assert events == [("make_cache", "0")]
+    assert os.environ["MTPLX_VLLM_METAL_PAGED_ATTN"] == "1"
+    assert os.environ["MTPLX_OWNED_ATTN_KV"] == "1"
+    assert os.environ["MTPLX_BLOCK_OWNED_ATTN_KV"] == "1"
+
+
 def test_generate_ar_does_not_request_hidden_by_default(monkeypatch):
     monkeypatch.delenv("MTPLX_AR_RETURN_HIDDEN", raising=False)
     monkeypatch.delenv("MTPLX_DIAGNOSTIC_AR_RETURN_HIDDEN", raising=False)
@@ -101,6 +170,9 @@ def test_generate_ar_does_not_request_hidden_by_default(monkeypatch):
     assert out.stats.ar_return_hidden is False
     assert out.stats.forward_ar_hidden_calls == 0
     assert out.stats.forward_ar_plain_calls >= 1
+    assert out.stats.prompt_target_prefill_time_s == out.stats.prompt_eval_time_s
+    assert out.stats.prompt_mtp_history_time_s == 0.0
+    assert out.stats.prompt_target_prefill_tok_s > 0.0
     assert all(call["return_hidden"] is False for call in model.calls)
 
 

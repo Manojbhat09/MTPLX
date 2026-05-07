@@ -6,6 +6,7 @@ optimized runtime can tighten the same contracts after the MTP-1 gates pass.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 import sys
@@ -22,7 +23,6 @@ from .attention_context import attention_phase
 from .cache_state import (
     detach_array_leaf,
     detach_cache_state,
-    detach_recurrent_cache_state,
     owned_recurrent_state_stats,
     rollback_after_verify,
     snapshot_untrimmable_cache,
@@ -131,6 +131,46 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _normalize_mtp_history_policy(policy: str | None) -> str:
+    normalized = (policy or "cycle").strip().lower().replace("-", "_")
+    aliases = {
+        "full": "committed",
+        "lastwindow": "last_window",
+        "window": "last_window",
+        "none": "cycle",
+        "off": "cycle",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"auto", "cycle", "committed", "last_window"}:
+        raise ValueError(
+            "mtp_history_policy must be 'auto', 'cycle', 'committed', "
+            "'full', 'last_window', or 'none'"
+        )
+    return normalized
+
+
+def _mtp_history_uses_committed_cache(policy: str) -> bool:
+    return _normalize_mtp_history_policy(policy) in {"committed", "last_window"}
+
+
+def _mtp_history_last_window_tokens() -> int:
+    return max(1, _env_int("MTPLX_MTP_HISTORY_LAST_WINDOW", 8192))
+
+
+def _resolve_mtp_history_policy(requested_policy: str, prompt_tokens: int) -> str:
+    requested = _normalize_mtp_history_policy(requested_policy)
+    env_policy = os.environ.get("MTPLX_MTP_HISTORY_POLICY")
+    if env_policy and requested == "committed":
+        requested = _normalize_mtp_history_policy(env_policy)
+    if requested != "auto":
+        return requested
+    threshold = max(
+        1,
+        _env_int("MTPLX_MTP_HISTORY_LAST_WINDOW_THRESHOLD", 16384),
+    )
+    return "last_window" if int(prompt_tokens) >= threshold else "committed"
+
+
 def _runtime_count(rt: MTPLXRuntime, key: str, amount: int = 1) -> None:
     counters = getattr(rt, "diagnostic_counters", None)
     if counters is None:
@@ -205,11 +245,38 @@ def _attach_runtime_diagnostics(
     stats.paged_attention_large_q_path = str(
         owned_attn.get("paged_attention_large_q_path") or ""
     )
+    stats.prefill_route = (
+        _sustained_prefill_layout()
+        if _contiguous_prefill_cache_layout_enabled()
+        else stats.paged_attention_large_q_path
+    )
     stats.large_q_split_sdpa_fallback_calls = int(
         owned_attn.get("large_q_split_sdpa_fallback_calls") or 0
     )
+    large_q_by_phase = (
+        owned_attn.get("large_q_split_sdpa_fallback_calls_by_phase") or {}
+    )
+    stats.large_q_split_sdpa_fallback_calls_by_phase = (
+        dict(large_q_by_phase) if isinstance(large_q_by_phase, dict) else {}
+    )
+    stats.prefill_large_q_split_sdpa_fallback_calls = int(
+        owned_attn.get("prefill_large_q_split_sdpa_fallback_calls") or 0
+    )
+    stats.decode_large_q_split_sdpa_fallback_calls = int(
+        owned_attn.get("decode_large_q_split_sdpa_fallback_calls") or 0
+    )
     stats.partitioned_paged_calls = int(
         owned_attn.get("partitioned_paged_calls") or 0
+    )
+    partitioned_by_phase = owned_attn.get("partitioned_paged_calls_by_phase") or {}
+    stats.partitioned_paged_calls_by_phase = (
+        dict(partitioned_by_phase) if isinstance(partitioned_by_phase, dict) else {}
+    )
+    stats.prefill_partitioned_paged_calls = int(
+        owned_attn.get("prefill_partitioned_paged_calls") or 0
+    )
+    stats.decode_partitioned_paged_calls = int(
+        owned_attn.get("decode_partitioned_paged_calls") or 0
     )
 
 
@@ -234,6 +301,70 @@ def _iter_prefill_chunks(token_ids: list[int]) -> list[list[int]]:
         return [token_ids]
     chunk_size = _prefill_chunk_size()
     return [token_ids[start : start + chunk_size] for start in range(0, len(token_ids), chunk_size)]
+
+
+def _sustained_prefill_layout() -> str:
+    return (
+        os.environ.get("MTPLX_SUSTAINED_PREFILL_LAYOUT", "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
+
+
+def _contiguous_then_repage_prefill_enabled() -> bool:
+    return _sustained_prefill_layout() == "contiguous_then_repage"
+
+
+def _contiguous_dense_decode_prefill_enabled() -> bool:
+    return _sustained_prefill_layout() == "contiguous_dense_decode"
+
+
+def _contiguous_prefill_cache_layout_enabled() -> bool:
+    return (
+        _contiguous_then_repage_prefill_enabled()
+        or _contiguous_dense_decode_prefill_enabled()
+    )
+
+
+@contextmanager
+def _target_prefill_cache_layout_scope():
+    if not _contiguous_prefill_cache_layout_enabled():
+        yield
+        return
+    keys = (
+        "MTPLX_VLLM_METAL_PAGED_ATTN",
+        "MTPLX_OWNED_ATTN_KV",
+        "MTPLX_BLOCK_OWNED_ATTN_KV",
+    )
+    saved = {key: os.environ.get(key) for key in keys}
+    os.environ["MTPLX_VLLM_METAL_PAGED_ATTN"] = "0"
+    os.environ["MTPLX_OWNED_ATTN_KV"] = "0"
+    os.environ["MTPLX_BLOCK_OWNED_ATTN_KV"] = "0"
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _make_target_prefill_cache(rt: MTPLXRuntime):
+    with _target_prefill_cache_layout_scope():
+        return rt.make_cache()
+
+
+def _maybe_repage_target_prefill_cache(cache: Any) -> float:
+    if not _contiguous_then_repage_prefill_enabled():
+        return 0.0
+    from .cache_state import configure_tail_owned_attention_kv_cache
+
+    started = time.perf_counter()
+    configure_tail_owned_attention_kv_cache(cache)
+    _eval_cache_roots(cache)
+    return time.perf_counter() - started
 
 
 def _eval_cache_roots(cache: Any) -> None:
@@ -798,8 +929,17 @@ class GenerationStats:
     postcommit_dense_fallback_calls: int = 0
     paged_attention_bailouts_by_phase_reason: dict[str, int] = field(default_factory=dict)
     paged_attention_large_q_path: str = ""
+    prefill_route: str = ""
     large_q_split_sdpa_fallback_calls: int = 0
+    large_q_split_sdpa_fallback_calls_by_phase: dict[str, int] = field(
+        default_factory=dict
+    )
+    prefill_large_q_split_sdpa_fallback_calls: int = 0
+    decode_large_q_split_sdpa_fallback_calls: int = 0
     partitioned_paged_calls: int = 0
+    partitioned_paged_calls_by_phase: dict[str, int] = field(default_factory=dict)
+    prefill_partitioned_paged_calls: int = 0
+    decode_partitioned_paged_calls: int = 0
     sessionbank_snapshot_bytes: int = 0
     sessionbank_skipped_oversized_snapshot: bool = False
     accepted_drafts: int = 0
@@ -816,6 +956,14 @@ class GenerationStats:
     draft_time_s: float = 0.0
     target_forward_time_s: float = 0.0
     prompt_eval_time_s: float = 0.0
+    prompt_tps: float = 0.0
+    prompt_target_prefill_time_s: float = 0.0
+    prompt_mtp_history_time_s: float = 0.0
+    prompt_target_prefill_tok_s: float = 0.0
+    prompt_mtp_history_tok_s: float = 0.0
+    mtp_history_policy: str = "cycle"
+    mtp_history_window_tokens: int = 0
+    mtp_history_position_base: int = 0
     cached_tokens: int = 0
     new_prefill_tokens: int = 0
     session_cache_hit: bool = False
@@ -921,6 +1069,9 @@ class PromptState:
     token_prefix: tuple[int, ...]
     prompt_eval_time_s: float
     prompt_mtp_history_time_s: float = 0.0
+    mtp_history_policy: str = "cycle"
+    mtp_history_window_tokens: int = 0
+    mtp_history_position_base: int = 0
     cached_tokens: int = 0
     suffix_tokens: int = 0
     cache_hit: bool = False
@@ -937,6 +1088,9 @@ class GenerationFinalState:
     generated_token_ids: tuple[int, ...]
     safe_to_commit: bool
     finish_reason: str
+    mtp_history_policy: str = "cycle"
+    mtp_history_window_tokens: int = 0
+    mtp_history_position_base: int = 0
 
 
 def restore_or_prefill_prompt_state(
@@ -957,6 +1111,15 @@ def restore_or_prefill_prompt_state(
     today's cold path behavior intact while giving EngineSession a concrete
     target for future warm SessionBank restores.
     """
+    mtp_history_policy = _resolve_mtp_history_policy(
+        mtp_history_policy,
+        len(prompt_ids),
+    )
+    mtp_history_window_tokens = (
+        _mtp_history_last_window_tokens()
+        if mtp_history_policy == "last_window"
+        else 0
+    )
     if session_bank is not None:
         restored = session_bank.restore(
             rt,
@@ -969,7 +1132,7 @@ def restore_or_prefill_prompt_state(
             policy_fingerprint=policy_fingerprint,
         )
         if restored is not None and (
-            mtp_history_policy != "committed"
+            not _mtp_history_uses_committed_cache(mtp_history_policy)
             or restored.mtp_history_cache is not None
         ):
             suffix = list(prompt_ids[restored.entry.prefix_len :])
@@ -981,6 +1144,8 @@ def restore_or_prefill_prompt_state(
                     committed_mtp_cache=restored.mtp_history_cache,
                     token_prefix=tuple(int(token) for token in prompt_ids),
                     prompt_eval_time_s=0.0,
+                    mtp_history_policy=mtp_history_policy,
+                    mtp_history_window_tokens=mtp_history_window_tokens,
                     cached_tokens=restored.entry.prefix_len,
                     suffix_tokens=0,
                     cache_hit=True,
@@ -999,7 +1164,7 @@ def restore_or_prefill_prompt_state(
             _eval(suffix_logits, suffix_hidden)
             suffix_time = time.perf_counter() - started
             mtp_history_time = 0.0
-            if mtp_history_policy == "committed":
+            if _mtp_history_uses_committed_cache(mtp_history_policy):
                 history_hidden_parts = []
                 if restored.hidden is not None:
                     history_hidden_parts.append(restored.hidden)
@@ -1026,6 +1191,8 @@ def restore_or_prefill_prompt_state(
                 token_prefix=tuple(int(token) for token in prompt_ids),
                 prompt_eval_time_s=suffix_time + mtp_history_time,
                 prompt_mtp_history_time_s=mtp_history_time,
+                mtp_history_policy=mtp_history_policy,
+                mtp_history_window_tokens=mtp_history_window_tokens,
                 cached_tokens=restored.entry.prefix_len,
                 suffix_tokens=len(suffix),
                 cache_hit=True,
@@ -1034,7 +1201,8 @@ def restore_or_prefill_prompt_state(
 
     mtp_history_cache = None
     prompt_history_time = 0.0
-    if mtp_history_policy == "committed":
+    mtp_history_position_base = 0
+    if _mtp_history_uses_committed_cache(mtp_history_policy):
         if _sustained_prefill_enabled():
             (
                 cache,
@@ -1043,10 +1211,16 @@ def restore_or_prefill_prompt_state(
                 mtp_history_cache,
                 target_time,
                 prompt_history_time,
+                mtp_history_position_base,
             ) = _prefill_committed_mtp_history_streaming(
                 rt,
                 prompt_ids,
                 mtp_hidden_variant=mtp_hidden_variant,
+                history_window_tokens=(
+                    mtp_history_window_tokens
+                    if mtp_history_policy == "last_window"
+                    else None
+                ),
             )
             prompt_eval_time = target_time + prompt_history_time
         else:
@@ -1057,12 +1231,25 @@ def restore_or_prefill_prompt_state(
             prompt_eval_time = target_time
             mtp_history_cache = rt.make_mtp_cache()
             if len(prompt_ids) > 1:
+                history_token_ids = prompt_ids[1:]
+                history_hidden = prompt_hidden[:, :-1, :]
+                if mtp_history_policy == "last_window":
+                    keep = min(len(history_token_ids), mtp_history_window_tokens)
+                    dropped = len(history_token_ids) - keep
+                    mtp_history_position_base = max(0, dropped)
+                    history_token_ids = history_token_ids[-keep:]
+                    history_hidden = history_hidden[:, -keep:, :]
                 prompt_history_time = _append_mtp_history(
                     rt,
                     mtp_history_cache,
-                    prompt_hidden[:, :-1, :],
-                    prompt_ids[1:],
+                    history_hidden,
+                    history_token_ids,
                     mtp_hidden_variant=mtp_hidden_variant,
+                    position_offset=(
+                        mtp_history_position_base
+                        if mtp_history_policy == "last_window"
+                        else None
+                    ),
                 )
                 prompt_eval_time += prompt_history_time
     else:
@@ -1076,6 +1263,9 @@ def restore_or_prefill_prompt_state(
         token_prefix=tuple(int(token) for token in prompt_ids),
         prompt_eval_time_s=prompt_eval_time,
         prompt_mtp_history_time_s=prompt_history_time,
+        mtp_history_policy=mtp_history_policy,
+        mtp_history_window_tokens=mtp_history_window_tokens,
+        mtp_history_position_base=mtp_history_position_base,
         suffix_tokens=len(prompt_ids),
         cache_miss_reason=getattr(session_bank, "last_miss_reason", None)
         if session_bank is not None
@@ -1406,7 +1596,7 @@ def _prefill(rt: MTPLXRuntime, prompt_ids: list[int], *, return_hidden: bool):
     if not prompt_ids:
         raise ValueError("prompt_ids must not be empty")
 
-    cache = rt.make_cache()
+    cache = _make_target_prefill_cache(rt)
     target_forward_time = 0.0
     final_logits_only = _final_logits_prefill_enabled()
 
@@ -1445,6 +1635,7 @@ def _prefill(rt: MTPLXRuntime, prompt_ids: list[int], *, return_hidden: bool):
         hidden = None
         _eval(logits)
     target_forward_time += time.perf_counter() - started
+    target_forward_time += _maybe_repage_target_prefill_cache(cache)
     return cache, logits[:, -1, :], hidden, target_forward_time
 
 
@@ -1453,16 +1644,23 @@ def _prefill_committed_mtp_history_streaming(
     prompt_ids: list[int],
     *,
     mtp_hidden_variant: str,
+    history_window_tokens: int | None = None,
 ):
     if not prompt_ids:
         raise ValueError("prompt_ids must not be empty")
 
-    cache = rt.make_cache()
+    cache = _make_target_prefill_cache(rt)
     mtp_history_cache = rt.make_mtp_cache()
     target_forward_time = 0.0
     prompt_history_time = 0.0
     final_logits_only = _final_logits_prefill_enabled()
     body = prompt_ids[:-1]
+    history_start_token_index = 1
+    mtp_history_position_base = 0
+    if history_window_tokens is not None:
+        window = max(1, int(history_window_tokens))
+        history_start_token_index = max(1, len(prompt_ids) - window)
+        mtp_history_position_base = max(0, history_start_token_index - 1)
 
     cursor = 0
     for chunk in _iter_prefill_chunks(body):
@@ -1482,15 +1680,29 @@ def _prefill_committed_mtp_history_streaming(
         target_forward_time += time.perf_counter() - started
         _runtime_count(rt, "prefill_chunks")
 
-        token_ids = prompt_ids[cursor + 1 : cursor + 1 + len(chunk)]
-        prompt_history_time += _append_mtp_history(
-            rt,
-            mtp_history_cache,
-            hidden_chunk,
-            token_ids,
-            mtp_hidden_variant=mtp_hidden_variant,
-            force_eval=True,
-        )
+        token_start_index = cursor + 1
+        token_ids = prompt_ids[token_start_index : token_start_index + len(chunk)]
+        slice_start = max(0, history_start_token_index - token_start_index)
+        if slice_start < len(token_ids):
+            sliced_token_ids = token_ids[slice_start:]
+            sliced_hidden = hidden_chunk[
+                :,
+                slice_start : slice_start + len(sliced_token_ids),
+                :,
+            ]
+            prompt_history_time += _append_mtp_history(
+                rt,
+                mtp_history_cache,
+                sliced_hidden,
+                sliced_token_ids,
+                mtp_hidden_variant=mtp_hidden_variant,
+                position_offset=(
+                    token_start_index + slice_start - 1
+                    if history_window_tokens is not None
+                    else None
+                ),
+                force_eval=True,
+            )
         cursor += len(chunk)
         del hidden_chunk
         del logits_chunk
@@ -1507,6 +1719,7 @@ def _prefill_committed_mtp_history_streaming(
         )
     _eval(logits, hidden)
     target_forward_time += time.perf_counter() - started
+    target_forward_time += _maybe_repage_target_prefill_cache(cache)
     return (
         cache,
         logits[:, -1, :],
@@ -1514,6 +1727,7 @@ def _prefill_committed_mtp_history_streaming(
         mtp_history_cache,
         target_forward_time,
         prompt_history_time,
+        mtp_history_position_base,
     )
 
 
@@ -1521,7 +1735,7 @@ def _prefill_with_hidden_sequence(rt: MTPLXRuntime, prompt_ids: list[int]):
     if not prompt_ids:
         raise ValueError("prompt_ids must not be empty")
 
-    cache = rt.make_cache()
+    cache = _make_target_prefill_cache(rt)
     started = time.perf_counter()
     with attention_phase("prefill"):
         logits, hidden = rt.forward_ar(
@@ -1533,6 +1747,7 @@ def _prefill_with_hidden_sequence(rt: MTPLXRuntime, prompt_ids: list[int]):
         )
     _eval(logits, hidden)
     target_forward_time = time.perf_counter() - started
+    target_forward_time += _maybe_repage_target_prefill_cache(cache)
     return cache, logits[:, -1, :], hidden[:, -1:, :], hidden, target_forward_time
 
 
@@ -1792,7 +2007,6 @@ def generate_ar(
         target_eval_time += eval_elapsed
         verify_calls += 1
         logits = logits_next[:, -1, :]
-        hidden = hidden_next[:, -1:, :] if hidden_next is not None else None
 
     elapsed = time.perf_counter() - started_all
     emit_trace(force=True, final=True)
@@ -1803,6 +2017,13 @@ def generate_ar(
         tok_s=len(tokens) / elapsed if elapsed else 0.0,
         target_forward_time_s=prompt_eval_time + target_decode_time,
         prompt_eval_time_s=prompt_eval_time,
+        prompt_tps=(
+            len(prompt_ids) / prompt_eval_time if prompt_eval_time > 0 else 0.0
+        ),
+        prompt_target_prefill_time_s=prompt_eval_time,
+        prompt_target_prefill_tok_s=(
+            len(prompt_ids) / prompt_eval_time if prompt_eval_time > 0 else 0.0
+        ),
         verify_time_s=target_decode_time,
         verify_forward_time_s=target_forward_graph_time,
         verify_eval_time_s=target_eval_time,
@@ -1873,11 +2094,6 @@ def generate_mtp1(
     draft_time = verify_time = 0.0
     verify_forward_time = 0.0
     verify_eval_time = 0.0
-    verify_logits_eval_time = 0.0
-    verify_hidden_eval_time = 0.0
-    verify_joint_eval_time = 0.0
-    verify_target_distribution_time = 0.0
-    verify_eval_unattributed_time = 0.0
     snapshot_time = accept_time = rollback_time = repair_time = 0.0
     commit_time = capture_commit_time = 0.0
     bonus_time = 0.0
@@ -2470,8 +2686,7 @@ def generate_mtpk(
         raise ValueError("min_speculative_depth cannot exceed speculative_depth")
     if mtp_cache_policy not in {"persistent", "fresh"}:
         raise ValueError("mtp_cache_policy must be 'persistent' or 'fresh'")
-    if mtp_history_policy not in {"cycle", "committed"}:
-        raise ValueError("mtp_history_policy must be 'cycle' or 'committed'")
+    mtp_history_policy = _normalize_mtp_history_policy(mtp_history_policy)
     if online_hidden_corrector_alpha < 0:
         raise ValueError("online_hidden_corrector_alpha must be >= 0")
     if not 0 <= online_hidden_corrector_decay < 1:
@@ -2548,8 +2763,13 @@ def generate_mtpk(
     logits = prompt_state.logits
     hidden = prompt_state.hidden
     mtp_history_cache = prompt_state.committed_mtp_cache
+    mtp_history_policy = prompt_state.mtp_history_policy
+    mtp_history_position_base = int(prompt_state.mtp_history_position_base)
     prompt_eval_time = prompt_state.prompt_eval_time_s
-    target_time = max(0.0, prompt_eval_time - prompt_state.prompt_mtp_history_time_s)
+    prompt_target_prefill_time = max(
+        0.0, prompt_eval_time - prompt_state.prompt_mtp_history_time_s
+    )
+    target_time = prompt_target_prefill_time
     draft_time += prompt_state.prompt_mtp_history_time_s
     graphbank = (
         SpecDecodeGraphBank(rt, capture_backend=verify_core_backend)
@@ -2643,6 +2863,12 @@ def generate_mtpk(
     )
 
     def mtp_position_offset_for_cache(mtp_cache) -> int | None:
+        if (
+            mtp_history_position_base > 0
+            and mtp_cache is mtp_history_cache
+            and _mtp_history_uses_committed_cache(mtp_history_policy)
+        ):
+            return _mtp_cache_offset(mtp_cache) + mtp_history_position_base
         return _mtp_position_offset(
             _mtp_cache_offset(mtp_cache),
             mode=mtp_position_mode,
@@ -2811,6 +3037,11 @@ def generate_mtpk(
             "cap": int(mtp_position_cap),
             "period": int(mtp_position_period),
             "base": int(mtp_position_base),
+        }
+    if mtp_history_policy == "last_window":
+        trace_extra_metadata["mtp_history_last_window"] = {
+            "tokens": int(prompt_state.mtp_history_window_tokens),
+            "position_base": int(prompt_state.mtp_history_position_base),
         }
     trace = _DecodeTrace(
         prompt_tokens=len(prompt_ids),
@@ -3249,7 +3480,7 @@ def generate_mtpk(
         draft_cache_keys: list[tuple[int, ...]] = []
         draft_hidden_for_update: list[mx.array] = []
         draft_hidden_update_keys: list[object] = []
-        if mtp_history_policy == "committed":
+        if _mtp_history_uses_committed_cache(mtp_history_policy):
             mtp_cache = mtp_history_cache
             cycle_mtp_offset = _mtp_cache_offset(mtp_cache)
         else:
@@ -3903,7 +4134,7 @@ def generate_mtpk(
         if accepted_count == len(draft_tokens):
             committed = [primary] + draft_tokens
             tokens.extend(draft_tokens)
-            if mtp_history_policy == "committed":
+            if _mtp_history_uses_committed_cache(mtp_history_policy):
                 assert mtp_cache is not None and cycle_mtp_offset is not None
                 _rollback_mtp_cache(mtp_cache, cycle_mtp_offset + 1)
                 draft_time += append_mtp_history(
@@ -4032,7 +4263,7 @@ def generate_mtpk(
             target_time += elapsed_repair
             repair_time += elapsed_repair
             _add_timing(event, "repair_forward", elapsed_repair)
-        if mtp_history_policy == "committed":
+        if _mtp_history_uses_committed_cache(mtp_history_policy):
             assert mtp_cache is not None and cycle_mtp_offset is not None
             _rollback_mtp_cache(mtp_cache, cycle_mtp_offset + 1)
             history_tokens = committed[1:]
@@ -4070,7 +4301,11 @@ def generate_mtpk(
     final_state: GenerationFinalState | None = None
     if capture_final_state and pending_primary is not None and tokens:
         pending_token = int(pending_primary)
-        if mtp_history_policy == "committed" and mtp_history_cache is not None and hidden is not None:
+        if (
+            _mtp_history_uses_committed_cache(mtp_history_policy)
+            and mtp_history_cache is not None
+            and hidden is not None
+        ):
             commit_started = time.perf_counter()
             draft_time += append_mtp_history(
                 mtp_history_cache,
@@ -4115,6 +4350,9 @@ def generate_mtpk(
             generated_token_ids=tuple(int(token) for token in tokens),
             safe_to_commit=pending_primary is None,
             finish_reason=finish_reason,
+            mtp_history_policy=mtp_history_policy,
+            mtp_history_window_tokens=int(prompt_state.mtp_history_window_tokens),
+            mtp_history_position_base=int(prompt_state.mtp_history_position_base),
         )
     reject_path_counts, repair_time_by_reject_depth = _reject_repair_breakdown(events)
     stats = GenerationStats(
@@ -4136,6 +4374,26 @@ def generate_mtpk(
         draft_time_s=draft_time,
         target_forward_time_s=target_time,
         prompt_eval_time_s=prompt_eval_time,
+        prompt_tps=(
+            prompt_state.suffix_tokens / prompt_eval_time
+            if prompt_eval_time > 0
+            else 0.0
+        ),
+        prompt_target_prefill_time_s=prompt_target_prefill_time,
+        prompt_mtp_history_time_s=prompt_state.prompt_mtp_history_time_s,
+        prompt_target_prefill_tok_s=(
+            prompt_state.suffix_tokens / prompt_target_prefill_time
+            if prompt_target_prefill_time > 0
+            else 0.0
+        ),
+        prompt_mtp_history_tok_s=(
+            prompt_state.suffix_tokens / prompt_state.prompt_mtp_history_time_s
+            if prompt_state.prompt_mtp_history_time_s > 0
+            else 0.0
+        ),
+        mtp_history_policy=mtp_history_policy,
+        mtp_history_window_tokens=int(prompt_state.mtp_history_window_tokens),
+        mtp_history_position_base=int(prompt_state.mtp_history_position_base),
         cached_tokens=prompt_state.cached_tokens,
         new_prefill_tokens=prompt_state.suffix_tokens,
         session_cache_hit=prompt_state.cache_hit,

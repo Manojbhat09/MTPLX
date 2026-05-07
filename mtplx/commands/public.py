@@ -918,6 +918,18 @@ def _print_inspect_human(inspection: dict[str, Any]) -> None:
 
 def cmd_bench_public(args: Any) -> int:
     action = args.bench_action
+    if action == "prefill-ladder":
+        from mtplx.prefill_bench import (
+            emit_prefill_ladder,
+            run_prefill_ladder,
+            write_prefill_ladder,
+        )
+
+        payload = run_prefill_ladder(args)
+        if getattr(args, "output", None):
+            write_prefill_ladder(args.output, payload)
+        emit_prefill_ladder(payload, json_output=bool(getattr(args, "json", False)))
+        return 0
     if action in {"run", "context"}:
         return _cmd_bench_run(args)
     if action == "nightly":

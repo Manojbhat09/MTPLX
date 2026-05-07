@@ -59,9 +59,14 @@ LONG_RESPONSE_STAGED_ENV = {
 }
 
 SUSTAINED_PREFILL_ENV = {
+    **NATIVE_MTP_60_FAST_PATH_ENV,
     "MTPLX_SUSTAINED_PREFILL": "1",
+    "MTPLX_SUSTAINED_PREFILL_LAYOUT": "contiguous_then_repage",
     "MTPLX_PREFILL_CHUNK_SIZE": "2048",
     "MTPLX_TARGET_EMIT_FULL_PREFILL_LOGITS": "0",
+    "MTPLX_MTP_HISTORY_POLICY": "auto",
+    "MTPLX_MTP_HISTORY_LAST_WINDOW": "8192",
+    "MTPLX_MTP_HISTORY_LAST_WINDOW_THRESHOLD": "16384",
     "MTPLX_DYNAMIC_PAGED_KV": "1",
     "MTPLX_VLLM_METAL_PAGED_ATTN": "1",
     "MTPLX_VLLM_METAL_PAGED_BLOCK_SIZE": "16",
@@ -204,7 +209,7 @@ SUSTAINED_PROFILE = RuntimeProfile(
     runtime_profile="native_mtp_sustained",
     summary=(
         "Sustained Mode: explicit long-context native-MTP path with chunked "
-        "prefill, final-token logits, and request-sized paged KV."
+        "contiguous prefill, final-token logits, and repaged decode KV."
     ),
     env=_items(SUSTAINED_PREFILL_ENV),
     caveats=(

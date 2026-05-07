@@ -69,6 +69,7 @@ PUBLIC_COMMANDS = (
     ("ask", "Ask the verified local model once"),
     ("status", "Check install, model, and integration health"),
     ("inspect", "Check whether a model is MTPLX-compatible"),
+    ("hardware", "Inspect Apple Silicon / MLX acceleration eligibility"),
     ("models", "List models in the local MTPLX cache"),
 )
 
@@ -512,6 +513,29 @@ def cmd_bench_public(args: argparse.Namespace) -> int:
     from .commands.public import cmd_bench_public as handler
 
     return handler(args)
+
+
+def cmd_hardware_public(args: argparse.Namespace) -> int:
+    from .hardware import inspect_hardware
+
+    payload = inspect_hardware()
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print("MTPLX hardware inspect")
+    print(f"chip: {payload.get('chip') or 'unknown'}")
+    print(f"macOS: {payload.get('macos_version') or 'unknown'}")
+    print(f"MLX: {payload.get('mlx_version') or 'not installed'}")
+    print(f"Python: {payload.get('python_version')} ({payload.get('machine')})")
+    print(f"unified memory: {payload.get('unified_memory_gb') or 'unknown'} GB")
+    print(
+        "M5 TensorOps eligible: "
+        f"{str(bool(payload.get('m5_neural_accelerator_eligible'))).lower()}"
+    )
+    print("hardware acceleration confirmed: false")
+    for warning in payload.get("warnings") or []:
+        print(f"warning: {warning}")
+    return 0
 
 
 def cmd_chat_public(args: argparse.Namespace) -> int:
@@ -1552,6 +1576,15 @@ def build_parser() -> argparse.ArgumentParser:
     advanced_p = sub.add_parser("advanced", help=argparse.SUPPRESS)
     advanced_p.set_defaults(func=lambda _args: (print(_format_advanced_help()) or 0))
 
+    hardware_p = sub.add_parser("hardware", help="Inspect local Apple Silicon hardware")
+    hardware_sub = hardware_p.add_subparsers(dest="hardware_action", required=True)
+    hardware_inspect_p = hardware_sub.add_parser(
+        "inspect",
+        help="Report hardware and MLX acceleration eligibility",
+    )
+    hardware_inspect_p.add_argument("--json", action="store_true")
+    hardware_inspect_p.set_defaults(func=cmd_hardware_public)
+
     start_flow_p = sub.add_parser(
         "start",
         help="Interactive setup → chat (model · mode · web/CLI)",
@@ -2011,7 +2044,16 @@ def build_parser() -> argparse.ArgumentParser:
     bench_p.add_argument(
         "bench_action",
         nargs="?",
-        choices=["run", "context", "nightly", "compare", "serve", "reference", "reference-vllm"],
+        choices=[
+            "run",
+            "context",
+            "prefill-ladder",
+            "nightly",
+            "compare",
+            "serve",
+            "reference",
+            "reference-vllm",
+        ],
         help="Public benchmark action. Omit for legacy benchmark flags.",
     )
     bench_p.add_argument("--backend", default="manifest")
@@ -2119,8 +2161,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sampler seed. Defaults are harness-aware: 42 for long direct-HTTP runs, 0 for cold depth-sweep runs.",
     )
     bench_p.add_argument("--max-tokens", type=int, default=128)
+    bench_p.add_argument(
+        "--contexts",
+        help="Comma-separated prompt token contexts for bench prefill-ladder, e.g. 512,1k,32k",
+    )
+    bench_p.add_argument(
+        "--full",
+        action="store_true",
+        help="Include 64k and 128k in bench prefill-ladder defaults.",
+    )
+    bench_p.add_argument(
+        "--prompt-style",
+        choices=("coding-agent", "legacy-repeat"),
+        default="coding-agent",
+        help=(
+            "Prompt construction for bench prefill-ladder. coding-agent keeps a "
+            "coherent final user request after the long filler; legacy-repeat "
+            "preserves the old hard-truncated synthetic stream for diagnostics."
+        ),
+    )
+    bench_p.add_argument(
+        "--prompt-format",
+        choices=("chat", "raw"),
+        default="chat",
+        help=(
+            "Prompt envelope for bench prefill-ladder. chat matches the product "
+            "API path; raw is diagnostic-only."
+        ),
+    )
+    bench_p.add_argument(
+        "--prompt-tail",
+        help="Override the coherent final request used by bench prefill-ladder.",
+    )
+    bench_p.add_argument(
+        "--prompt-tail-file",
+        help="Read the coherent final request for bench prefill-ladder from a UTF-8 file.",
+    )
+    bench_p.add_argument(
+        "--prefill-layout",
+        choices=("profile", "contiguous-then-repage", "contiguous-dense-decode"),
+        default="profile",
+        help=(
+            "Override MTPLX_SUSTAINED_PREFILL_LAYOUT for bench prefill-ladder. "
+            "Use profile for the selected profile default."
+        ),
+    )
     bench_p.add_argument("--limit", type=int)
     bench_p.add_argument("--disable-thinking", action="store_true")
+    bench_p.add_argument(
+        "--enable-thinking",
+        action="store_true",
+        help="Enable Qwen thinking in bench prefill-ladder chat formatting.",
+    )
     bench_p.add_argument("--speculative-depth", type=int, default=0)
     bench_p.add_argument("--adaptive", action="store_true")
     bench_p.set_defaults(func=_cmd_bench)
