@@ -694,6 +694,38 @@ def _fake_generation(text: str):
     }
 
 
+def _fake_streaming_generation(text: str):
+    tokens = [ord(char) for char in text]
+
+    def fake_run_generation(_state, _prompt_ids, **kwargs):
+        token_callback = kwargs.get("token_callback")
+        if token_callback is not None:
+            for token in tokens:
+                token_callback([token])
+        return {
+            "text": text,
+            "tokens": tokens,
+            "stats": {
+                "generation_mode": kwargs["generation_mode"],
+                "mtp_depth": kwargs["depth"],
+                "completion_tokens": len(tokens),
+            },
+            "prompt_tokens": 3,
+            "completion_tokens": len(tokens),
+            "finish_reason": "stop",
+        }
+
+    return fake_run_generation
+
+
+def _stream_payloads(response_text: str) -> list[dict]:
+    return [
+        json.loads(line.removeprefix("data: "))
+        for line in response_text.splitlines()
+        if line.startswith("data: {")
+    ]
+
+
 def test_chat_tools_are_passed_to_qwen_template_and_disable_default_thinking(
     monkeypatch,
 ):
@@ -826,7 +858,7 @@ def test_chat_stream_tool_calls_emit_delta_tool_calls(monkeypatch):
     monkeypatch.setattr(
         openai,
         "_run_generation",
-        lambda *_args, **_kwargs: _fake_generation(
+        _fake_streaming_generation(
             "<tool_call>\n<function=session_status>\n</function>\n</tool_call>"
         ),
     )
@@ -849,6 +881,48 @@ def test_chat_stream_tool_calls_emit_delta_tool_calls(monkeypatch):
     assert "<tool_call>" not in response.text
 
 
+def test_chat_stream_tools_plain_content_stays_incremental(monkeypatch):
+    state = _fake_state()
+    state.args.stream_interval = 1
+    state.args.stats_footer = False
+    client = TestClient(create_app(state))
+    monkeypatch.setattr(openai, "_encode_messages", lambda *_args, **_kwargs: [1, 2, 3])
+    monkeypatch.setattr(
+        openai,
+        "_run_generation",
+        _fake_streaming_generation("Count: 1, 2, 3.\n"),
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-mtplx-cache-mode": "bypass"},
+        json={
+            "messages": [{"role": "user", "content": "Count."}],
+            "tools": [_tool_schema()],
+            "tool_choice": "auto",
+            "stream": True,
+            "max_tokens": 16,
+            "enable_thinking": False,
+        },
+    )
+
+    assert response.status_code == 200
+    payloads = _stream_payloads(response.text)
+    content_deltas = [
+        payload["choices"][0]["delta"]["content"]
+        for payload in payloads
+        if payload["choices"][0]["delta"].get("content")
+    ]
+    assert len(content_deltas) > 1
+    assert "".join(content_deltas) == "Count: 1, 2, 3.\n"
+    assert not any(
+        payload["choices"][0]["delta"].get("tool_calls") for payload in payloads
+    )
+    assert any(
+        payload["choices"][0].get("finish_reason") == "stop" for payload in payloads
+    )
+
+
 def test_chat_stream_tool_call_arguments_are_incremental(monkeypatch):
     state = _fake_state()
     state.args.stream_interval = 1
@@ -857,7 +931,7 @@ def test_chat_stream_tool_call_arguments_are_incremental(monkeypatch):
     monkeypatch.setattr(
         openai,
         "_run_generation",
-        lambda *_args, **_kwargs: _fake_generation(
+        _fake_streaming_generation(
             '<tool_call>{"name":"add","arguments":{"a":25,"b":17}}</tool_call>'
         ),
     )
@@ -875,11 +949,7 @@ def test_chat_stream_tool_call_arguments_are_incremental(monkeypatch):
     )
 
     assert response.status_code == 200
-    payloads = [
-        json.loads(line.removeprefix("data: "))
-        for line in response.text.splitlines()
-        if line.startswith("data: {")
-    ]
+    payloads = _stream_payloads(response.text)
     tool_deltas = [
         payload["choices"][0]["delta"]["tool_calls"][0]
         for payload in payloads

@@ -1264,6 +1264,94 @@ def _stream_tool_call_deltas(
             }
 
 
+class _ToolAwareContentStreamTranslator:
+    """Translate streamed assistant text into OpenAI tool-call deltas when needed."""
+
+    _START_MARKER = "<tool_call"
+
+    def __init__(
+        self,
+        *,
+        tools: list[dict[str, Any]],
+        argument_chunk_chars: int,
+    ) -> None:
+        self._tools = tools
+        self._argument_chunk_chars = max(1, int(argument_chunk_chars))
+        self._pending = ""
+        self._trailing = ""
+        self._mode = "passthrough" if not tools else "undecided"
+        self.tool_calls: list[dict[str, Any]] | None = None
+
+    @property
+    def has_tool_calls(self) -> bool:
+        return bool(self.tool_calls)
+
+    def feed(self, field: str, text: str) -> list[dict[str, Any]]:
+        if not text:
+            return []
+        if field != "content" or self._mode == "passthrough":
+            return [{field: text}]
+        if self._mode == "content":
+            return [{"content": text}]
+        if self._mode == "done":
+            self._trailing += text
+            return []
+
+        self._pending += text
+        if self._mode == "tool":
+            return self._tool_deltas_if_complete(final=False)
+
+        stripped = self._pending.lstrip()
+        if not stripped:
+            return []
+        lowered = stripped.lower()
+        if lowered.startswith(self._START_MARKER):
+            self._mode = "tool"
+            return self._tool_deltas_if_complete(final=False)
+        if self._START_MARKER.startswith(lowered):
+            return []
+
+        self._mode = "content"
+        content = self._pending
+        self._pending = ""
+        return [{"content": content}]
+
+    def finish(self) -> list[dict[str, Any]]:
+        if self._mode == "tool":
+            return self._tool_deltas_if_complete(final=True)
+        if self._mode == "done":
+            if self._trailing.strip():
+                raise _tool_protocol_error("text after tool_call block")
+            return []
+        if self._pending:
+            content = self._pending
+            self._pending = ""
+            self._mode = "content"
+            return [{"content": content}]
+        return []
+
+    def _tool_deltas_if_complete(self, *, final: bool) -> list[dict[str, Any]]:
+        if not final:
+            return []
+        tool_calls = _parse_generated_tool_calls(self._pending, tools=self._tools)
+        if not tool_calls:
+            if final:
+                content = self._pending
+                self._pending = ""
+                self._mode = "content"
+                return [{"content": content}]
+            return []
+        self.tool_calls = tool_calls
+        self._pending = ""
+        self._mode = "done"
+        return list(
+            _stream_tool_call_deltas(
+                tool_calls,
+                argument_chunk_chars=self._argument_chunk_chars,
+            )
+        )
+
+
 def _template_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
     function = tool_call.get("function")
     if isinstance(function, dict):
@@ -5061,121 +5149,6 @@ def create_app(state: ServerState) -> FastAPI:
             )
             generated["stats"]["session_postcommit_snapshot"] = postcommit
 
-        if request.stream and tools_active:
-
-            async def tool_event_stream():
-                def stream_chunk(
-                    *,
-                    delta: dict[str, Any],
-                    finish_reason: str | None = None,
-                    usage: dict[str, int] | None = None,
-                    mtplx_stats: dict[str, Any] | None = None,
-                ) -> str:
-                    payload: dict[str, Any] = {
-                        "id": response_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": delta,
-                                "finish_reason": finish_reason,
-                            }
-                        ],
-                    }
-                    if usage is not None:
-                        payload["usage"] = usage
-                    if mtplx_stats is not None:
-                        payload["mtplx_stats"] = mtplx_stats
-                    return f"data: {json.dumps(payload)}\n\n"
-
-                def stream_error(exc: BaseException) -> str:
-                    if isinstance(exc, HTTPException):
-                        message = str(exc.detail)
-                        error_type = str(exc.status_code)
-                        status_code = exc.status_code
-                    else:
-                        message = str(exc)
-                        error_type = type(exc).__name__
-                        status_code = 500
-                    payload = {
-                        "id": response_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [
-                            {"index": 0, "delta": {}, "finish_reason": "error"}
-                        ],
-                        "error": {
-                            "message": message,
-                            "type": error_type,
-                            "status_code": status_code,
-                        },
-                    }
-                    return f"data: {json.dumps(payload)}\n\n"
-
-                yield stream_chunk(delta={"role": "assistant"})
-                loop = asyncio.get_running_loop()
-                try:
-                    generated = await loop.run_in_executor(
-                        state.generation_executor,
-                        run_generation_for_response,
-                    )
-                    tool_calls = _parse_generated_tool_calls(
-                        str(generated["text"]),
-                        tools=tool_specs,
-                    )
-                    if tool_calls:
-                        generated["finish_reason"] = "tool_calls"
-                        await store_postcommit_snapshot(
-                            generated,
-                            assistant_content="",
-                            assistant_tool_calls=tool_calls,
-                            stream_response=True,
-                        )
-                        argument_chunk_chars = max(1, int(state.args.stream_interval))
-                        for delta in _stream_tool_call_deltas(
-                            tool_calls,
-                            argument_chunk_chars=argument_chunk_chars,
-                        ):
-                            yield stream_chunk(delta=delta)
-                        finish_reason = "tool_calls"
-                    else:
-                        display_text = _display_text(
-                            state,
-                            generated,
-                            thinking_enabled=thinking_enabled,
-                        )
-                        await store_postcommit_snapshot(
-                            generated,
-                            assistant_content=display_text,
-                            stream_response=True,
-                        )
-                        if display_text:
-                            yield stream_chunk(delta={"content": display_text})
-                        finish_reason = generated.get("finish_reason", "stop")
-                except EngineSessionBusy as exc:
-                    yield stream_error(HTTPException(status_code=409, detail=str(exc)))
-                    yield "data: [DONE]\n\n"
-                    return
-                except BaseException as exc:
-                    yield stream_error(exc)
-                    yield "data: [DONE]\n\n"
-                    return
-
-                yield stream_chunk(
-                    delta={},
-                    finish_reason=finish_reason,
-                    usage=_usage_payload(generated),
-                    mtplx_stats=_public_mtplx_stats(generated),
-                )
-                yield "data: [DONE]\n\n"
-
-            return StreamingResponse(
-                tool_event_stream(), media_type="text/event-stream"
-            )
-
         if request.stream:
 
             async def event_stream():
@@ -5211,11 +5184,16 @@ def create_app(state: ServerState) -> FastAPI:
                     thinking_enabled=thinking_enabled
                 )
                 stream_interval = max(1, int(state.args.stream_interval))
+                tool_stream = _ToolAwareContentStreamTranslator(
+                    tools=tool_specs if tools_active else [],
+                    argument_chunk_chars=stream_interval,
+                )
                 pending_stream_tokens: list[int] = []
                 commit_event = Event()
                 commit_state = {
                     "commit": False,
                     "assistant_history_content": None,
+                    "assistant_tool_calls": None,
                     "postcommit_snapshot": None,
                     "retokenize_inline": False,
                 }
@@ -5297,12 +5275,16 @@ def create_app(state: ServerState) -> FastAPI:
                                         if state.args.normalize_thinking_tags
                                         else str(generated["text"])
                                     )
+                                    assistant_tool_calls = commit_state.get(
+                                        "assistant_tool_calls"
+                                    )
                                     if bool(commit_state.get("retokenize_inline")):
                                         postcommit = _store_retokenized_history_snapshot(
                                             state,
                                             session_id=session_id,
                                             messages=request.messages,
                                             assistant_content=assistant_history_content,
+                                            assistant_tool_calls=assistant_tool_calls,
                                             thinking_enabled=thinking_enabled,
                                             policy_fingerprint=policy_fingerprint,
                                         )
@@ -5314,6 +5296,7 @@ def create_app(state: ServerState) -> FastAPI:
                                             generated=generated,
                                             messages=request.messages,
                                             assistant_content=assistant_history_content,
+                                            assistant_tool_calls=assistant_tool_calls,
                                             thinking_enabled=thinking_enabled,
                                             policy_fingerprint=policy_fingerprint,
                                         )
@@ -5368,7 +5351,7 @@ def create_app(state: ServerState) -> FastAPI:
 
                 generation_future = state.generation_executor.submit(worker)
 
-                def delta_chunk(field: str, text: str) -> str:
+                def delta_payload_chunk(delta: dict[str, Any]) -> str:
                     payload = {
                         "id": response_id,
                         "object": "chat.completion.chunk",
@@ -5377,12 +5360,15 @@ def create_app(state: ServerState) -> FastAPI:
                         "choices": [
                             {
                                 "index": 0,
-                                "delta": {field: text},
+                                "delta": delta,
                                 "finish_reason": None,
                             }
                         ],
                     }
                     return f"data: {json.dumps(payload)}\n\n"
+
+                def delta_chunk(field: str, text: str) -> str:
+                    return delta_payload_chunk({field: text})
 
                 def progress_chunk(progress: dict[str, Any]) -> str:
                     payload = {
@@ -5462,11 +5448,27 @@ def create_app(state: ServerState) -> FastAPI:
                 streamed_progress_tokens = 0
                 streamed_decode_started_s: float | None = None
 
-                def remember_stream_chunk(field: str, text: str) -> None:
-                    if field == "reasoning_content":
-                        history_reasoning_chunks.append(text)
-                    elif field == "content":
-                        history_content_chunks.append(text)
+                def remember_stream_delta(delta: dict[str, Any]) -> None:
+                    reasoning = delta.get("reasoning_content")
+                    if isinstance(reasoning, str) and reasoning:
+                        history_reasoning_chunks.append(reasoning)
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        history_content_chunks.append(content)
+
+                def stream_content_delta_chunks(field: str, text: str) -> list[str]:
+                    chunks: list[str] = []
+                    for delta in tool_stream.feed(field, text):
+                        remember_stream_delta(delta)
+                        chunks.append(delta_payload_chunk(delta))
+                    return chunks
+
+                def finish_translated_stream_chunks() -> list[str]:
+                    chunks: list[str] = []
+                    for delta in tool_stream.finish():
+                        remember_stream_delta(delta)
+                        chunks.append(delta_payload_chunk(delta))
+                    return chunks
 
                 def drain_stream_tokens(
                     tokens: list[int],
@@ -5492,6 +5494,8 @@ def create_app(state: ServerState) -> FastAPI:
                     return chunks
 
                 def streamed_history_content() -> str:
+                    if tool_stream.has_tool_calls:
+                        return ""
                     reasoning = (
                         "".join(history_reasoning_chunks)
                         .replace(THINK_OPEN, "")
@@ -5513,8 +5517,8 @@ def create_app(state: ServerState) -> FastAPI:
 
                 for field, text in splitter.start():
                     if text:
-                        remember_stream_chunk(field, text)
-                        yield mark_sse_sent(delta_chunk(field, text))
+                        for chunk in stream_content_delta_chunks(field, text):
+                            yield mark_sse_sent(chunk)
 
                 try:
                     while True:
@@ -5574,27 +5578,37 @@ def create_app(state: ServerState) -> FastAPI:
                                     )
                                 )
                             for field, text in drain_stream_tokens(stream_tokens):
-                                remember_stream_chunk(field, text)
-                                yield mark_sse_sent(delta_chunk(field, text))
+                                for chunk in stream_content_delta_chunks(field, text):
+                                    yield mark_sse_sent(chunk)
                         elif kind == "done":
                             generated = item
                             for field, text in drain_stream_tokens([], force=True):
-                                remember_stream_chunk(field, text)
-                                yield mark_sse_sent(delta_chunk(field, text))
+                                for chunk in stream_content_delta_chunks(field, text):
+                                    yield mark_sse_sent(chunk)
                             tail = decoder.finish()
                             if tail:
                                 for field, text in splitter.feed(tail):
                                     if text:
-                                        remember_stream_chunk(field, text)
-                                        yield mark_sse_sent(delta_chunk(field, text))
+                                        for chunk in stream_content_delta_chunks(
+                                            field, text
+                                        ):
+                                            yield mark_sse_sent(chunk)
                             for field, text in splitter.finish():
                                 if text:
-                                    remember_stream_chunk(field, text)
-                                    yield mark_sse_sent(delta_chunk(field, text))
+                                    for chunk in stream_content_delta_chunks(field, text):
+                                        yield mark_sse_sent(chunk)
+                            for chunk in finish_translated_stream_chunks():
+                                yield mark_sse_sent(chunk)
+                            assistant_tool_calls = tool_stream.tool_calls
+                            if assistant_tool_calls:
+                                generated["finish_reason"] = "tool_calls"
                             if session is not None:
                                 assistant_history_content = streamed_history_content()
                                 commit_state["assistant_history_content"] = (
                                     assistant_history_content
+                                )
+                                commit_state["assistant_tool_calls"] = (
+                                    assistant_tool_calls
                                 )
                                 commit_state["retokenize_inline"] = (
                                     state.args.session_postcommit_mode == "inline"
@@ -5626,6 +5640,7 @@ def create_app(state: ServerState) -> FastAPI:
                                         session_id=session_id,
                                         messages=request.messages,
                                         assistant_content=assistant_history_content,
+                                        assistant_tool_calls=assistant_tool_calls,
                                         thinking_enabled=thinking_enabled,
                                         policy_fingerprint=policy_fingerprint,
                                         unsafe_reason=str(
@@ -5660,8 +5675,11 @@ def create_app(state: ServerState) -> FastAPI:
                                     splitter.reentry_count
                                 )
                             footer = _stats_footer_text(state, generated)
-                            if footer:
-                                yield mark_sse_sent(delta_chunk("content", f"\n\n{footer}"))
+                            if footer and not tool_stream.has_tool_calls:
+                                for chunk in stream_content_delta_chunks(
+                                    "content", f"\n\n{footer}"
+                                ):
+                                    yield mark_sse_sent(chunk)
                             break
                         elif kind == "error":
                             yield mark_sse_sent(error_chunk(item))

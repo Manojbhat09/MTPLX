@@ -6,6 +6,12 @@ All notable user-facing changes are recorded here.
 
 ### Fixed
 
+- Fixed OpenAI chat streaming when `tools` are present so normal assistant text
+  still streams incrementally instead of buffering until the request completes.
+  The unified streaming path now translates generated `<tool_call>` blocks into
+  OpenAI `delta.tool_calls` chunks only when the response is actually a tool
+  call, while preserving normal `delta.content` streaming for Pi, OpenWebUI,
+  Zed, and coding-agent clients that include a `tools` array on every request.
 - Fixed `_schedule_idle_postcommit_snapshot` to actually run the retokenized SessionBank commit when the foreground goes idle. Previously the function was a no-op (it logged `abandoned_foreground_busy` and returned without ever calling `_store_retokenized_history_snapshot`), so any response the generation-final compatibility check rejected as unsafe - most commonly responses containing `tool_calls` - never made it into the bank. Tool-using OpenAI-compatible clients (opencode, Codex, Claude Code, Aider) therefore paid full cold prefill on every turn even when their session id was stable. After this fix, tool-call responses are committed asynchronously after the request stream completes; subsequent turns hit `cached_tokens > 0` and TTFT drops in proportion to the cached prefix length. Bounded `MAX_WAIT_S = 30s` deadline preserves the original "do not block foreground latency" contract.
 
 ## v0.1.6
