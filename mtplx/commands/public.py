@@ -3165,7 +3165,8 @@ def cmd_serve_public(args: Any) -> int:
                 _print_serve_start_line("MTPLX is already running.")
                 _print_serve_start_line(f"OpenAI API Base URL: {base}/v1")
                 _print_serve_start_line(f"Pi model: {pi_model_ref(str(model_id))}")
-                _print_serve_start_line(f"Start Pi: {pi_launch_command(str(model_id))}")
+                _quickstart_launch_pi_now(model_id=str(model_id))
+                _print_serve_start_line(f"Manual fallback: {pi_launch_command(str(model_id))}")
                 _print_serve_start_line("Use the existing server, or stop that terminal with Ctrl-C to restart.")
                 return 0
         if bool(getattr(args, "quickstart_openwebui", False)):
@@ -3336,6 +3337,16 @@ def cmd_serve_public(args: Any) -> int:
         )
     if bool(getattr(args, "open_browser", False)):
         cmd.append("--open-browser")
+    if bool(getattr(args, "quickstart_pi", False)):
+        from mtplx.pi import pi_launch_command
+
+        cmd.extend(
+            [
+                "--launch-pi",
+                "--pi-launch-command",
+                pi_launch_command(str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID)),
+            ]
+        )
     if bool(getattr(args, "stock_ar", False)):
         cmd.append("--stock-ar")
     if relax_mlx_fork_assert:
@@ -4525,8 +4536,24 @@ def _quickstart_print_pi_handoff(args: Any, *, runtime_model: str, pi: dict[str,
     _quickstart_line(f"      Pi model: {pi.get('model_ref')}")
     _quickstart_line(f"      Loading model: {runtime_model}")
     _quickstart_line("      Keep this terminal open for the MTPLX server.")
-    _quickstart_line(f"      In another terminal: {pi.get('launch_command')}")
+    _quickstart_line("      Pi will open automatically when MTPLX is ready.")
+    _quickstart_line(f"      Manual fallback: {pi.get('launch_command')}")
     _quickstart_line()
+
+
+def _quickstart_launch_pi_now(*, model_id: str) -> None:
+    from mtplx.pi import launch_pi_in_terminal, pi_launch_command, pi_model_ref
+
+    model_ref = pi_model_ref(str(model_id))
+    command = pi_launch_command(str(model_id))
+    result = launch_pi_in_terminal(command, model_ref=model_ref)
+    if result.get("status") == "already_running":
+        _print_serve_start_line("Pi already appears to be running.")
+    elif result.get("ok"):
+        _print_serve_start_line("Opening Pi in Terminal...")
+    else:
+        _print_serve_start_line(f"Could not open Pi automatically: {result.get('error')}")
+        _print_serve_start_line(f"Run manually: {command}")
 
 
 def _quickstart_require_pi_cli(args: Any) -> bool:

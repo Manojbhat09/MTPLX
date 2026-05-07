@@ -7,6 +7,8 @@ server yet. The generation path is serialized because the current cache and
 GraphBank machinery has not been audited for concurrent requests.
 """
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
@@ -426,6 +428,28 @@ def _open_browser_later(url: str, *, delay_s: float = 1.0) -> None:
             print(f"[mtplx] could not open browser: {exc}", flush=True)
 
     timer = Timer(delay_s, open_url)
+    timer.daemon = True
+    timer.start()
+
+
+def _open_pi_later(command: str, *, model_id: str, delay_s: float = 1.0) -> None:
+    def open_pi() -> None:
+        try:
+            from mtplx.pi import launch_pi_in_terminal, pi_model_ref
+
+            result = launch_pi_in_terminal(command, model_ref=pi_model_ref(model_id))
+            if result.get("status") == "already_running":
+                _startup_line("Pi already appears to be running.")
+            elif result.get("ok"):
+                _startup_line("Pi opened in Terminal.")
+            else:
+                _startup_line(f"warning: could not open Pi automatically: {result.get('error')}")
+                _startup_line(f"run manually: {command}")
+        except Exception as exc:
+            _startup_line(f"warning: could not open Pi automatically: {exc}")
+            _startup_line(f"run manually: {command}")
+
+    timer = Timer(delay_s, open_pi)
     timer.daemon = True
     timer.start()
 
@@ -6151,6 +6175,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Open the local MTPLX browser chat UI after startup.",
     )
+    parser.add_argument(
+        "--launch-pi",
+        action="store_true",
+        help="Open Pi in Terminal after the MTPLX server is ready.",
+    )
+    parser.add_argument(
+        "--pi-launch-command",
+        default="",
+        help="Pi command to open when --launch-pi is set.",
+    )
     args = parser.parse_args(argv)
     if args.stock_ar:
         args.generation_mode = "ar"
@@ -6189,6 +6223,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.open_browser:
         _startup_line("Opening chat UI in your browser...")
         _open_browser_later(_startup_chat_url(args))
+    if args.launch_pi:
+        command = str(args.pi_launch_command or "").strip()
+        if command:
+            _startup_line("Opening Pi in Terminal...")
+            _open_pi_later(command, model_id=str(args.model_id))
+        else:
+            _startup_line("warning: --launch-pi was set but no Pi command was provided.")
     uvicorn.run(
         app, host=args.host, port=args.port, log_level="warning", access_log=False
     )
