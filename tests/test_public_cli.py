@@ -2049,6 +2049,36 @@ def test_quickstart_pi_passes_launch_command_to_server(monkeypatch):
     assert command == "pi --model mtplx/mtplx-qwen36-27b-optimized-speed"
 
 
+def test_launch_pi_in_terminal_does_not_false_positive_on_server_command(monkeypatch):
+    from mtplx import pi
+
+    calls = {}
+    monkeypatch.setattr(pi.sys, "platform", "darwin")
+
+    def fake_popen(cmd, stdout=None, stderr=None):
+        calls["cmd"] = cmd
+        calls["stdout"] = stdout
+        calls["stderr"] = stderr
+
+        class Proc:
+            pass
+
+        return Proc()
+
+    monkeypatch.setattr(pi.subprocess, "Popen", fake_popen)
+
+    result = pi.launch_pi_in_terminal(
+        "pi --model mtplx/mtplx-qwen36-27b-optimized-speed",
+        model_ref="mtplx/mtplx-qwen36-27b-optimized-speed",
+    )
+
+    assert result["status"] == "launched"
+    assert calls["cmd"][0] == "osascript"
+    script = calls["cmd"][2]
+    assert "do script" in script
+    assert "pi --model mtplx/mtplx-qwen36-27b-optimized-speed" in script
+
+
 def test_bare_serve_invokes_server_onboarding_in_tty(monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)

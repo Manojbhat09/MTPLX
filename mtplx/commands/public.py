@@ -4547,9 +4547,7 @@ def _quickstart_launch_pi_now(*, model_id: str) -> None:
     model_ref = pi_model_ref(str(model_id))
     command = pi_launch_command(str(model_id))
     result = launch_pi_in_terminal(command, model_ref=model_ref)
-    if result.get("status") == "already_running":
-        _print_serve_start_line("Pi already appears to be running.")
-    elif result.get("ok"):
+    if result.get("ok"):
         _print_serve_start_line("Opening Pi in Terminal...")
     else:
         _print_serve_start_line(f"Could not open Pi automatically: {result.get('error')}")

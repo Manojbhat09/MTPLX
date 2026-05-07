@@ -438,9 +438,7 @@ def _open_pi_later(command: str, *, model_id: str, delay_s: float = 1.0) -> None
             from mtplx.pi import launch_pi_in_terminal, pi_model_ref
 
             result = launch_pi_in_terminal(command, model_ref=pi_model_ref(model_id))
-            if result.get("status") == "already_running":
-                _startup_line("Pi already appears to be running.")
-            elif result.get("ok"):
+            if result.get("ok"):
                 _startup_line("Pi opened in Terminal.")
             else:
                 _startup_line(f"warning: could not open Pi automatically: {result.get('error')}")

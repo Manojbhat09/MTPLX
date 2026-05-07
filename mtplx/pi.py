@@ -49,40 +49,16 @@ def pi_launch_command(model_id: str, *, provider_id: str = PI_PROVIDER_ID) -> st
     return f"pi --model {pi_model_ref(model_id, provider_id=provider_id)}"
 
 
-def pi_model_is_running(model_ref: str) -> bool:
-    """Best-effort check for an already-open Pi process using this model."""
-
-    try:
-        result = subprocess.run(
-            ["ps", "-axo", "command="],
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=2.0,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    if result.returncode != 0:
-        return False
-    needle = str(model_ref)
-    for line in result.stdout.splitlines():
-        if needle not in line:
-            continue
-        if "pi-coding-agent" in line or " pi " in f" {line} " or line.rstrip().endswith("/pi"):
-            return True
-    return False
-
-
 def launch_pi_in_terminal(command: str, *, model_ref: str | None = None) -> dict[str, Any]:
     """Open Pi in a macOS Terminal window/tab without blocking MTPLX.
 
     Pi is an interactive terminal client, so spawning it as a silent background
-    process would be worse UX than doing nothing. On non-macOS systems, return
-    a clear fallback payload.
+    process would be worse UX than doing nothing. Always try to open it: a
+    false "already running" is much worse than an extra Pi tab. On non-macOS
+    systems, return a clear fallback payload.
     """
 
-    if model_ref and pi_model_is_running(model_ref):
-        return {"ok": True, "status": "already_running", "command": command}
+    _ = model_ref  # kept for call-site clarity and future platform-specific launchers.
     if sys.platform != "darwin":
         return {
             "ok": False,
