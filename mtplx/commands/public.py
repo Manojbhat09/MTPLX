@@ -3305,6 +3305,8 @@ def cmd_serve_public(args: Any) -> int:
         _generation_mode_from_args(args),
         "--profile",
         profile.name,
+        "--reasoning-mode",
+        _reasoning_mode(args, default="auto"),
         "--verify-strategy",
         "capture_commit",
         "--verify-core",
@@ -3343,6 +3345,7 @@ def cmd_serve_public(args: Any) -> int:
         cmd.extend(
             [
                 "--launch-pi",
+                "--server-console",
                 "--pi-launch-command",
                 pi_launch_command(str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID)),
             ]
@@ -4491,6 +4494,13 @@ def _quickstart_pi_payload(args: Any, *, write_config: bool = False) -> dict[str
         "config_path": str(pi_models_json_path()),
         "provider": provider,
         "launch_command": pi_launch_command(model_id),
+        "server_console": True,
+        "server_controls": [
+            "/reasoning on|off|auto|status",
+            "/mtp on|off|status",
+            "/stats",
+            "/help",
+        ],
         "server_command": (
             f"mtplx quickstart --host {host} --port {port} "
             f"--model {shlex.quote(str(getattr(args, 'model', DEFAULT_RUNTIME_MODEL_DIR)))} "
@@ -4537,6 +4547,7 @@ def _quickstart_print_pi_handoff(args: Any, *, runtime_model: str, pi: dict[str,
     _quickstart_line(f"      Loading model: {runtime_model}")
     _quickstart_line("      Keep this terminal open for the MTPLX server.")
     _quickstart_line("      Pi will open automatically when MTPLX is ready.")
+    _quickstart_line("      Then type /help here for reasoning and MTP controls.")
     _quickstart_line(f"      Manual fallback: {pi.get('launch_command')}")
     _quickstart_line()
 

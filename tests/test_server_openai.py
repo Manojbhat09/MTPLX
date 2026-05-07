@@ -174,6 +174,59 @@ def _fake_final_state(tokens):
     )
 
 
+def test_mtplx_settings_endpoint_controls_server_reasoning():
+    state = _fake_state(api_key="mtplx-local")
+    client = TestClient(create_app(state))
+
+    initial = client.get(
+        "/v1/mtplx/settings", headers={"Authorization": "Bearer mtplx-local"}
+    )
+    assert initial.status_code == 200
+    assert initial.json()["reasoning"] == "auto"
+
+    off = client.post(
+        "/v1/mtplx/settings",
+        json={"reasoning": "off"},
+        headers={"Authorization": "Bearer mtplx-local"},
+    )
+    assert off.status_code == 200
+    assert off.json()["reasoning"] == "off"
+    assert off.json()["enable_thinking"] is False
+    assert state.args.enable_thinking is False
+
+    on = client.post(
+        "/v1/mtplx/settings",
+        json={"reasoning": "on"},
+        headers={"Authorization": "Bearer mtplx-local"},
+    )
+    assert on.status_code == 200
+    assert on.json()["reasoning"] == "on"
+    assert on.json()["enable_thinking"] is True
+    assert state.args.enable_thinking is True
+
+
+def test_server_console_controls_reasoning_and_mtp_defaults():
+    state = _fake_state()
+
+    assert "Reasoning: off" in openai._server_console_handle_command(
+        state, "/reasoning off"
+    )
+    assert state.args.reasoning == "off"
+    assert state.args.enable_thinking is False
+
+    assert "Reasoning: auto" in openai._server_console_handle_command(
+        state, "/reasoning auto"
+    )
+    assert state.args.reasoning == "auto"
+    assert state.args.enable_thinking is True
+
+    assert "MTP: off" in openai._server_console_handle_command(state, "/mtp off")
+    assert state.args.generation_mode == "ar"
+
+    assert "MTP: on" in openai._server_console_handle_command(state, "/mtp on")
+    assert state.args.generation_mode == "mtp"
+
+
 def test_openai_server_health_metrics_and_models_fake_state():
     client = TestClient(create_app(_fake_state()))
 

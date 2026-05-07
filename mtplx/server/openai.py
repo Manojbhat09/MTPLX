@@ -30,7 +30,7 @@ from dataclasses import asdict, is_dataclass
 from enum import Enum
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Event, Lock, Timer
+from threading import Event, Lock, Thread, Timer
 from typing import Any, Callable
 
 import numpy as np
@@ -342,6 +342,12 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: bool | None = None
 
 
+class MTPLXSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reasoning: str | None = None
+
+
 class CompletionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -450,6 +456,10 @@ def _open_pi_later(command: str, *, model_id: str, delay_s: float = 1.0) -> None
     timer = Timer(delay_s, open_pi)
     timer.daemon = True
     timer.start()
+
+
+def _server_console_enabled(state: Any) -> bool:
+    return bool(getattr(getattr(state, "args", None), "server_console", False))
 
 
 class _StartupHeartbeat:
@@ -2474,6 +2484,8 @@ def _schedule_idle_postcommit_snapshot(
     }
 
     def _log(outcome: dict[str, Any]) -> None:
+        if _server_console_enabled(state):
+            return
         try:
             print(
                 "[mtplx] idle async session postcommit "
@@ -2927,7 +2939,7 @@ def _run_generation(
         if seed_is_explicit or out.text.strip():
             break
     assert last is not None
-    if not bool((request_observability or {}).get("warmup")):
+    if not bool((request_observability or {}).get("warmup")) and not _server_console_enabled(state):
         print(
             json.dumps(
                 {
@@ -4604,6 +4616,127 @@ def _thinking_enabled_for_request(
     )
 
 
+def _normalize_reasoning_mode(value: Any, *, default: str = "auto") -> str:
+    mode = str(value or default).strip().lower()
+    if mode not in {"auto", "on", "off"}:
+        raise ValueError("reasoning must be one of: auto, on, off")
+    return mode
+
+
+def _set_server_reasoning_mode(state: ServerState, mode: str) -> None:
+    normalized = _normalize_reasoning_mode(mode)
+    state.args.reasoning = normalized
+    # Browser/Pi "auto" means no per-request override. The Qwen default remains
+    # thinking-capable, while tool requests still force thinking off unless the
+    # client explicitly opts in.
+    state.args.enable_thinking = False if normalized == "off" else True
+
+
+def _server_settings_payload(state: ServerState) -> dict[str, Any]:
+    reasoning = getattr(state.args, "reasoning", None)
+    if reasoning not in {"auto", "on", "off"}:
+        reasoning = "on" if bool(getattr(state.args, "enable_thinking", True)) else "off"
+    return {
+        "ok": True,
+        "reasoning": reasoning,
+        "enable_thinking": bool(getattr(state.args, "enable_thinking", True)),
+        "reasoning_parser": state.args.reasoning_parser,
+        "generation_mode": state.args.generation_mode,
+        "depth": state.args.depth,
+        "model": state.model_id,
+    }
+
+
+def _server_console_help() -> str:
+    return (
+        "MTPLX server controls: /reasoning on|off|auto|status, "
+        "/mtp on|off|status, /stats, /help"
+    )
+
+
+def _server_console_handle_command(state: ServerState, raw: str) -> str | None:
+    text = raw.strip()
+    if not text:
+        return None
+    parts = text.split()
+    command = parts[0].lower()
+    arg = parts[1].lower() if len(parts) > 1 else "status"
+    if command in {"/help", "help", "?"}:
+        return _server_console_help()
+    if command in {"/reasoning", "reasoning"}:
+        if arg in {"", "status"}:
+            payload = _server_settings_payload(state)
+            return (
+                f"Reasoning: {payload['reasoning']} "
+                f"(enable_thinking={str(payload['enable_thinking']).lower()})"
+            )
+        if arg in {"on", "off", "auto"}:
+            _set_server_reasoning_mode(state, arg)
+            payload = _server_settings_payload(state)
+            return (
+                f"Reasoning: {payload['reasoning']} "
+                f"(enable_thinking={str(payload['enable_thinking']).lower()})"
+            )
+        return "usage: /reasoning on|off|auto|status"
+    if command in {"/mtp", "mtp"}:
+        mode = str(getattr(state.args, "generation_mode", "mtp")).lower()
+        if arg in {"", "status"}:
+            return f"MTP: {'on' if mode == 'mtp' else 'off'} (generation_mode={mode})"
+        if arg == "off":
+            state.args.generation_mode = "ar"
+            return "MTP: off (AR target-only mode for new requests)"
+        if arg == "on":
+            if not bool(getattr(state.runtime, "mtp_enabled", False)):
+                return "MTP is not available for this loaded model."
+            state.args.generation_mode = "mtp"
+            return f"MTP: on (depth={int(getattr(state.args, 'depth', 1) or 1)})"
+        return "usage: /mtp on|off|status"
+    if command in {"/stats", "stats"}:
+        latest = state.last_metrics[-1] if getattr(state, "last_metrics", None) else None
+        if not latest:
+            return "No generation stats yet."
+        public = {
+            key: latest[key]
+            for key in (
+                "prompt_tokens",
+                "completion_tokens",
+                "tok_s",
+                "accept_rate",
+                "generation_mode",
+                "ttft_s",
+            )
+            if key in latest
+        }
+        return json.dumps(public or latest, sort_keys=True, default=str)
+    if command in {"/exit", "/quit", "exit", "quit"}:
+        return "Use Ctrl-C in this MTPLX terminal to stop the server."
+    return "Unknown MTPLX server command. Try /help"
+
+
+def _start_server_console(state: ServerState) -> None:
+    if not sys.stdin.isatty():
+        return
+
+    def console_loop() -> None:
+        _startup_line(_server_console_help())
+        while True:
+            try:
+                raw = input("mtplx> ")
+            except EOFError:
+                return
+            except BaseException:
+                return
+            try:
+                response = _server_console_handle_command(state, raw)
+            except BaseException as exc:
+                response = f"error: {type(exc).__name__}: {exc}"
+            if response:
+                _startup_line(response)
+
+    thread = Thread(target=console_loop, name="mtplx-server-console", daemon=True)
+    thread.start()
+
+
 def create_app(state: ServerState) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -4737,6 +4870,8 @@ def create_app(state: ServerState) -> FastAPI:
             "online_hidden": _online_hidden_config(state.args),
             "verify_core": state.args.verify_core,
             "verify_strategy": state.args.verify_strategy,
+            "reasoning": getattr(state.args, "reasoning", None)
+            or ("on" if bool(state.args.enable_thinking) else "off"),
             "enable_thinking": state.args.enable_thinking,
             "context_window": state.context_window,
             "max_response_tokens": state.args.max_response_tokens,
@@ -4905,6 +5040,21 @@ def create_app(state: ServerState) -> FastAPI:
             "mlx_cache_limit": state.mlx_cache_limit_status,
             "mlx_fork": state.mlx_fork_status,
         }
+
+    @app.get("/v1/mtplx/settings")
+    @app.get("/mtplx/settings")
+    def get_mtplx_settings() -> dict[str, Any]:
+        return _server_settings_payload(state)
+
+    @app.post("/v1/mtplx/settings")
+    @app.post("/mtplx/settings")
+    def update_mtplx_settings(update: MTPLXSettingsUpdate) -> dict[str, Any]:
+        if update.reasoning is not None:
+            try:
+                _set_server_reasoning_mode(state, update.reasoning)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _server_settings_payload(state)
 
     @app.get("/metrics")
     def metrics() -> dict[str, Any]:
@@ -5443,6 +5593,7 @@ def create_app(state: ServerState) -> FastAPI:
                     if (
                         seconds_since_last_token < STREAM_SILENCE_WARN_S
                         or now_s < next_silence_warn_s
+                        or _server_console_enabled(state)
                     ):
                         return
                     print(
@@ -6064,6 +6215,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--reasoning-mode",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Server-default Qwen thinking mode for clients that do not send enable_thinking.",
+    )
+    parser.add_argument(
         "--enable-thinking",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -6179,6 +6336,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Open Pi in Terminal after the MTPLX server is ready.",
     )
     parser.add_argument(
+        "--server-console",
+        action="store_true",
+        help="Accept live server-control commands such as /reasoning and /mtp on stdin.",
+    )
+    parser.add_argument(
         "--pi-launch-command",
         default="",
         help="Pi command to open when --launch-pi is set.",
@@ -6187,6 +6349,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.stock_ar:
         args.generation_mode = "ar"
         args.load_mtp = False
+    args.reasoning = _normalize_reasoning_mode(args.reasoning_mode)
+    if args.reasoning == "off":
+        args.enable_thinking = False
+    elif args.reasoning == "on":
+        args.enable_thinking = True
     return args
 
 
@@ -6218,6 +6385,9 @@ def main(argv: list[str] | None = None) -> None:
     _startup_line("API key: leave blank for localhost")
     _startup_line("Health check: " + _startup_server_url(args) + "/health")
     _startup_line("Keep this terminal open. Press Ctrl-C to stop MTPLX.")
+    if args.server_console:
+        _startup_line("Type /help here for live MTPLX controls.")
+        _start_server_console(state)
     if args.open_browser:
         _startup_line("Opening chat UI in your browser...")
         _open_browser_later(_startup_chat_url(args))

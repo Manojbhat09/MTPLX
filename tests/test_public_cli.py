@@ -2045,6 +2045,7 @@ def test_quickstart_pi_passes_launch_command_to_server(monkeypatch):
         assert exc.code == 0
 
     assert "--launch-pi" in calls["cmd"]
+    assert "--server-console" in calls["cmd"]
     command = calls["cmd"][calls["cmd"].index("--pi-launch-command") + 1]
     assert command == "pi --model mtplx/mtplx-qwen36-27b-optimized-speed"
 
