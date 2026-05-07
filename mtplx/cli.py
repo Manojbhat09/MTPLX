@@ -1952,7 +1952,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Download a Hugging Face model before starting if it is not cached",
     )
-    serve_p.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
+    serve_p.add_argument(
+        "--profile",
+        choices=PROFILE_CHOICES,
+        default="sustained",
+        help=(
+            "Runtime profile. Server defaults to Sustained so long-context "
+            "prefill uses the v0.1.7 fast path; use --profile performance-cold "
+            "--max for Burst."
+        ),
+    )
     serve_p.add_argument("--unsafe-force-unverified", action="store_true")
     serve_p.add_argument("--yes", action="store_true", help="Confirm unsafe non-interactive actions")
     serve_p.add_argument("--host", default="127.0.0.1")

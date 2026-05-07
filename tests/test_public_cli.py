@@ -139,6 +139,16 @@ def test_bench_prefill_ladder_dry_run_json(monkeypatch, capsys):
     assert payload["profile"]["env"]["MTPLX_VLLM_METAL_PAGED_TURBOQUANT"] == "0"
 
 
+def test_server_cli_surfaces_default_to_sustained_profile():
+    parser = build_parser()
+
+    quickstart_args = parser.parse_args(["quickstart"])
+    serve_args = parser.parse_args(["serve", "--yes"])
+
+    assert quickstart_args.profile == "sustained"
+    assert serve_args.profile == "sustained"
+
+
 def test_shell_banner_env_suppresses_compact_help_ascii(monkeypatch, capsys):
     monkeypatch.setenv("MTPLX_SHELL_BANNER_SHOWN", "1")
 
