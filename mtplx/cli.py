@@ -2237,6 +2237,22 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     bench_p.add_argument(
+        "--prefill-chunk-size",
+        type=int,
+        help=(
+            "Diagnostic override for MTPLX_PREFILL_CHUNK_SIZE after profile env "
+            "is applied."
+        ),
+    )
+    bench_p.add_argument(
+        "--no-defer-verify-hidden-eval",
+        action="store_true",
+        help=(
+            "Diagnostic override: disable MTPLX_DEFER_VERIFY_HIDDEN_EVAL after "
+            "profile env is applied."
+        ),
+    )
+    bench_p.add_argument(
         "--prefill-stock-cache-only",
         action="store_true",
         help=(

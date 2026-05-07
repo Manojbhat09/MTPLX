@@ -218,7 +218,7 @@ def _attach_runtime_diagnostics(
     stats.final_logits_tokens_emitted = int(counters.get("final_logits_tokens_emitted", 0))
     stats.logits_tokens_emitted = int(counters.get("logits_tokens_emitted", 0))
     stats.prefill_chunks = int(counters.get("prefill_chunks", 0))
-    stats.prefill_chunk_size = _env_int("MTPLX_PREFILL_CHUNK_SIZE", 0)
+    stats.prefill_chunk_size = _prefill_chunk_size()
     stats.prefill_chunk_cache_cleanup_enabled = _prefill_chunk_cache_cleanup_enabled()
     stats.prefill_chunk_cache_cleanup_events = int(
         counters.get("prefill_chunk_cache_cleanup_events", 0)
@@ -336,7 +336,16 @@ def _prefill_cache_only_forward(rt: MTPLXRuntime, token_ids: list[int], cache: A
 
 
 def _prefill_chunk_size() -> int:
-    return max(1, _env_int("MTPLX_PREFILL_CHUNK_SIZE", 2048))
+    raw = (os.environ.get("MTPLX_PREFILL_CHUNK_SIZE") or "2048").strip().lower()
+    if raw == "auto":
+        layout = _sustained_prefill_layout()
+        if layout == "contiguous_dense_decode":
+            return max(1, _env_int("MTPLX_PREFILL_CHUNK_SIZE_DENSE", 4096))
+        return max(1, _env_int("MTPLX_PREFILL_CHUNK_SIZE_REPAGE", 2048))
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2048
 
 
 def _iter_prefill_chunks(token_ids: list[int]) -> list[list[int]]:
@@ -349,12 +358,28 @@ def _iter_prefill_chunks(token_ids: list[int]) -> list[list[int]]:
 
 
 def _sustained_prefill_layout() -> str:
-    return (
+    layout = (
         os.environ.get("MTPLX_SUSTAINED_PREFILL_LAYOUT", "")
         .strip()
         .lower()
         .replace("-", "_")
     )
+    if layout != "auto":
+        return layout
+    context_tokens = _env_int("MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS", 0)
+    dense_max = _env_int("MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT", 65536)
+    if context_tokens > 0 and context_tokens <= dense_max:
+        return "contiguous_dense_decode"
+    return "contiguous_then_repage"
+
+
+def _defer_verify_hidden_eval_enabled() -> bool:
+    raw = (os.environ.get("MTPLX_DEFER_VERIFY_HIDDEN_EVAL") or "").strip().lower()
+    if raw == "auto":
+        context_tokens = _env_int("MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS", 0)
+        dense_max = _env_int("MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT", 65536)
+        return context_tokens > 0 and context_tokens <= dense_max
+    return _env_truthy("MTPLX_DEFER_VERIFY_HIDDEN_EVAL")
 
 
 def _contiguous_then_repage_prefill_enabled() -> bool:
@@ -832,9 +857,7 @@ class _DecodeTrace:
             "mtp_cache_state_nbytes": _tree_nbytes(mtp_cache),
             "mlx_memory": _mlx_memory_stats(),
             "lazy_verify_logits": bool(os.environ.get("MTPLX_LAZY_VERIFY_LOGITS")),
-            "defer_verify_hidden_eval": bool(
-                os.environ.get("MTPLX_DEFER_VERIFY_HIDDEN_EVAL")
-            ),
+            "defer_verify_hidden_eval": _defer_verify_hidden_eval_enabled(),
             "split_verify_eval": bool(os.environ.get("MTPLX_SPLIT_VERIFY_EVAL")),
             "lazy_mtp_history_append": bool(os.environ.get("MTPLX_LAZY_MTP_HISTORY_APPEND")),
             "batch_target_arrays": bool(os.environ.get("MTPLX_BATCH_TARGET_ARRAYS")),
@@ -1160,6 +1183,7 @@ def restore_or_prefill_prompt_state(
     today's cold path behavior intact while giving EngineSession a concrete
     target for future warm SessionBank restores.
     """
+    os.environ["MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS"] = str(len(prompt_ids))
     mtp_history_policy = _resolve_mtp_history_policy(
         mtp_history_policy,
         len(prompt_ids),
@@ -2977,7 +3001,7 @@ def generate_mtpk(
         .lower()
         not in {"0", "false", "no", "off"}
     )
-    defer_verify_hidden_eval = _env_truthy("MTPLX_DEFER_VERIFY_HIDDEN_EVAL")
+    defer_verify_hidden_eval = _defer_verify_hidden_eval_enabled()
     state_root_eval_events = 0
     state_root_eval_time_s = 0.0
     state_root_eval_arrays = 0

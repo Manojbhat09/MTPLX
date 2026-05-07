@@ -60,10 +60,14 @@ def test_sustained_profile_is_native_mtp_long_context_path() -> None:
     assert profile.runtime_profile == "native_mtp_sustained"
     assert profile.draft_lm_head is not None
     assert profile.env_dict() == SUSTAINED_PREFILL_ENV
-    assert profile.env_dict()["MTPLX_SUSTAINED_PREFILL_LAYOUT"] == "contiguous_then_repage"
+    assert profile.env_dict()["MTPLX_SUSTAINED_PREFILL_LAYOUT"] == "auto"
+    assert profile.env_dict()["MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT"] == "65536"
+    assert profile.env_dict()["MTPLX_PREFILL_CHUNK_SIZE"] == "auto"
+    assert profile.env_dict()["MTPLX_PREFILL_CHUNK_SIZE_DENSE"] == "4096"
+    assert profile.env_dict()["MTPLX_PREFILL_CHUNK_SIZE_REPAGE"] == "2048"
     assert profile.env_dict()["MTPLX_LAZY_VERIFY_LOGITS"] == "1"
     assert profile.env_dict()["MTPLX_BATCH_TARGET_ARRAYS"] == "1"
-    assert profile.env_dict()["MTPLX_DEFER_VERIFY_HIDDEN_EVAL"] == "1"
+    assert profile.env_dict()["MTPLX_DEFER_VERIFY_HIDDEN_EVAL"] == "auto"
     assert profile.env_dict()["MTPLX_LAZY_MTP_HISTORY_APPEND"] == "1"
     assert profile.env_dict()["MTPLX_DROP_EVENTS"] == "1"
     assert profile.env_dict()["MTPLX_SKIP_VERIFY_SNAPSHOT"] == "1"

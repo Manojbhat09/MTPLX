@@ -23,7 +23,6 @@ import os
 import re
 import statistics
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -861,6 +860,11 @@ def _local_profile_env(profile: str, base_env: dict[str, str]) -> tuple[dict[str
         "MTPLX_SPLIT_VERIFY_EVAL",
         "MTPLX_SUSTAINED_PREFILL",
         "MTPLX_PREFILL_CHUNK_SIZE",
+        "MTPLX_PREFILL_CHUNK_SIZE_DENSE",
+        "MTPLX_PREFILL_CHUNK_SIZE_REPAGE",
+        "MTPLX_SUSTAINED_PREFILL_LAYOUT",
+        "MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT",
+        "MTPLX_DEFER_VERIFY_HIDDEN_EVAL",
         "MTPLX_TARGET_EMIT_FULL_PREFILL_LOGITS",
         "MTPLX_DYNAMIC_PAGED_KV",
         "MTPLX_DYNAMIC_PAGED_KV_TOKENS",
@@ -884,7 +888,12 @@ def _local_profile_env(profile: str, base_env: dict[str, str]) -> tuple[dict[str
         env.update(
             {
                 "MTPLX_SUSTAINED_PREFILL": "1",
-                "MTPLX_PREFILL_CHUNK_SIZE": "2048",
+                "MTPLX_SUSTAINED_PREFILL_LAYOUT": "auto",
+                "MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT": "65536",
+                "MTPLX_PREFILL_CHUNK_SIZE": "auto",
+                "MTPLX_PREFILL_CHUNK_SIZE_DENSE": "4096",
+                "MTPLX_PREFILL_CHUNK_SIZE_REPAGE": "2048",
+                "MTPLX_DEFER_VERIFY_HIDDEN_EVAL": "auto",
                 "MTPLX_TARGET_EMIT_FULL_PREFILL_LOGITS": "0",
                 "MTPLX_DYNAMIC_PAGED_KV": "1",
                 "MTPLX_VLLM_METAL_PAGED_ATTN": "1",

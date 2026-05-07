@@ -5,9 +5,9 @@ This packet is for an external pro-agent review of the current dirty worktree:
 ```text
 path=/Users/youssof/Documents/MTPLX-release/mtplx-prefill-fix
 branch=codex/sustained-prefill-fix
-base_commit=09b49d5f7d3a7647e72251779c5636246f69f329
-describe=v0.1.6-1-g09b49d5-dirty
-status=not release-candidate
+last_checkpoint_commit=659bbc387fdd9ce2fd6db5303bc751f755769f2d
+describe=v0.1.6-2-g659bbc3-dirty
+status=not release-candidate; 64k improved, 128k still blocked
 ```
 
 ## User Outcome Goal
@@ -266,3 +266,68 @@ decode_gate=fail until 64k/128k TPS preservation is recovered
 M3_Ultra=not rerun yet
 xctrace_M5_Neural_Accelerator=not done; no public accelerator claim
 ```
+
+## Addendum - Auto Policy Sweep Completed
+
+This addendum records the post-checkpoint execution of the nine-hour recovery
+runbook slice. The code now has a context-aware Sustained auto policy:
+
+```text
+contexts <= 65536:
+  resolved_prefill_route=contiguous_dense_decode
+  effective_prefill_chunk_size=4096
+  defer_verify_hidden_eval=true
+
+contexts > 65536:
+  resolved_prefill_route=contiguous_then_repage
+  effective_prefill_chunk_size=2048
+  defer_verify_hidden_eval=false
+```
+
+Why: dense decode plus chunk 4096 is the first local path that restores 64k
+decode above the v0.1.6 floor while improving PP and staying within memory gates.
+The same dense path is catastrophic at 128k, so it is explicitly capped.
+
+### New Artifact Table
+
+| Artifact | Context | Route | Chunk | PP TPS | Decode TPS | Memory | Acceptance | Verify | Fallback | Verdict |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `benchmarks/results/auto-policy-m5max-64k.json` | 64k | `contiguous_dense_decode` | 4096 | 430.3 | 28.9 | 35.3 GB | 90/114 = 78.9% | 4.08s | 0 | keep as 64k default candidate |
+| `benchmarks/results/auto-policy-m5max-128k.json` | 128k | `contiguous_then_repage` | 2048 | 264.5 | 14.2 | 37.5 GB | 89/114 = 78.1% | 8.38s | 0 | safe threshold proof, not release-safe |
+| `benchmarks/results/depth2-auto-policy-m5max-64k.json` | 64k | `contiguous_dense_decode` | 4096 | 454.5 | 26.4 | 35.3 GB | 79/98 = 80.6% | 4.55s | 0 | reject depth-2 default; decode lower |
+| `benchmarks/results/auto-policy-repage-chunk4096-m5max-128k.json` | 128k | `contiguous_then_repage` | 4096 | 272.3 | 13.2 | 51.8 GB | 90/111 = 81.1% | 8.93s | 0 | reject; tiny PP win, worse decode/memory |
+
+### Outcome Versus Ivan v0.1.6 And oMLX Targets
+
+| Context | Ivan v0.1.6 PP / Decode / Mem | Current best safe PP / Decode / Mem | Delta vs Ivan | Target |
+|---:|---:|---:|---:|---:|
+| 64k | 259.9 / 25.4 / 38.2 GB | 430.3 / 28.9 / 35.3 GB | PP +65.6%, decode +13.6%, memory -7.6% | partial pass; PP still below oMLX 574.9 |
+| 128k | 187.5 / 22.2 / 61.0 GB | 264.5 / 14.2 / 37.5 GB | PP +41.1%, decode -36.2%, memory -38.5% | fail; decode and oMLX PP gap remain |
+
+### Updated Diagnosis
+
+```text
+64k_breakthrough=true
+64k_user_outcome=better PP than v0.1.6, better decode than v0.1.6, lower memory than v0.1.6
+128k_breakthrough=false
+128k_user_outcome=PP better than v0.1.6 but still far below oMLX, decode far below v0.1.6
+acceptance_collapse=false
+128k_acceptance=about 78-81% across probes
+128k_blocker=long-KV target verify/eval, especially hidden eval on paged decode
+partitioned_prefill=still not achieved; prefill_partitioned_paged_calls remains 0
+release_status=not_shippable_keep_working
+```
+
+### Rejected Ideas From This Sweep
+
+```text
+depth2_long_context=reject because 64k decode fell from 28.9 to 26.4 tok/s
+128k_repage_chunk4096=reject because PP only improved 264.5 -> 272.3, decode fell 14.2 -> 13.2, memory rose 37.5 -> 51.8 GB
+128k_dense_decode=reject from earlier artifact because decode collapsed to about 4 tok/s from logits eval debt
+```
+
+### Current Best Next Ideas
+
+1. Implement `MTPLX_VERIFY_HIDDEN_MODE=committed_slice` carefully: evaluate target probabilities exactly, decide accepted prefix, then materialize only the hidden slices required for committed MTP history and live state. Current deferred mode helps 64k dense, but 128k paged still pays full hidden eval.
+2. Make real partitioned large-query prefill fire during prefill, not only decode. The artifacts still show `prefill_partitioned_paged_calls=0`; this is the largest remaining PP gap to oMLX.
+3. Profile 128k verify with xctrace/Metal command trace and separate `verify_hidden`, `target_distribution`, and paged attention kernels. The 128k floor is not acceptance; it is target verify/eval.

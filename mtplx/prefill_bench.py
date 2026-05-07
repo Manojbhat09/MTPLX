@@ -319,6 +319,24 @@ def _apply_prefill_cache_cleanup_override(args: Any) -> bool:
     return enabled
 
 
+def _apply_prefill_chunk_size_override(args: Any) -> int | None:
+    raw = getattr(args, "prefill_chunk_size", None)
+    if raw is None:
+        return None
+    chunk_size = int(raw)
+    if chunk_size <= 0:
+        raise ValueError("--prefill-chunk-size must be positive")
+    os.environ["MTPLX_PREFILL_CHUNK_SIZE"] = str(chunk_size)
+    return chunk_size
+
+
+def _apply_defer_verify_hidden_override(args: Any) -> bool:
+    if not bool(getattr(args, "no_defer_verify_hidden_eval", False)):
+        return False
+    os.environ["MTPLX_DEFER_VERIFY_HIDDEN_EVAL"] = "0"
+    return True
+
+
 def _apply_prefill_stock_cache_only_override(args: Any) -> bool:
     enabled = bool(getattr(args, "prefill_stock_cache_only", False))
     if enabled:
@@ -461,11 +479,16 @@ def _recommended_prefill_qa_commands(
 def _env_snapshot() -> dict[str, str]:
     keys = (
         "MTPLX_PREFILL_CHUNK_SIZE",
+        "MTPLX_PREFILL_CHUNK_SIZE_DENSE",
+        "MTPLX_PREFILL_CHUNK_SIZE_REPAGE",
         "MTPLX_PREFILL_CHUNK_CACHE_CLEANUP",
         "MTPLX_PREFILL_STOCK_CACHE_ONLY",
         UNSAFE_STOCK_CACHE_ONLY_ALLOW_ENV,
         "MTPLX_SUSTAINED_PREFILL",
         "MTPLX_SUSTAINED_PREFILL_LAYOUT",
+        "MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT",
+        "MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS",
+        "MTPLX_DEFER_VERIFY_HIDDEN_EVAL",
         "MTPLX_VLLM_METAL_PAGED_ATTN",
         "MTPLX_VLLM_METAL_PAGED_ATTN_IMPL",
         "MTPLX_VLLM_METAL_PAGED_ATTN_MAX_Q",
@@ -495,6 +518,29 @@ def _stats_value(stats: Any, key: str, default: Any = 0) -> Any:
     if isinstance(stats, dict):
         return stats.get(key, default)
     return getattr(stats, key, default)
+
+
+def _int_stats_or_env(
+    stats: Any,
+    stats_key: str,
+    env_key: str,
+    *,
+    default: int = 0,
+) -> int:
+    value = _stats_value(stats, stats_key, None)
+    if value is None:
+        value = os.environ.get(env_key)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int_value(env_key: str, *, default: int = 0) -> int:
+    try:
+        return int(os.environ.get(env_key) or default)
+    except (TypeError, ValueError):
+        return default
 
 
 def _row_from_output(
@@ -616,15 +662,19 @@ def _row_from_output(
         "paged_attention_bailouts_by_phase_reason": dict(
             _stats_value(stats, "paged_attention_bailouts_by_phase_reason", {}) or {}
         ),
-        "effective_prefill_chunk_size": int(os.environ.get("MTPLX_PREFILL_CHUNK_SIZE") or 0),
-        "effective_partition_size": int(
-            os.environ.get("MTPLX_VLLM_METAL_PAGED_PARTITION_SIZE") or 0
+        "effective_prefill_chunk_size": _int_stats_or_env(
+            stats,
+            "prefill_chunk_size",
+            "MTPLX_PREFILL_CHUNK_SIZE",
         ),
-        "effective_large_q_chunk_size": int(
-            os.environ.get("MTPLX_VLLM_METAL_PAGED_LARGE_Q_CHUNK_SIZE") or 0
+        "effective_partition_size": _env_int_value(
+            "MTPLX_VLLM_METAL_PAGED_PARTITION_SIZE"
         ),
-        "effective_large_q_kv_chunk_size": int(
-            os.environ.get("MTPLX_VLLM_METAL_PAGED_LARGE_Q_KV_CHUNK_SIZE") or 0
+        "effective_large_q_chunk_size": _env_int_value(
+            "MTPLX_VLLM_METAL_PAGED_LARGE_Q_CHUNK_SIZE"
+        ),
+        "effective_large_q_kv_chunk_size": _env_int_value(
+            "MTPLX_VLLM_METAL_PAGED_LARGE_Q_KV_CHUNK_SIZE"
         ),
         "owned_attn_kv": owned,
     }
@@ -675,6 +725,10 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
     paged_attn_impl_requested = str(getattr(args, "paged_attn_impl", "") or "").strip().lower().replace("-", "_")
     mtp_history_policy_requested = str(getattr(args, "mtp_history_policy", "") or "").strip().lower().replace("-", "_")
     prefill_cache_cleanup_requested = bool(getattr(args, "prefill_cache_cleanup", False))
+    prefill_chunk_size_requested = getattr(args, "prefill_chunk_size", None)
+    no_defer_verify_hidden_requested = bool(
+        getattr(args, "no_defer_verify_hidden_eval", False)
+    )
     prefill_stock_cache_only_requested = bool(
         getattr(args, "prefill_stock_cache_only", False)
     )
@@ -684,6 +738,13 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
         profile_env["MTPLX_MTP_HISTORY_POLICY"] = mtp_history_policy_requested
     if prefill_cache_cleanup_requested:
         profile_env["MTPLX_PREFILL_CHUNK_CACHE_CLEANUP"] = "1"
+    if prefill_chunk_size_requested is not None:
+        prefill_chunk_size_value = int(prefill_chunk_size_requested)
+        if prefill_chunk_size_value <= 0:
+            raise ValueError("--prefill-chunk-size must be positive")
+        profile_env["MTPLX_PREFILL_CHUNK_SIZE"] = str(prefill_chunk_size_value)
+    if no_defer_verify_hidden_requested:
+        profile_env["MTPLX_DEFER_VERIFY_HIDDEN_EVAL"] = "0"
     if prefill_stock_cache_only_requested and _unsafe_stock_cache_only_allowed():
         profile_env["MTPLX_PREFILL_STOCK_CACHE_ONLY"] = "1"
     payload: dict[str, Any] = {
@@ -740,6 +801,10 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
         payload["mtp_history_policy_override"] = mtp_history_policy_requested
     if prefill_cache_cleanup_requested:
         payload["prefill_cache_cleanup_override"] = True
+    if prefill_chunk_size_requested is not None:
+        payload["prefill_chunk_size_override"] = int(prefill_chunk_size_requested)
+    if no_defer_verify_hidden_requested:
+        payload["defer_verify_hidden_eval_override"] = False
     if prefill_stock_cache_only_requested:
         payload["prefill_stock_cache_only_override"] = True
         if not _unsafe_stock_cache_only_allowed():
@@ -754,6 +819,8 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
     paged_attn_impl = _apply_paged_attention_impl_override(args)
     mtp_history_policy = _apply_mtp_history_policy_override(args)
     prefill_cache_cleanup = _apply_prefill_cache_cleanup_override(args)
+    prefill_chunk_size = _apply_prefill_chunk_size_override(args)
+    no_defer_verify_hidden = _apply_defer_verify_hidden_override(args)
     prefill_stock_cache_only = _apply_prefill_stock_cache_only_override(args)
     payload["env"] = _env_snapshot()
     if paged_attn_impl and paged_attn_impl != paged_attn_impl_requested:
@@ -762,6 +829,10 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
         payload["mtp_history_policy_override"] = mtp_history_policy
     if prefill_cache_cleanup and not prefill_cache_cleanup_requested:
         payload["prefill_cache_cleanup_override"] = True
+    if prefill_chunk_size is not None:
+        payload["prefill_chunk_size_override"] = prefill_chunk_size
+    if no_defer_verify_hidden and not no_defer_verify_hidden_requested:
+        payload["defer_verify_hidden_eval_override"] = False
     if prefill_stock_cache_only and not prefill_stock_cache_only_requested:
         payload["prefill_stock_cache_only_override"] = True
 
