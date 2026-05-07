@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib
 import os
 from pathlib import Path
 import sys
@@ -475,26 +476,63 @@ def _paged_attention_requires_external_ops(*, turboquant_config: Any | None = No
     impl = _paged_attention_impl_from_env()
     if impl in {"fast_sdpa_gather", "sdpa_gather", "exact_gather"}:
         return False
-    if impl in {"sdpa_2pass_paged", "mlx_vector_paged"}:
+    if impl == "sdpa_2pass_paged":
         return False
+    if impl == "mlx_vector_paged":
+        return _env_truthy("MTPLX_VLLM_METAL_PAGED_PARTITIONED_ATTN")
     return True
 
 
 def _load_vllm_metal_ops():
-    repo = _vllm_metal_reference_path()
-    if not repo.exists():
-        raise RuntimeError(
-            "vllm-metal reference repo is missing: "
-            f"{repo}. Set MTPLX_VLLM_METAL_REPO to the checkout path, or use "
-            "MTPLX_VLLM_METAL_PAGED_ATTN_IMPL=mlx_vector_paged for the packaged "
-            "in-tree paged attention path."
-        )
-    repo_text = str(repo)
-    if repo_text not in sys.path:
-        sys.path.insert(0, repo_text)
-    from vllm_metal.metal import get_ops
+    errors: list[str] = []
+    override = os.environ.get("MTPLX_VLLM_METAL_REPO", "").strip()
+    if override:
+        repo = Path(override).expanduser()
+        if not repo.exists():
+            raise RuntimeError(f"MTPLX_VLLM_METAL_REPO does not exist: {repo}")
+        repo_text = str(repo)
+        if repo_text not in sys.path:
+            sys.path.insert(0, repo_text)
+        for name in ("vllm_metal.metal", "vllm_metal"):
+            sys.modules.pop(name, None)
+        try:
+            from vllm_metal.metal import get_ops
 
-    return get_ops()
+            return get_ops()
+        except Exception as exc:
+            raise RuntimeError(
+                "failed to load vllm-metal ops from MTPLX_VLLM_METAL_REPO="
+                f"{repo}: {exc}"
+            ) from exc
+
+    try:
+        metal = importlib.import_module("vllm_metal.metal")
+        return metal.get_ops()
+    except Exception as exc:
+        errors.append(f"vendored vllm_metal.metal: {exc}")
+
+    repo = _vllm_metal_reference_path()
+    if repo.exists():
+        repo_text = str(repo)
+        if repo_text not in sys.path:
+            sys.path.insert(0, repo_text)
+        for name in ("vllm_metal.metal", "vllm_metal"):
+            sys.modules.pop(name, None)
+        try:
+            from vllm_metal.metal import get_ops
+
+            return get_ops()
+        except Exception as exc:
+            errors.append(f"reference checkout {repo}: {exc}")
+    else:
+        errors.append(f"reference checkout missing: {repo}")
+
+    raise RuntimeError(
+        "vllm-metal paged-attention ops are unavailable; "
+        + "; ".join(errors)
+        + ". Install MTPLX with its Darwin/arm64 dependencies or set "
+        "MTPLX_VLLM_METAL_REPO to a working vllm-metal checkout."
+    )
 
 
 class VllmMetalPagedKVCache:
@@ -540,7 +578,9 @@ class VllmMetalPagedKVCache:
         self.paged_attention_last_bailout: dict[str, int | str] = {}
         self.paged_attention_large_q_path = ""
         self.large_q_split_sdpa_fallback_calls = 0
+        self.large_q_split_sdpa_fallback_calls_by_phase: dict[str, int] = {}
         self.partitioned_paged_calls = 0
+        self.partitioned_paged_calls_by_phase: dict[str, int] = {}
         self.grow_events = 0
         self.cache_write_time_s = 0.0
         self.attention_time_s = 0.0
@@ -908,6 +948,13 @@ class VllmMetalPagedKVCache:
             return None
 
         q_len = int(queries.shape[2])
+        if _env_truthy("MTPLX_ASSERT_NO_LARGE_Q_SPLIT_FALLBACK"):
+            raise RuntimeError(
+                "large-q split SDPA fallback was invoked while "
+                "MTPLX_ASSERT_NO_LARGE_Q_SPLIT_FALLBACK=1 "
+                f"phase={current_attention_phase()} offset={int(self.offset)} "
+                f"q_len={q_len} threshold={self._partition_threshold()}"
+            )
         cached_prefix_len = max(0, int(self.offset) - q_len)
         query_heads = int(queries.shape[1])
         q_chunk_size = max(
@@ -950,15 +997,32 @@ class VllmMetalPagedKVCache:
                 if k_end <= k_start:
                     continue
                 keys, values = self._paged_range(k_start, k_end)
-                if int(keys.shape[1]) != query_heads:
-                    if query_heads % int(keys.shape[1]):
-                        return None
-                    repeat = query_heads // int(keys.shape[1])
-                    keys = mx.repeat(keys, repeat, axis=1)
-                    values = mx.repeat(values, repeat, axis=1)
+                kv_heads = int(keys.shape[1])
+                if kv_heads != query_heads and query_heads % kv_heads:
+                    return None
                 k = keys.astype(mx.float32)
                 v = values.astype(mx.float32)
-                scores = mx.matmul(q, k.transpose(0, 1, 3, 2)) * float(scale)
+                repeat = query_heads // kv_heads if kv_heads != query_heads else 1
+                if repeat > 1:
+                    q_for_scores = q.reshape(
+                        int(q.shape[0]),
+                        kv_heads,
+                        repeat,
+                        int(q.shape[2]),
+                        int(q.shape[3]),
+                    )
+                    k_for_scores = k[:, :, None, :, :]
+                    scores = mx.matmul(
+                        q_for_scores,
+                        k_for_scores.transpose(0, 1, 2, 4, 3),
+                    ).reshape(
+                        int(q.shape[0]),
+                        query_heads,
+                        int(q.shape[2]),
+                        int(k.shape[2]),
+                    ) * float(scale)
+                else:
+                    scores = mx.matmul(q, k.transpose(0, 1, 3, 2)) * float(scale)
                 if mask == "causal":
                     key_positions = mx.arange(k_start, k_end)
                     allowed = q_positions[:, None] >= key_positions[None, :]
@@ -970,7 +1034,24 @@ class VllmMetalPagedKVCache:
                 local_max = mx.where(valid, local_max, very_negative)
                 weights = mx.where(valid, mx.exp(scores - local_max), 0.0)
                 local_denom = mx.sum(weights, axis=-1, keepdims=True)
-                local_acc = mx.matmul(weights, v)
+                if repeat > 1:
+                    local_acc = mx.matmul(
+                        weights.reshape(
+                            int(q.shape[0]),
+                            kv_heads,
+                            repeat,
+                            int(q.shape[2]),
+                            int(k.shape[2]),
+                        ),
+                        v[:, :, None, :, :],
+                    ).reshape(
+                        int(q.shape[0]),
+                        query_heads,
+                        int(q.shape[2]),
+                        int(v.shape[3]),
+                    )
+                else:
+                    local_acc = mx.matmul(weights, v)
                 new_max = mx.maximum(running_max, local_max)
                 old_scale = mx.exp(running_max - new_max)
                 new_scale = mx.exp(local_max - new_max)
@@ -983,7 +1064,19 @@ class VllmMetalPagedKVCache:
         if not outputs:
             return None
         self.large_q_split_sdpa_fallback_calls += 1
+        phase = current_attention_phase()
+        self.large_q_split_sdpa_fallback_calls_by_phase[phase] = (
+            int(self.large_q_split_sdpa_fallback_calls_by_phase.get(phase, 0)) + 1
+        )
         self.paged_attention_large_q_path = "large_q_split_sdpa_fallback"
+        if _env_truthy("MTPLX_PREFILL_ROUTE_TRACE"):
+            print(
+                "mtplx_prefill_route "
+                f"path=large_q_split_sdpa_fallback phase={phase} "
+                f"offset={int(self.offset)} q_len={q_len} "
+                f"q_chunk={q_chunk_size} kv_chunk={kv_chunk_size}",
+                file=sys.stderr,
+            )
         return mx.concatenate(outputs, axis=2).astype(queries.dtype)
 
     def _active_arrays(self) -> tuple[Any | None, Any | None]:
@@ -1211,7 +1304,10 @@ class VllmMetalPagedKVCache:
                     self.attention_time_s += time.perf_counter() - started
                     return split_out
                 return bailout("partitioned_unavailable")
-            if hasattr(ops, "paged_attention_partitioned_primitive"):
+            if _env_truthy("MTPLX_VLLM_METAL_PAGED_USE_PRIMITIVE") and hasattr(
+                ops,
+                "paged_attention_partitioned_primitive",
+            ):
                 out = mx.array(0)
                 ops.paged_attention_partitioned_primitive(
                     q_3d,
@@ -1231,8 +1327,20 @@ class VllmMetalPagedKVCache:
                 self.paged_attention_calls += 1
                 self.partitioned_attention_calls += 1
                 self.partitioned_paged_calls += 1
+                phase = current_attention_phase()
+                self.partitioned_paged_calls_by_phase[phase] = (
+                    int(self.partitioned_paged_calls_by_phase.get(phase, 0)) + 1
+                )
                 self.attention_time_s += time.perf_counter() - started
                 self.paged_attention_large_q_path = "partitioned_paged"
+                if _env_truthy("MTPLX_PREFILL_ROUTE_TRACE"):
+                    print(
+                        "mtplx_prefill_route "
+                        f"path=partitioned_paged phase={phase} "
+                        f"offset={int(self.offset)} q_len={q_len} "
+                        f"partition_size=primitive",
+                        file=sys.stderr,
+                    )
                 out = out.transpose(1, 0, 2)[None, ...]
                 return out.astype(queries.dtype) if force_fp32_paged else out
             if not hasattr(ops, "paged_attention_v2_online_partitioned"):
@@ -1299,8 +1407,20 @@ class VllmMetalPagedKVCache:
             self.paged_attention_calls += 1
             self.partitioned_attention_calls += 1
             self.partitioned_paged_calls += 1
+            phase = current_attention_phase()
+            self.partitioned_paged_calls_by_phase[phase] = (
+                int(self.partitioned_paged_calls_by_phase.get(phase, 0)) + 1
+            )
             self.attention_time_s += time.perf_counter() - started
             self.paged_attention_large_q_path = "partitioned_paged"
+            if _env_truthy("MTPLX_PREFILL_ROUTE_TRACE"):
+                print(
+                    "mtplx_prefill_route "
+                    f"path=partitioned_paged phase={phase} "
+                    f"offset={int(self.offset)} q_len={q_len} "
+                    f"partition_size={partition_size} partitions={max_num_partitions}",
+                    file=sys.stderr,
+                )
             out = out.transpose(1, 0, 2)[None, ...]
             return out.astype(queries.dtype) if force_fp32_paged else out
 
@@ -1485,7 +1605,25 @@ class VllmMetalPagedKVCache:
             "large_q_split_sdpa_fallback_calls": int(
                 self.large_q_split_sdpa_fallback_calls
             ),
+            "large_q_split_sdpa_fallback_calls_by_phase": dict(
+                self.large_q_split_sdpa_fallback_calls_by_phase
+            ),
+            "prefill_large_q_split_sdpa_fallback_calls": int(
+                self.large_q_split_sdpa_fallback_calls_by_phase.get("prefill", 0)
+            ),
+            "decode_large_q_split_sdpa_fallback_calls": int(
+                self.large_q_split_sdpa_fallback_calls_by_phase.get("decode_verify", 0)
+            ),
             "partitioned_paged_calls": int(self.partitioned_paged_calls),
+            "partitioned_paged_calls_by_phase": dict(
+                self.partitioned_paged_calls_by_phase
+            ),
+            "prefill_partitioned_paged_calls": int(
+                self.partitioned_paged_calls_by_phase.get("prefill", 0)
+            ),
+            "decode_partitioned_paged_calls": int(
+                self.partitioned_paged_calls_by_phase.get("decode_verify", 0)
+            ),
             "grow_events": int(self.grow_events),
             "turboquant": int(bool(self.turboquant)),
             "turboquant_k_quant": (
@@ -2367,9 +2505,23 @@ def tail_owned_attention_kv_stats(cache: list[Any] | None) -> dict[str, Any]:
                 "ar_dense_fallback_calls",
                 "postcommit_dense_fallback_calls",
                 "large_q_split_sdpa_fallback_calls",
+                "prefill_large_q_split_sdpa_fallback_calls",
+                "decode_large_q_split_sdpa_fallback_calls",
                 "partitioned_paged_calls",
+                "prefill_partitioned_paged_calls",
+                "decode_partitioned_paged_calls",
             ):
                 aggregate[key] = int(aggregate.get(key, 0)) + int(stats.get(key, 0))
+            for dict_key in (
+                "large_q_split_sdpa_fallback_calls_by_phase",
+                "partitioned_paged_calls_by_phase",
+            ):
+                phase_counts = stats.get(dict_key) or {}
+                if isinstance(phase_counts, dict):
+                    merged = dict(aggregate.get(dict_key) or {})
+                    for phase, count in phase_counts.items():
+                        merged[str(phase)] = int(merged.get(str(phase), 0)) + int(count)
+                    aggregate[dict_key] = merged
             bailouts = stats.get("paged_attention_bailouts_by_phase_reason") or {}
             if isinstance(bailouts, dict):
                 merged = dict(aggregate.get("paged_attention_bailouts_by_phase_reason") or {})

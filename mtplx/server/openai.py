@@ -7,6 +7,8 @@ server yet. The generation path is serialized because the current cache and
 GraphBank machinery has not been audited for concurrent requests.
 """
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
@@ -28,7 +30,7 @@ from dataclasses import asdict, is_dataclass
 from enum import Enum
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Event, Lock, Timer
+from threading import Event, Lock, Thread, Timer
 from typing import Any, Callable
 
 import numpy as np
@@ -340,6 +342,12 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: bool | None = None
 
 
+class MTPLXSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reasoning: str | None = None
+
+
 class CompletionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -428,6 +436,30 @@ def _open_browser_later(url: str, *, delay_s: float = 1.0) -> None:
     timer = Timer(delay_s, open_url)
     timer.daemon = True
     timer.start()
+
+
+def _open_pi_later(command: str, *, model_id: str, delay_s: float = 1.0) -> None:
+    def open_pi() -> None:
+        try:
+            from mtplx.pi import launch_pi_in_terminal, pi_model_ref
+
+            result = launch_pi_in_terminal(command, model_ref=pi_model_ref(model_id))
+            if result.get("ok"):
+                _startup_line("Pi opened in Terminal.")
+            else:
+                _startup_line(f"warning: could not open Pi automatically: {result.get('error')}")
+                _startup_line(f"run manually: {command}")
+        except Exception as exc:
+            _startup_line(f"warning: could not open Pi automatically: {exc}")
+            _startup_line(f"run manually: {command}")
+
+    timer = Timer(delay_s, open_pi)
+    timer.daemon = True
+    timer.start()
+
+
+def _server_console_enabled(state: Any) -> bool:
+    return bool(getattr(getattr(state, "args", None), "server_console", False))
 
 
 class _StartupHeartbeat:
@@ -1264,6 +1296,94 @@ def _stream_tool_call_deltas(
             }
 
 
+class _ToolAwareContentStreamTranslator:
+    """Translate streamed assistant text into OpenAI tool-call deltas when needed."""
+
+    _START_MARKER = "<tool_call"
+
+    def __init__(
+        self,
+        *,
+        tools: list[dict[str, Any]],
+        argument_chunk_chars: int,
+    ) -> None:
+        self._tools = tools
+        self._argument_chunk_chars = max(1, int(argument_chunk_chars))
+        self._pending = ""
+        self._trailing = ""
+        self._mode = "passthrough" if not tools else "undecided"
+        self.tool_calls: list[dict[str, Any]] | None = None
+
+    @property
+    def has_tool_calls(self) -> bool:
+        return bool(self.tool_calls)
+
+    def feed(self, field: str, text: str) -> list[dict[str, Any]]:
+        if not text:
+            return []
+        if field != "content" or self._mode == "passthrough":
+            return [{field: text}]
+        if self._mode == "content":
+            return [{"content": text}]
+        if self._mode == "done":
+            self._trailing += text
+            return []
+
+        self._pending += text
+        if self._mode == "tool":
+            return self._tool_deltas_if_complete(final=False)
+
+        stripped = self._pending.lstrip()
+        if not stripped:
+            return []
+        lowered = stripped.lower()
+        if lowered.startswith(self._START_MARKER):
+            self._mode = "tool"
+            return self._tool_deltas_if_complete(final=False)
+        if self._START_MARKER.startswith(lowered):
+            return []
+
+        self._mode = "content"
+        content = self._pending
+        self._pending = ""
+        return [{"content": content}]
+
+    def finish(self) -> list[dict[str, Any]]:
+        if self._mode == "tool":
+            return self._tool_deltas_if_complete(final=True)
+        if self._mode == "done":
+            if self._trailing.strip():
+                raise _tool_protocol_error("text after tool_call block")
+            return []
+        if self._pending:
+            content = self._pending
+            self._pending = ""
+            self._mode = "content"
+            return [{"content": content}]
+        return []
+
+    def _tool_deltas_if_complete(self, *, final: bool) -> list[dict[str, Any]]:
+        if not final:
+            return []
+        tool_calls = _parse_generated_tool_calls(self._pending, tools=self._tools)
+        if not tool_calls:
+            if final:
+                content = self._pending
+                self._pending = ""
+                self._mode = "content"
+                return [{"content": content}]
+            return []
+        self.tool_calls = tool_calls
+        self._pending = ""
+        self._mode = "done"
+        return list(
+            _stream_tool_call_deltas(
+                tool_calls,
+                argument_chunk_chars=self._argument_chunk_chars,
+            )
+        )
+
+
 def _template_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
     function = tool_call.get("function")
     if isinstance(function, dict):
@@ -1567,6 +1687,7 @@ def _metrics_envelope(
         "completion_tokens": int(completion_tokens),
         "prompt_eval_time_s": prompt_eval_time_s,
         "prefill_tok_s": prefill_tok_s,
+        "prompt_tps": prefill_tok_s,
         "ttft_s": ttft_s,
         "decode_elapsed_s": decode_elapsed_s,
         "request_elapsed_s": request_elapsed_s,
@@ -1747,9 +1868,18 @@ PUBLIC_MTPLX_STATS_KEYS = (
     "paged_attention_bailouts_by_phase_reason",
     "paged_attention_large_q_path",
     "large_q_split_sdpa_fallback_calls",
+    "large_q_split_sdpa_fallback_calls_by_phase",
+    "prefill_large_q_split_sdpa_fallback_calls",
+    "decode_large_q_split_sdpa_fallback_calls",
     "partitioned_paged_calls",
+    "partitioned_paged_calls_by_phase",
+    "prefill_partitioned_paged_calls",
+    "decode_partitioned_paged_calls",
     "sessionbank_snapshot_bytes",
     "sessionbank_skipped_oversized_snapshot",
+    "hardware_acceleration_eligible",
+    "hardware_acceleration_confirmed",
+    "prefill_route",
     "generation_mode",
     "generated_tokens",
     "prompt_tokens",
@@ -1757,6 +1887,11 @@ PUBLIC_MTPLX_STATS_KEYS = (
     "elapsed_s",
     "tok_s",
     "prompt_eval_time_s",
+    "prompt_target_prefill_time_s",
+    "prompt_mtp_history_time_s",
+    "prompt_target_prefill_tok_s",
+    "prompt_mtp_history_tok_s",
+    "prompt_tps",
     "prefill_tok_s",
     "ttft_s",
     "decode_elapsed_s",
@@ -1802,6 +1937,9 @@ PUBLIC_MTPLX_STATS_KEYS = (
     "server_blank_retry_suppressed",
     "mtp_depth",
     "speculative_depth",
+    "requested_mtp_depth",
+    "requested_speculative_depth",
+    "long_context_mtp_depth_policy",
     "peak_memory_bytes",
     "reasoning_reentries",
     "reasoning_tokens",
@@ -2026,6 +2164,7 @@ def _store_retokenized_history_snapshot(
     assistant_tool_calls: list[dict[str, Any]] | None = None,
     thinking_enabled: bool,
     policy_fingerprint: str,
+    acquire_model_lock_blocking: bool = True,
 ) -> dict[str, Any]:
     if session_id is None:
         return {"stored": False, "reason": "no_session_id"}
@@ -2048,7 +2187,15 @@ def _store_retokenized_history_snapshot(
         return {"stored": False, "reason": "empty_boundary_prefix"}
     started = time.perf_counter()
     state.begin_foreground()
-    state.lock.acquire()
+    acquired = state.lock.acquire(blocking=bool(acquire_model_lock_blocking))
+    if not acquired:
+        state.end_foreground()
+        return {
+            "stored": False,
+            "mode": "retokenized_history",
+            "reason": "model_lock_busy_before_retokenized_commit",
+            "elapsed_s": time.perf_counter() - started,
+        }
     try:
         with attention_phase("postcommit"):
             prompt_state = restore_or_prefill_prompt_state(
@@ -2302,6 +2449,10 @@ def _store_generation_final_history_snapshot(
     }
 
 
+_IDLE_POSTCOMMIT_MAX_WAIT_S = 30.0
+_IDLE_POSTCOMMIT_POLL_INTERVAL_S = 0.25
+
+
 def _schedule_idle_postcommit_snapshot(
     state: ServerState,
     *,
@@ -2313,41 +2464,89 @@ def _schedule_idle_postcommit_snapshot(
     policy_fingerprint: str,
     unsafe_reason: str,
 ) -> dict[str, Any]:
+    """Schedule a background SessionBank commit for a response the
+    generation-final compatibility check rejected as unsafe (most commonly
+    because the response contained tool_calls, which carries a non-trivial
+    next-turn retokenization risk).
+
+    The retokenized-history path canonicalises tool_call responses into the
+    exact prefix the next request will send, so the commit is safe - it just
+    must not run on the request thread (would extend stream latency). This
+    function dispatches that work to the postcommit executor, where it waits
+    for the foreground to go idle and then runs the synchronous retokenized
+    commit. If the foreground stays busy past the deadline we abandon, since
+    a later commit would race the next turn's prefill.
+    """
     pending = {
         "stored": False,
         "mode": "async_pending",
         "reason": unsafe_reason,
     }
 
-    def async_postcommit() -> None:
-        result = {
-            "stored": False,
-            "mode": "abandoned_foreground_busy",
-            "reason": "idle_only_fallback_skipped_to_protect_foreground_latency",
-        }
+    def _log(outcome: dict[str, Any]) -> None:
+        if _server_console_enabled(state):
+            return
         try:
-            if state.has_foreground() or state.lock.locked():
-                result = {
-                    "stored": False,
-                    "mode": "deferred_foreground_busy",
-                    "reason": "foreground_or_model_lock_busy",
-                }
             print(
                 "[mtplx] idle async session postcommit "
                 + json.dumps(
                     {
                         "session_id": session_id,
                         "unsafe_reason": unsafe_reason,
-                        **result,
+                        **outcome,
                     },
                     sort_keys=True,
+                    default=str,
                 ),
                 flush=True,
             )
+        except BaseException:
+            # Logging must never bring down the executor; fail silently.
+            pass
+
+    def async_postcommit() -> None:
+        deadline = time.monotonic() + _IDLE_POSTCOMMIT_MAX_WAIT_S
+        try:
+            # Wait for the foreground request to release the model. We poll
+            # both the foreground flag and the model lock; if either is held
+            # the next prefill is imminent or already running and committing
+            # now would either stall it or race it. We bound the wait so a
+            # back-pressured server never accumulates a backlog of stale
+            # commit work.
+            while state.has_foreground() or state.lock.locked():
+                if time.monotonic() >= deadline:
+                    _log(
+                        {
+                            "stored": False,
+                            "mode": "abandoned_foreground_busy",
+                            "reason": "foreground_busy_past_deadline",
+                        }
+                    )
+                    return
+                time.sleep(_IDLE_POSTCOMMIT_POLL_INTERVAL_S)
+
+            # Foreground is idle. Run the canonical retokenized commit with a
+            # non-blocking lock acquire, so a foreground request that wins the
+            # race after the idle check is never delayed by background cache
+            # maintenance.
+            postcommit = _store_retokenized_history_snapshot(
+                state,
+                session_id=session_id,
+                messages=messages,
+                assistant_content=assistant_content,
+                assistant_tool_calls=assistant_tool_calls,
+                thinking_enabled=thinking_enabled,
+                policy_fingerprint=policy_fingerprint,
+                acquire_model_lock_blocking=False,
+            )
+            _log(postcommit)
         except BaseException as exc:
-            print(
-                f"[mtplx] async session postcommit failed: {exc!r}",
-                flush=True,
+            _log(
+                {
+                    "stored": False,
+                    "mode": "async_error",
+                    "reason": f"async_postcommit_raised:{type(exc).__name__}",
+                }
             )
 
     executor = getattr(state, "postcommit_executor", None)
@@ -2657,6 +2856,16 @@ def _run_generation(
             stats["sessionbank_skipped_oversized_snapshot"] = bool(
                 getattr(session_bank, "last_put_skipped_oversized_snapshot", False)
             )
+        actual_mtp_depth = int(
+            stats.get("speculative_depth")
+            or (effective_depth if effective_mode == "mtp" else 0)
+            or 0
+        )
+        requested_mtp_depth = int(
+            stats.get("requested_speculative_depth")
+            or (effective_depth if effective_mode == "mtp" else 0)
+            or 0
+        )
         envelope = _metrics_envelope(
             stats=stats,
             prompt_tokens=len(prompt_ids),
@@ -2669,12 +2878,22 @@ def _run_generation(
             session_cache_hit=session_cache_hit,
             cache_miss_reason=cache_miss_reason,
             session_restore_mode=session_restore_mode,
-            mtp_depth=effective_depth if effective_mode == "mtp" else 0,
+            mtp_depth=actual_mtp_depth if effective_mode == "mtp" else 0,
             generation_limits=generation_limits,
         )
         envelope["generation_mode"] = effective_mode
+        envelope["requested_mtp_depth"] = (
+            requested_mtp_depth if effective_mode == "mtp" else 0
+        )
+        envelope["long_context_mtp_depth_policy"] = (
+            (stats.get("long_context_mtp_depth_policy") or {})
+            if effective_mode == "mtp"
+            else {}
+        )
         if effective_mode == "ar":
             envelope["mtp_depth"] = 0
+            envelope["requested_mtp_depth"] = 0
+            envelope["long_context_mtp_depth_policy"] = {}
             envelope["verify_calls"] = 0
             envelope["verify_time_s"] = 0.0
             envelope["accepted_by_depth"] = []
@@ -2720,7 +2939,7 @@ def _run_generation(
         if seed_is_explicit or out.text.strip():
             break
     assert last is not None
-    if not bool((request_observability or {}).get("warmup")):
+    if not bool((request_observability or {}).get("warmup")) and not _server_console_enabled(state):
         print(
             json.dumps(
                 {
@@ -4397,6 +4616,127 @@ def _thinking_enabled_for_request(
     )
 
 
+def _normalize_reasoning_mode(value: Any, *, default: str = "auto") -> str:
+    mode = str(value or default).strip().lower()
+    if mode not in {"auto", "on", "off"}:
+        raise ValueError("reasoning must be one of: auto, on, off")
+    return mode
+
+
+def _set_server_reasoning_mode(state: ServerState, mode: str) -> None:
+    normalized = _normalize_reasoning_mode(mode)
+    state.args.reasoning = normalized
+    # Browser/Pi "auto" means no per-request override. The Qwen default remains
+    # thinking-capable, while tool requests still force thinking off unless the
+    # client explicitly opts in.
+    state.args.enable_thinking = False if normalized == "off" else True
+
+
+def _server_settings_payload(state: ServerState) -> dict[str, Any]:
+    reasoning = getattr(state.args, "reasoning", None)
+    if reasoning not in {"auto", "on", "off"}:
+        reasoning = "on" if bool(getattr(state.args, "enable_thinking", True)) else "off"
+    return {
+        "ok": True,
+        "reasoning": reasoning,
+        "enable_thinking": bool(getattr(state.args, "enable_thinking", True)),
+        "reasoning_parser": state.args.reasoning_parser,
+        "generation_mode": state.args.generation_mode,
+        "depth": state.args.depth,
+        "model": state.model_id,
+    }
+
+
+def _server_console_help() -> str:
+    return (
+        "MTPLX server controls: /reasoning on|off|auto|status, "
+        "/mtp on|off|status, /stats, /help"
+    )
+
+
+def _server_console_handle_command(state: ServerState, raw: str) -> str | None:
+    text = raw.strip()
+    if not text:
+        return None
+    parts = text.split()
+    command = parts[0].lower()
+    arg = parts[1].lower() if len(parts) > 1 else "status"
+    if command in {"/help", "help", "?"}:
+        return _server_console_help()
+    if command in {"/reasoning", "reasoning"}:
+        if arg in {"", "status"}:
+            payload = _server_settings_payload(state)
+            return (
+                f"Reasoning: {payload['reasoning']} "
+                f"(enable_thinking={str(payload['enable_thinking']).lower()})"
+            )
+        if arg in {"on", "off", "auto"}:
+            _set_server_reasoning_mode(state, arg)
+            payload = _server_settings_payload(state)
+            return (
+                f"Reasoning: {payload['reasoning']} "
+                f"(enable_thinking={str(payload['enable_thinking']).lower()})"
+            )
+        return "usage: /reasoning on|off|auto|status"
+    if command in {"/mtp", "mtp"}:
+        mode = str(getattr(state.args, "generation_mode", "mtp")).lower()
+        if arg in {"", "status"}:
+            return f"MTP: {'on' if mode == 'mtp' else 'off'} (generation_mode={mode})"
+        if arg == "off":
+            state.args.generation_mode = "ar"
+            return "MTP: off (AR target-only mode for new requests)"
+        if arg == "on":
+            if not bool(getattr(state.runtime, "mtp_enabled", False)):
+                return "MTP is not available for this loaded model."
+            state.args.generation_mode = "mtp"
+            return f"MTP: on (depth={int(getattr(state.args, 'depth', 1) or 1)})"
+        return "usage: /mtp on|off|status"
+    if command in {"/stats", "stats"}:
+        latest = state.last_metrics[-1] if getattr(state, "last_metrics", None) else None
+        if not latest:
+            return "No generation stats yet."
+        public = {
+            key: latest[key]
+            for key in (
+                "prompt_tokens",
+                "completion_tokens",
+                "tok_s",
+                "accept_rate",
+                "generation_mode",
+                "ttft_s",
+            )
+            if key in latest
+        }
+        return json.dumps(public or latest, sort_keys=True, default=str)
+    if command in {"/exit", "/quit", "exit", "quit"}:
+        return "Use Ctrl-C in this MTPLX terminal to stop the server."
+    return "Unknown MTPLX server command. Try /help"
+
+
+def _start_server_console(state: ServerState) -> None:
+    if not sys.stdin.isatty():
+        return
+
+    def console_loop() -> None:
+        _startup_line(_server_console_help())
+        while True:
+            try:
+                raw = input("mtplx> ")
+            except EOFError:
+                return
+            except BaseException:
+                return
+            try:
+                response = _server_console_handle_command(state, raw)
+            except BaseException as exc:
+                response = f"error: {type(exc).__name__}: {exc}"
+            if response:
+                _startup_line(response)
+
+    thread = Thread(target=console_loop, name="mtplx-server-console", daemon=True)
+    thread.start()
+
+
 def create_app(state: ServerState) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -4530,6 +4870,8 @@ def create_app(state: ServerState) -> FastAPI:
             "online_hidden": _online_hidden_config(state.args),
             "verify_core": state.args.verify_core,
             "verify_strategy": state.args.verify_strategy,
+            "reasoning": getattr(state.args, "reasoning", None)
+            or ("on" if bool(state.args.enable_thinking) else "off"),
             "enable_thinking": state.args.enable_thinking,
             "context_window": state.context_window,
             "max_response_tokens": state.args.max_response_tokens,
@@ -4591,6 +4933,13 @@ def create_app(state: ServerState) -> FastAPI:
             ),
             "late_depth_before": os.environ.get("MTPLX_LATE_DEPTH_BEFORE"),
             "late_depth_after": os.environ.get("MTPLX_LATE_DEPTH_AFTER"),
+            "long_context_mtp_depth_policy": os.environ.get(
+                "MTPLX_LONG_CONTEXT_MTP_DEPTH_POLICY"
+            ),
+            "long_context_mtp_depth_threshold": os.environ.get(
+                "MTPLX_LONG_CONTEXT_MTP_DEPTH_THRESHOLD"
+            ),
+            "long_context_mtp_depth": os.environ.get("MTPLX_LONG_CONTEXT_MTP_DEPTH"),
             "mtp_position_mode": os.environ.get("MTPLX_MTP_POSITION_MODE"),
             "mtp_position_cap": os.environ.get("MTPLX_MTP_POSITION_CAP"),
             "mtp_position_period": os.environ.get("MTPLX_MTP_POSITION_PERIOD"),
@@ -4691,6 +5040,21 @@ def create_app(state: ServerState) -> FastAPI:
             "mlx_cache_limit": state.mlx_cache_limit_status,
             "mlx_fork": state.mlx_fork_status,
         }
+
+    @app.get("/v1/mtplx/settings")
+    @app.get("/mtplx/settings")
+    def get_mtplx_settings() -> dict[str, Any]:
+        return _server_settings_payload(state)
+
+    @app.post("/v1/mtplx/settings")
+    @app.post("/mtplx/settings")
+    def update_mtplx_settings(update: MTPLXSettingsUpdate) -> dict[str, Any]:
+        if update.reasoning is not None:
+            try:
+                _set_server_reasoning_mode(state, update.reasoning)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _server_settings_payload(state)
 
     @app.get("/metrics")
     def metrics() -> dict[str, Any]:
@@ -4957,121 +5321,6 @@ def create_app(state: ServerState) -> FastAPI:
             )
             generated["stats"]["session_postcommit_snapshot"] = postcommit
 
-        if request.stream and tools_active:
-
-            async def tool_event_stream():
-                def stream_chunk(
-                    *,
-                    delta: dict[str, Any],
-                    finish_reason: str | None = None,
-                    usage: dict[str, int] | None = None,
-                    mtplx_stats: dict[str, Any] | None = None,
-                ) -> str:
-                    payload: dict[str, Any] = {
-                        "id": response_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": delta,
-                                "finish_reason": finish_reason,
-                            }
-                        ],
-                    }
-                    if usage is not None:
-                        payload["usage"] = usage
-                    if mtplx_stats is not None:
-                        payload["mtplx_stats"] = mtplx_stats
-                    return f"data: {json.dumps(payload)}\n\n"
-
-                def stream_error(exc: BaseException) -> str:
-                    if isinstance(exc, HTTPException):
-                        message = str(exc.detail)
-                        error_type = str(exc.status_code)
-                        status_code = exc.status_code
-                    else:
-                        message = str(exc)
-                        error_type = type(exc).__name__
-                        status_code = 500
-                    payload = {
-                        "id": response_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [
-                            {"index": 0, "delta": {}, "finish_reason": "error"}
-                        ],
-                        "error": {
-                            "message": message,
-                            "type": error_type,
-                            "status_code": status_code,
-                        },
-                    }
-                    return f"data: {json.dumps(payload)}\n\n"
-
-                yield stream_chunk(delta={"role": "assistant"})
-                loop = asyncio.get_running_loop()
-                try:
-                    generated = await loop.run_in_executor(
-                        state.generation_executor,
-                        run_generation_for_response,
-                    )
-                    tool_calls = _parse_generated_tool_calls(
-                        str(generated["text"]),
-                        tools=tool_specs,
-                    )
-                    if tool_calls:
-                        generated["finish_reason"] = "tool_calls"
-                        await store_postcommit_snapshot(
-                            generated,
-                            assistant_content="",
-                            assistant_tool_calls=tool_calls,
-                            stream_response=True,
-                        )
-                        argument_chunk_chars = max(1, int(state.args.stream_interval))
-                        for delta in _stream_tool_call_deltas(
-                            tool_calls,
-                            argument_chunk_chars=argument_chunk_chars,
-                        ):
-                            yield stream_chunk(delta=delta)
-                        finish_reason = "tool_calls"
-                    else:
-                        display_text = _display_text(
-                            state,
-                            generated,
-                            thinking_enabled=thinking_enabled,
-                        )
-                        await store_postcommit_snapshot(
-                            generated,
-                            assistant_content=display_text,
-                            stream_response=True,
-                        )
-                        if display_text:
-                            yield stream_chunk(delta={"content": display_text})
-                        finish_reason = generated.get("finish_reason", "stop")
-                except EngineSessionBusy as exc:
-                    yield stream_error(HTTPException(status_code=409, detail=str(exc)))
-                    yield "data: [DONE]\n\n"
-                    return
-                except BaseException as exc:
-                    yield stream_error(exc)
-                    yield "data: [DONE]\n\n"
-                    return
-
-                yield stream_chunk(
-                    delta={},
-                    finish_reason=finish_reason,
-                    usage=_usage_payload(generated),
-                    mtplx_stats=_public_mtplx_stats(generated),
-                )
-                yield "data: [DONE]\n\n"
-
-            return StreamingResponse(
-                tool_event_stream(), media_type="text/event-stream"
-            )
-
         if request.stream:
 
             async def event_stream():
@@ -5107,11 +5356,16 @@ def create_app(state: ServerState) -> FastAPI:
                     thinking_enabled=thinking_enabled
                 )
                 stream_interval = max(1, int(state.args.stream_interval))
+                tool_stream = _ToolAwareContentStreamTranslator(
+                    tools=tool_specs if tools_active else [],
+                    argument_chunk_chars=stream_interval,
+                )
                 pending_stream_tokens: list[int] = []
                 commit_event = Event()
                 commit_state = {
                     "commit": False,
                     "assistant_history_content": None,
+                    "assistant_tool_calls": None,
                     "postcommit_snapshot": None,
                     "retokenize_inline": False,
                 }
@@ -5193,12 +5447,16 @@ def create_app(state: ServerState) -> FastAPI:
                                         if state.args.normalize_thinking_tags
                                         else str(generated["text"])
                                     )
+                                    assistant_tool_calls = commit_state.get(
+                                        "assistant_tool_calls"
+                                    )
                                     if bool(commit_state.get("retokenize_inline")):
                                         postcommit = _store_retokenized_history_snapshot(
                                             state,
                                             session_id=session_id,
                                             messages=request.messages,
                                             assistant_content=assistant_history_content,
+                                            assistant_tool_calls=assistant_tool_calls,
                                             thinking_enabled=thinking_enabled,
                                             policy_fingerprint=policy_fingerprint,
                                         )
@@ -5210,6 +5468,7 @@ def create_app(state: ServerState) -> FastAPI:
                                             generated=generated,
                                             messages=request.messages,
                                             assistant_content=assistant_history_content,
+                                            assistant_tool_calls=assistant_tool_calls,
                                             thinking_enabled=thinking_enabled,
                                             policy_fingerprint=policy_fingerprint,
                                         )
@@ -5264,7 +5523,7 @@ def create_app(state: ServerState) -> FastAPI:
 
                 generation_future = state.generation_executor.submit(worker)
 
-                def delta_chunk(field: str, text: str) -> str:
+                def delta_payload_chunk(delta: dict[str, Any]) -> str:
                     payload = {
                         "id": response_id,
                         "object": "chat.completion.chunk",
@@ -5273,12 +5532,15 @@ def create_app(state: ServerState) -> FastAPI:
                         "choices": [
                             {
                                 "index": 0,
-                                "delta": {field: text},
+                                "delta": delta,
                                 "finish_reason": None,
                             }
                         ],
                     }
                     return f"data: {json.dumps(payload)}\n\n"
+
+                def delta_chunk(field: str, text: str) -> str:
+                    return delta_payload_chunk({field: text})
 
                 def progress_chunk(progress: dict[str, Any]) -> str:
                     payload = {
@@ -5331,6 +5593,7 @@ def create_app(state: ServerState) -> FastAPI:
                     if (
                         seconds_since_last_token < STREAM_SILENCE_WARN_S
                         or now_s < next_silence_warn_s
+                        or _server_console_enabled(state)
                     ):
                         return
                     print(
@@ -5358,11 +5621,27 @@ def create_app(state: ServerState) -> FastAPI:
                 streamed_progress_tokens = 0
                 streamed_decode_started_s: float | None = None
 
-                def remember_stream_chunk(field: str, text: str) -> None:
-                    if field == "reasoning_content":
-                        history_reasoning_chunks.append(text)
-                    elif field == "content":
-                        history_content_chunks.append(text)
+                def remember_stream_delta(delta: dict[str, Any]) -> None:
+                    reasoning = delta.get("reasoning_content")
+                    if isinstance(reasoning, str) and reasoning:
+                        history_reasoning_chunks.append(reasoning)
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        history_content_chunks.append(content)
+
+                def stream_content_delta_chunks(field: str, text: str) -> list[str]:
+                    chunks: list[str] = []
+                    for delta in tool_stream.feed(field, text):
+                        remember_stream_delta(delta)
+                        chunks.append(delta_payload_chunk(delta))
+                    return chunks
+
+                def finish_translated_stream_chunks() -> list[str]:
+                    chunks: list[str] = []
+                    for delta in tool_stream.finish():
+                        remember_stream_delta(delta)
+                        chunks.append(delta_payload_chunk(delta))
+                    return chunks
 
                 def drain_stream_tokens(
                     tokens: list[int],
@@ -5388,6 +5667,8 @@ def create_app(state: ServerState) -> FastAPI:
                     return chunks
 
                 def streamed_history_content() -> str:
+                    if tool_stream.has_tool_calls:
+                        return ""
                     reasoning = (
                         "".join(history_reasoning_chunks)
                         .replace(THINK_OPEN, "")
@@ -5409,8 +5690,8 @@ def create_app(state: ServerState) -> FastAPI:
 
                 for field, text in splitter.start():
                     if text:
-                        remember_stream_chunk(field, text)
-                        yield mark_sse_sent(delta_chunk(field, text))
+                        for chunk in stream_content_delta_chunks(field, text):
+                            yield mark_sse_sent(chunk)
 
                 try:
                     while True:
@@ -5470,27 +5751,37 @@ def create_app(state: ServerState) -> FastAPI:
                                     )
                                 )
                             for field, text in drain_stream_tokens(stream_tokens):
-                                remember_stream_chunk(field, text)
-                                yield mark_sse_sent(delta_chunk(field, text))
+                                for chunk in stream_content_delta_chunks(field, text):
+                                    yield mark_sse_sent(chunk)
                         elif kind == "done":
                             generated = item
                             for field, text in drain_stream_tokens([], force=True):
-                                remember_stream_chunk(field, text)
-                                yield mark_sse_sent(delta_chunk(field, text))
+                                for chunk in stream_content_delta_chunks(field, text):
+                                    yield mark_sse_sent(chunk)
                             tail = decoder.finish()
                             if tail:
                                 for field, text in splitter.feed(tail):
                                     if text:
-                                        remember_stream_chunk(field, text)
-                                        yield mark_sse_sent(delta_chunk(field, text))
+                                        for chunk in stream_content_delta_chunks(
+                                            field, text
+                                        ):
+                                            yield mark_sse_sent(chunk)
                             for field, text in splitter.finish():
                                 if text:
-                                    remember_stream_chunk(field, text)
-                                    yield mark_sse_sent(delta_chunk(field, text))
+                                    for chunk in stream_content_delta_chunks(field, text):
+                                        yield mark_sse_sent(chunk)
+                            for chunk in finish_translated_stream_chunks():
+                                yield mark_sse_sent(chunk)
+                            assistant_tool_calls = tool_stream.tool_calls
+                            if assistant_tool_calls:
+                                generated["finish_reason"] = "tool_calls"
                             if session is not None:
                                 assistant_history_content = streamed_history_content()
                                 commit_state["assistant_history_content"] = (
                                     assistant_history_content
+                                )
+                                commit_state["assistant_tool_calls"] = (
+                                    assistant_tool_calls
                                 )
                                 commit_state["retokenize_inline"] = (
                                     state.args.session_postcommit_mode == "inline"
@@ -5522,6 +5813,7 @@ def create_app(state: ServerState) -> FastAPI:
                                         session_id=session_id,
                                         messages=request.messages,
                                         assistant_content=assistant_history_content,
+                                        assistant_tool_calls=assistant_tool_calls,
                                         thinking_enabled=thinking_enabled,
                                         policy_fingerprint=policy_fingerprint,
                                         unsafe_reason=str(
@@ -5556,8 +5848,11 @@ def create_app(state: ServerState) -> FastAPI:
                                     splitter.reentry_count
                                 )
                             footer = _stats_footer_text(state, generated)
-                            if footer:
-                                yield mark_sse_sent(delta_chunk("content", f"\n\n{footer}"))
+                            if footer and not tool_stream.has_tool_calls:
+                                for chunk in stream_content_delta_chunks(
+                                    "content", f"\n\n{footer}"
+                                ):
+                                    yield mark_sse_sent(chunk)
                             break
                         elif kind == "error":
                             yield mark_sse_sent(error_chunk(item))
@@ -5920,6 +6215,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--reasoning-mode",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Server-default Qwen thinking mode for clients that do not send enable_thinking.",
+    )
+    parser.add_argument(
         "--enable-thinking",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -6029,10 +6330,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Open the local MTPLX browser chat UI after startup.",
     )
+    parser.add_argument(
+        "--launch-pi",
+        action="store_true",
+        help="Open Pi in Terminal after the MTPLX server is ready.",
+    )
+    parser.add_argument(
+        "--server-console",
+        action="store_true",
+        help="Accept live server-control commands such as /reasoning and /mtp on stdin.",
+    )
+    parser.add_argument(
+        "--pi-launch-command",
+        default="",
+        help="Pi command to open when --launch-pi is set.",
+    )
     args = parser.parse_args(argv)
     if args.stock_ar:
         args.generation_mode = "ar"
         args.load_mtp = False
+    args.reasoning = _normalize_reasoning_mode(args.reasoning_mode)
+    if args.reasoning == "off":
+        args.enable_thinking = False
+    elif args.reasoning == "on":
+        args.enable_thinking = True
     return args
 
 
@@ -6064,9 +6385,19 @@ def main(argv: list[str] | None = None) -> None:
     _startup_line("API key: leave blank for localhost")
     _startup_line("Health check: " + _startup_server_url(args) + "/health")
     _startup_line("Keep this terminal open. Press Ctrl-C to stop MTPLX.")
+    if args.server_console:
+        _startup_line("Type /help here for live MTPLX controls.")
+        _start_server_console(state)
     if args.open_browser:
         _startup_line("Opening chat UI in your browser...")
         _open_browser_later(_startup_chat_url(args))
+    if args.launch_pi:
+        command = str(args.pi_launch_command or "").strip()
+        if command:
+            _startup_line("Opening Pi in Terminal...")
+            _open_pi_later(command, model_id=str(args.model_id))
+        else:
+            _startup_line("warning: --launch-pi was set but no Pi command was provided.")
     uvicorn.run(
         app, host=args.host, port=args.port, log_level="warning", access_log=False
     )

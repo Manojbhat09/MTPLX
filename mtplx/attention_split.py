@@ -230,6 +230,7 @@ def _install_split_attention_hook(attn: Any) -> bool:
         )
         should_split = (
             cache is not None
+            and getattr(self, "_mtplx_split_full_attention_explicit_enabled", False)
             and cached_prefix_len is not None
             and cached_prefix_len >= threshold
             and int(queries.shape[2]) > max(1, chunk_size)
@@ -299,6 +300,9 @@ def _install_split_attention_hook(attn: Any) -> bool:
                 cached_prefix_len=cached_prefix_len,
             )
         elif should_split:
+            self._mtplx_split_full_attention_calls = int(
+                getattr(self, "_mtplx_split_full_attention_calls", 0)
+            ) + 1
             output = split_sdpa_output(
                 queries=queries,
                 keys=keys,
@@ -360,10 +364,20 @@ def configure_split_full_attention(
     exact_gather_indices = _env_index_set(
         "MTPLX_VLLM_METAL_PAGED_ATTN_EXACT_GATHER_INDICES"
     )
+    chunk_was_explicit = chunk_size is not None or "MTPLX_SPLIT_FULL_ATTN_CHUNK_SIZE" in os.environ
     chunk = int(chunk_size if chunk_size is not None else os.environ.get("MTPLX_SPLIT_FULL_ATTN_CHUNK_SIZE", "1"))
+    chunk_defaulted = False
+    if active and chunk <= 1:
+        chunk = 2048
+        chunk_defaulted = True
     min_prefix = int(threshold if threshold is not None else os.environ.get("MTPLX_SPLIT_FULL_ATTN_THRESHOLD", "1024"))
     stats = {
         "enabled": bool(active or sdpa_2pass or vllm_metal_paged),
+        "split_full_attn_enabled": bool(active),
+        "split_full_attn_chunk_size": int(chunk),
+        "split_full_attn_chunk_size_was_explicit": bool(chunk_was_explicit),
+        "split_full_attn_chunk_size_defaulted": bool(chunk_defaulted),
+        "split_full_attn_calls": 0,
         "blockwise_enabled": bool(blockwise),
         "blockwise_threshold": int(blockwise_threshold),
         "sdpa_2pass_enabled": bool(sdpa_2pass),
@@ -395,6 +409,7 @@ def configure_split_full_attention(
         attn._mtplx_split_full_attention_enabled = bool(
             active or sdpa_2pass or vllm_metal_paged
         )
+        attn._mtplx_split_full_attention_explicit_enabled = bool(active)
         attn._mtplx_blockwise_full_attention_enabled = bool(blockwise)
         attn._mtplx_blockwise_full_attention_threshold = int(blockwise_threshold)
         attn._mtplx_sdpa_2pass_enabled = bool(sdpa_2pass)
@@ -406,6 +421,7 @@ def configure_split_full_attention(
         attn._mtplx_full_attention_count = int(full_layer_count)
         attn._mtplx_split_full_attention_chunk_size = int(chunk)
         attn._mtplx_split_full_attention_threshold = int(min_prefix)
+        attn._mtplx_split_full_attention_calls = 0
         stats["layers"] += 1
         stats["exact_gather_layers"] += int(exact_gather_layer)
     return stats

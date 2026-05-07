@@ -61,7 +61,7 @@ NATIVE_MTP_60_MODEL = DEFAULT_MODEL_ID
 
 
 PUBLIC_COMMANDS = (
-    ("start", "Interactive setup → chat (model · mode · web/CLI)"),
+    ("start", "Interactive setup → chat (model · mode · web/CLI/Pi)"),
     ("help", "Detailed help; `help commands` / `help flags` / `help <name>`"),
     ("setup", "Prepare config and the model cache"),
     ("quickstart", "Run the local OpenAI/Anthropic server"),
@@ -69,6 +69,7 @@ PUBLIC_COMMANDS = (
     ("ask", "Ask the verified local model once"),
     ("status", "Check install, model, and integration health"),
     ("inspect", "Check whether a model is MTPLX-compatible"),
+    ("hardware", "Inspect Apple Silicon / MLX acceleration eligibility"),
     ("models", "List models in the local MTPLX cache"),
 )
 
@@ -175,6 +176,7 @@ def _format_public_help() -> str:
   mtplx start                       Interactive setup, then chat
   mtplx start --fresh               Re-run the onboarding (new model/mode/surface)
   mtplx start --max --port 8000       Sustained Max browser chat with fan boost
+  mtplx start pi --port 8000           Configure Pi, then start the local server
   mtplx quickstart --profile sustained --port 8000  API server only, no chat
 
   {footer}
@@ -211,17 +213,18 @@ def _format_start_help() -> str:
     return f"""{_heading("MTPLX start")}
 
 Interactive end-to-end setup. On first run MTPLX walks you through three
-quick choices: model, runtime mode, and where to chat (browser or terminal).
+quick choices: model, runtime mode, and where to chat (browser, terminal, or Pi).
 On later runs it offers "same as last time?" so the chat is one keypress away.
 
 What gets asked:
   1. Model — your configured model, the verified default, custom HF, or local
   2. Mode  — Sustained, Sustained Max, or Burst (Stable remains available via --profile safe)
-  3. Where — Web UI (default) or terminal CLI
+  3. Where — Web UI (default), terminal CLI, or Pi coding agent
 
 Power-user shortcuts (any of these skip the onboarding wizard):
   mtplx start --fresh                 Walk the onboarding again from scratch
   mtplx start cli                     Skip onboarding; terminal chat directly
+  mtplx start pi                      Configure Pi, then serve MTPLX for Pi
   mtplx start --max                   Sustained Max: long-context mode with ThermalForge fan boost
   mtplx start --profile performance-cold --max
                                       Burst: old max-fan lane, max 8K context
@@ -254,6 +257,7 @@ Inside terminal chat:
 Aliases:
   `web` and `openwebui` -> browser chat (same as default)
   `terminal`            -> terminal chat (same as `cli`)
+  `pi`                  -> Pi coding-agent connection
 """
 
 
@@ -512,6 +516,29 @@ def cmd_bench_public(args: argparse.Namespace) -> int:
     from .commands.public import cmd_bench_public as handler
 
     return handler(args)
+
+
+def cmd_hardware_public(args: argparse.Namespace) -> int:
+    from .hardware import inspect_hardware
+
+    payload = inspect_hardware()
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print("MTPLX hardware inspect")
+    print(f"chip: {payload.get('chip') or 'unknown'}")
+    print(f"macOS: {payload.get('macos_version') or 'unknown'}")
+    print(f"MLX: {payload.get('mlx_version') or 'not installed'}")
+    print(f"Python: {payload.get('python_version')} ({payload.get('machine')})")
+    print(f"unified memory: {payload.get('unified_memory_gb') or 'unknown'} GB")
+    print(
+        "M5 TensorOps eligible: "
+        f"{str(bool(payload.get('m5_neural_accelerator_eligible'))).lower()}"
+    )
+    print("hardware acceleration confirmed: false")
+    for warning in payload.get("warnings") or []:
+        print(f"warning: {warning}")
+    return 0
 
 
 def cmd_chat_public(args: argparse.Namespace) -> int:
@@ -1552,18 +1579,27 @@ def build_parser() -> argparse.ArgumentParser:
     advanced_p = sub.add_parser("advanced", help=argparse.SUPPRESS)
     advanced_p.set_defaults(func=lambda _args: (print(_format_advanced_help()) or 0))
 
+    hardware_p = sub.add_parser("hardware", help="Inspect local Apple Silicon hardware")
+    hardware_sub = hardware_p.add_subparsers(dest="hardware_action", required=True)
+    hardware_inspect_p = hardware_sub.add_parser(
+        "inspect",
+        help="Report hardware and MLX acceleration eligibility",
+    )
+    hardware_inspect_p.add_argument("--json", action="store_true")
+    hardware_inspect_p.set_defaults(func=cmd_hardware_public)
+
     start_flow_p = sub.add_parser(
         "start",
-        help="Interactive setup → chat (model · mode · web/CLI)",
-        usage="mtplx start [cli|web] [--fresh] [--max] [--profile sustained] [--model PATH_OR_REPO] [--prompt TEXT]",
-        description="Walk through model / mode / surface in three quick steps, then chat. Returning users get a 'same as last time?' prompt. Use --fresh to redo the onboarding, or pass any of --model / --profile / --max / cli|web to skip it entirely.",
+        help="Interactive setup → chat (model · mode · web/CLI/Pi)",
+        usage="mtplx start [cli|web|pi] [--fresh] [--max] [--profile sustained] [--model PATH_OR_REPO] [--prompt TEXT]",
+        description="Walk through model / mode / surface in three quick steps, then chat. Returning users get a 'same as last time?' prompt. Use --fresh to redo the onboarding, or pass any of --model / --profile / --max / cli|web|pi to skip it entirely.",
     )
     start_flow_p.add_argument(
         "target",
         nargs="?",
-        choices=["web", "openwebui", "open-webui", "cli", "terminal"],
+        choices=["web", "openwebui", "open-webui", "cli", "terminal", "pi", "pie"],
         default=None,
-        help="Web chat or terminal chat. Without this argument, MTPLX runs an interactive onboarding (or the 'same as last time?' prompt) on first run.",
+        help="Web chat, terminal chat, or Pi coding-agent connection. Without this argument, MTPLX runs an interactive onboarding (or the 'same as last time?' prompt) on first run.",
     )
     start_flow_p.add_argument(
         "--fresh",
@@ -1575,7 +1611,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_flow_p.add_argument(
         "--profile",
         choices=PROFILE_CHOICES,
-        default="sustained",
+        default=DEFAULT_PROFILE_NAME,
         help="Runtime profile; start defaults to Sustained. Use --profile performance-cold --max for Burst.",
     )
     start_flow_p.add_argument("--download", action="store_true", help="Download the selected/default model if it is missing")
@@ -1685,7 +1721,7 @@ def build_parser() -> argparse.ArgumentParser:
     quickstart_server_p.add_argument(
         "--profile",
         choices=PROFILE_CHOICES,
-        default="sustained",
+        default=DEFAULT_PROFILE_NAME,
         help="Runtime profile. Direct server quickstart defaults to Sustained; use --profile performance-cold --max for Burst.",
     )
     quickstart_server_p.add_argument("--unsafe-force-unverified", action="store_true")
@@ -1919,7 +1955,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Download a Hugging Face model before starting if it is not cached",
     )
-    serve_p.add_argument("--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME)
+    serve_p.add_argument(
+        "--profile",
+        choices=PROFILE_CHOICES,
+        default=DEFAULT_PROFILE_NAME,
+        help=(
+            "Runtime profile. Server defaults to Sustained so long-context "
+            "prefill uses the v0.1.7 fast path; use --profile performance-cold "
+            "--max for Burst."
+        ),
+    )
     serve_p.add_argument("--unsafe-force-unverified", action="store_true")
     serve_p.add_argument("--yes", action="store_true", help="Confirm unsafe non-interactive actions")
     serve_p.add_argument("--host", default="127.0.0.1")
@@ -2011,7 +2056,16 @@ def build_parser() -> argparse.ArgumentParser:
     bench_p.add_argument(
         "bench_action",
         nargs="?",
-        choices=["run", "context", "nightly", "compare", "serve", "reference", "reference-vllm"],
+        choices=[
+            "run",
+            "context",
+            "prefill-ladder",
+            "nightly",
+            "compare",
+            "serve",
+            "reference",
+            "reference-vllm",
+        ],
         help="Public benchmark action. Omit for legacy benchmark flags.",
     )
     bench_p.add_argument("--backend", default="manifest")
@@ -2119,9 +2173,183 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sampler seed. Defaults are harness-aware: 42 for long direct-HTTP runs, 0 for cold depth-sweep runs.",
     )
     bench_p.add_argument("--max-tokens", type=int, default=128)
+    bench_p.add_argument(
+        "--contexts",
+        help="Comma-separated prompt token contexts for bench prefill-ladder, e.g. 512,1k,32k",
+    )
+    bench_p.add_argument(
+        "--full",
+        action="store_true",
+        help="Include 64k and 128k in bench prefill-ladder defaults.",
+    )
+    bench_p.add_argument(
+        "--prompt-style",
+        choices=("coding-agent", "legacy-repeat"),
+        default="coding-agent",
+        help=(
+            "Prompt construction for bench prefill-ladder. coding-agent keeps a "
+            "coherent final user request after the long filler; legacy-repeat "
+            "preserves the old hard-truncated synthetic stream for diagnostics."
+        ),
+    )
+    bench_p.add_argument(
+        "--prompt-format",
+        choices=("chat", "raw"),
+        default="chat",
+        help=(
+            "Prompt envelope for bench prefill-ladder. chat matches the product "
+            "API path; raw is diagnostic-only."
+        ),
+    )
+    bench_p.add_argument(
+        "--prompt-tail",
+        help="Override the coherent final request used by bench prefill-ladder.",
+    )
+    bench_p.add_argument(
+        "--prompt-tail-file",
+        help="Read the coherent final request for bench prefill-ladder from a UTF-8 file.",
+    )
+    bench_p.add_argument(
+        "--prefill-layout",
+        choices=("profile", "contiguous-then-repage", "contiguous-dense-decode", "paged"),
+        default="profile",
+        help=(
+            "Override MTPLX_SUSTAINED_PREFILL_LAYOUT for bench prefill-ladder. "
+            "Use profile for the selected profile default."
+        ),
+    )
+    bench_p.add_argument(
+        "--paged-attn-impl",
+        choices=(
+            "mlx-vector-paged",
+            "mlx_vector_paged",
+            "fast-sdpa-gather",
+            "fast_sdpa_gather",
+            "exact-gather",
+            "exact_gather",
+            "sdpa-2pass-paged",
+            "sdpa_2pass_paged",
+            "vllm-metal",
+            "vllm_metal",
+            "paged",
+        ),
+        help="Diagnostic override for MTPLX_VLLM_METAL_PAGED_ATTN_IMPL after profile env is applied.",
+    )
+    bench_p.add_argument(
+        "--mtp-history-policy",
+        choices=("auto", "committed", "full", "last-window", "last_window", "cycle", "none"),
+        help="Diagnostic override for MTPLX_MTP_HISTORY_POLICY after profile env is applied.",
+    )
+    bench_p.add_argument(
+        "--mtp-history-window",
+        type=int,
+        help="Diagnostic override for MTPLX_MTP_HISTORY_LAST_WINDOW after profile env is applied.",
+    )
+    bench_p.add_argument(
+        "--prefill-cache-cleanup",
+        action="store_true",
+        help=(
+            "Diagnostic OMLX-style prefill mode: synchronize and clear MLX's "
+            "cache after each prefill chunk."
+        ),
+    )
+    bench_p.add_argument(
+        "--no-prefill-cache-cleanup",
+        action="store_true",
+        help=(
+            "Diagnostic only: disable MTPLX_PREFILL_CHUNK_CACHE_CLEANUP after "
+            "profile env is applied."
+        ),
+    )
+    bench_p.add_argument(
+        "--prefill-cache-cleanup-every",
+        help=(
+            "Diagnostic override for MTPLX_PREFILL_CHUNK_CACHE_CLEANUP_EVERY "
+            "after profile env is applied."
+        ),
+    )
+    bench_p.add_argument(
+        "--prefill-chunk-size",
+        type=int,
+        help=(
+            "Diagnostic override for MTPLX_PREFILL_CHUNK_SIZE after profile env "
+            "is applied."
+        ),
+    )
+    bench_p.add_argument(
+        "--clear-cache-every",
+        type=int,
+        help=(
+            "Diagnostic override for MTPLX_CLEAR_CACHE_EVERY during generation "
+            "after profile env is applied."
+        ),
+    )
+    bench_p.add_argument(
+        "--defer-verify-hidden-eval",
+        action="store_true",
+        help=(
+            "Diagnostic override: force MTPLX_DEFER_VERIFY_HIDDEN_EVAL=1 after "
+            "profile env is applied."
+        ),
+    )
+    bench_p.add_argument(
+        "--no-defer-verify-hidden-eval",
+        action="store_true",
+        help=(
+            "Diagnostic override: disable MTPLX_DEFER_VERIFY_HIDDEN_EVAL after "
+            "profile env is applied."
+        ),
+    )
+    bench_p.add_argument(
+        "--verify-hidden-mode",
+        choices=(
+            "default",
+            "logits-first-committed-slice",
+            "logits_first_committed_slice",
+        ),
+        help=(
+            "Diagnostic label for verify hidden handling in prefill-ladder JSON."
+        ),
+    )
+    bench_p.add_argument(
+        "--no-batch-target-arrays",
+        action="store_true",
+        help="Diagnostic override: set MTPLX_BATCH_TARGET_ARRAYS=0 after profile env is applied.",
+    )
+    bench_p.add_argument(
+        "--prefill-stock-cache-only",
+        action="store_true",
+        help=(
+            "Unsafe diagnostic OMLX-style prefill mode: call the model in "
+            "stock cache-only form for chunks that do not need hidden states. "
+            "Requires MTPLX_ALLOW_UNSAFE_PREFILL_STOCK_CACHE_ONLY=1."
+        ),
+    )
     bench_p.add_argument("--limit", type=int)
     bench_p.add_argument("--disable-thinking", action="store_true")
+    bench_p.add_argument(
+        "--enable-thinking",
+        action="store_true",
+        help="Enable Qwen thinking in bench prefill-ladder chat formatting.",
+    )
     bench_p.add_argument("--speculative-depth", type=int, default=0)
+    bench_p.add_argument(
+        "--vary-seed-by-context",
+        action="store_true",
+        help=(
+            "Diagnostic only: add the context row index to --seed. By default "
+            "the ladder uses one seed so rows compare context length rather "
+            "than different sampling trajectories."
+        ),
+    )
+    bench_p.add_argument(
+        "--no-inter-context-cache-cleanup",
+        action="store_true",
+        help=(
+            "Diagnostic only: do not synchronize and clear MLX's reusable cache "
+            "between prefill-ladder context rows."
+        ),
+    )
     bench_p.add_argument("--adaptive", action="store_true")
     bench_p.set_defaults(func=_cmd_bench)
 

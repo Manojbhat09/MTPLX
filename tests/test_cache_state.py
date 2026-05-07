@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import mlx.core as mx
 import pytest
 
@@ -700,6 +698,28 @@ def test_large_q_split_fallback_stays_in_paged_storage(monkeypatch):
     assert stats["dense_fallback_calls"] == 0
 
 
+def test_large_q_split_fallback_assertion_fails_release_qa(monkeypatch):
+    def missing_ops():
+        raise RuntimeError("no external ops")
+
+    monkeypatch.setattr("mtplx.cache_state._load_vllm_metal_ops", missing_ops)
+    monkeypatch.setenv("MTPLX_VLLM_METAL_PAGED_ATTN_IMPL", "mlx_vector_paged")
+    monkeypatch.setenv("MTPLX_VLLM_METAL_PAGED_ATTN_MAX_Q", "1")
+    monkeypatch.setenv("MTPLX_VLLM_METAL_PAGED_ATTN_2PASS_THRESHOLD", "1")
+    monkeypatch.setenv("MTPLX_VLLM_METAL_PAGED_PARTITIONED_ATTN", "1")
+    monkeypatch.setenv("MTPLX_VLLM_METAL_PAGED_PARTITION_THRESHOLD", "1")
+    monkeypatch.setenv("MTPLX_ASSERT_NO_LARGE_Q_SPLIT_FALLBACK", "1")
+
+    paged = VllmMetalPagedKVCache(block_size=4, num_blocks=16)
+    queries = mx.zeros((1, 8, 4, 8), dtype=mx.float32)
+    keys = mx.zeros((1, 2, 32, 8), dtype=mx.float32)
+    values = mx.zeros((1, 2, 32, 8), dtype=mx.float32)
+    paged.update_without_fetch(keys, values)
+
+    with pytest.raises(RuntimeError, match="large-q split SDPA fallback"):
+        paged.paged_attention(queries, scale=8**-0.5, mask="causal")
+
+
 def test_long_context_dense_fallback_guard_accepts_new_override(monkeypatch):
     monkeypatch.setenv("MTPLX_ASSERT_NO_PAGED_ACTIVE_ARRAYS", "1")
     monkeypatch.setenv("MTPLX_VLLM_METAL_PAGED_PARTITION_THRESHOLD", "4")
@@ -758,9 +778,6 @@ def test_configure_vllm_metal_paged_cache_can_enable_turboquant(monkeypatch):
 def test_vllm_metal_paged_attention_matches_stock_attention_with_tolerance():
     if not mx.metal.is_available():
         pytest.skip("Metal is unavailable")
-    repo = Path(__file__).resolve().parents[1] / "REFERENCES:TOOLS" / "vllm-metal"
-    if not repo.exists():
-        pytest.skip("vllm-metal reference checkout is unavailable")
 
     from mlx_lm.models.base import scaled_dot_product_attention
 
@@ -795,9 +812,6 @@ def test_vllm_metal_paged_attention_matches_stock_attention_with_tolerance():
 def test_vllm_metal_partitioned_paged_attention_matches_stock_attention(monkeypatch):
     if not mx.metal.is_available():
         pytest.skip("Metal is unavailable")
-    repo = Path(__file__).resolve().parents[1] / "REFERENCES:TOOLS" / "vllm-metal"
-    if not repo.exists():
-        pytest.skip("vllm-metal reference checkout is unavailable")
 
     from mlx_lm.models.base import scaled_dot_product_attention
 

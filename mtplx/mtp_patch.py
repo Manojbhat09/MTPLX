@@ -407,7 +407,9 @@ def inject_mtp_support(
                 hidden_states = layer(hidden_states, mask=mask, cache=layer_cache)
 
             pre_norm = hidden_states
-            post_norm = inner.norm(hidden_states)
+            variant = hidden_variant or getattr(self, "_mtplx_hidden_variant", "post_norm")
+            needs_post_norm = emit_logits or (return_hidden and variant != "pre_norm")
+            post_norm = inner.norm(hidden_states) if needs_post_norm else None
             logits = None
             if emit_logits:
                 logits_source = post_norm
@@ -421,7 +423,6 @@ def inject_mtp_support(
                 )
             if not return_hidden:
                 return logits
-            variant = hidden_variant or getattr(self, "_mtplx_hidden_variant", "post_norm")
             hidden = pre_norm if variant == "pre_norm" else post_norm
             return logits, hidden
 

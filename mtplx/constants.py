@@ -10,7 +10,7 @@ OFFICIAL_MODEL_REPO = "Qwen/Qwen3.6-27B"
 DFLASH_MODEL_REPO = "z-lab/Qwen3.6-27B-DFlash"
 
 PRIMARY_MODEL_DIR = Path("models/Qwen3.6-27B-mtp")
-DEFAULT_RUNTIME_MODEL_DIR = Path("models/Qwen3.6-27B-MTPLX-GDN8-Speed4")
+DEFAULT_RUNTIME_MODEL_DIR = Path("models/Qwen3.6-27B-MTPLX-Optimized-Speed")
 LEGACY_SPEED_BASELINE_MODEL_DIR = Path("models/Qwen3.6-27B-MLXCommunity-4bit-mtp-graft")
 
 DEFAULT_TEMPERATURE = 0.6
