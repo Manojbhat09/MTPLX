@@ -382,6 +382,13 @@ def _defer_verify_hidden_eval_enabled() -> bool:
     return _env_truthy("MTPLX_DEFER_VERIFY_HIDDEN_EVAL")
 
 
+def _verify_hidden_mode() -> str:
+    raw = (
+        os.environ.get("MTPLX_VERIFY_HIDDEN_MODE") or "default"
+    ).strip().lower().replace("-", "_")
+    return raw or "default"
+
+
 def _contiguous_then_repage_prefill_enabled() -> bool:
     return _sustained_prefill_layout() == "contiguous_then_repage"
 
@@ -858,6 +865,7 @@ class _DecodeTrace:
             "mlx_memory": _mlx_memory_stats(),
             "lazy_verify_logits": bool(os.environ.get("MTPLX_LAZY_VERIFY_LOGITS")),
             "defer_verify_hidden_eval": _defer_verify_hidden_eval_enabled(),
+            "verify_hidden_mode": _verify_hidden_mode(),
             "split_verify_eval": bool(os.environ.get("MTPLX_SPLIT_VERIFY_EVAL")),
             "lazy_mtp_history_append": bool(os.environ.get("MTPLX_LAZY_MTP_HISTORY_APPEND")),
             "batch_target_arrays": bool(os.environ.get("MTPLX_BATCH_TARGET_ARRAYS")),
@@ -1025,6 +1033,7 @@ class GenerationStats:
     verify_joint_eval_time_s: float = 0.0
     verify_target_distribution_time_s: float = 0.0
     verify_eval_unattributed_time_s: float = 0.0
+    verify_hidden_mode: str = "default"
     draft_time_s: float = 0.0
     target_forward_time_s: float = 0.0
     prompt_eval_time_s: float = 0.0
@@ -3002,6 +3011,7 @@ def generate_mtpk(
         not in {"0", "false", "no", "off"}
     )
     defer_verify_hidden_eval = _defer_verify_hidden_eval_enabled()
+    verify_hidden_mode = _verify_hidden_mode()
     state_root_eval_events = 0
     state_root_eval_time_s = 0.0
     state_root_eval_arrays = 0
@@ -4002,6 +4012,7 @@ def generate_mtpk(
             target_distribution_precomputed = True
             event["defer_verify_hidden_eval"] = {
                 "mode": "target_distribution_first",
+                "verify_hidden_mode": verify_hidden_mode,
                 "batch_target_arrays": bool(_batch_target_arrays_enabled()),
                 "batch_target_distributions": bool(_batch_target_distributions_enabled()),
                 "rows": int(len(draft_tokens) + 1),
@@ -4456,6 +4467,7 @@ def generate_mtpk(
         verify_joint_eval_time_s=verify_joint_eval_time,
         verify_target_distribution_time_s=verify_target_distribution_time,
         verify_eval_unattributed_time_s=verify_eval_unattributed_time,
+        verify_hidden_mode=verify_hidden_mode,
         draft_time_s=draft_time,
         target_forward_time_s=target_time,
         prompt_eval_time_s=prompt_eval_time,

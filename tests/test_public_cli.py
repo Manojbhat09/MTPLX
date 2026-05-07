@@ -93,6 +93,9 @@ def test_bench_prefill_ladder_dry_run_json(monkeypatch, capsys):
             "512,1k",
             "--max-tokens",
             "8",
+            "--defer-verify-hidden-eval",
+            "--verify-hidden-mode",
+            "logits-first-committed-slice",
             "--dry-run",
             "--json",
         ]
@@ -112,6 +115,10 @@ def test_bench_prefill_ladder_dry_run_json(monkeypatch, capsys):
     assert payload["prompt"]["release_valid"] is True
     assert payload["prefill_layout"]["requested"] == "profile"
     assert payload["prefill_layout"]["env_value"] is None
+    assert payload["defer_verify_hidden_eval_override"] is True
+    assert payload["verify_hidden_mode_override"] == "logits_first_committed_slice"
+    assert payload["env"]["MTPLX_DEFER_VERIFY_HIDDEN_EVAL"] == "1"
+    assert payload["env"]["MTPLX_VERIFY_HIDDEN_MODE"] == "logits_first_committed_slice"
     assert payload["recommended_plugged_in_commands"]
     assert "--prompt-format chat" in payload["recommended_plugged_in_commands"][0]
     assert "--disable-thinking" in payload["recommended_plugged_in_commands"][0]

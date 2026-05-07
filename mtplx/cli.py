@@ -2245,11 +2245,30 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     bench_p.add_argument(
+        "--defer-verify-hidden-eval",
+        action="store_true",
+        help=(
+            "Diagnostic override: force MTPLX_DEFER_VERIFY_HIDDEN_EVAL=1 after "
+            "profile env is applied."
+        ),
+    )
+    bench_p.add_argument(
         "--no-defer-verify-hidden-eval",
         action="store_true",
         help=(
             "Diagnostic override: disable MTPLX_DEFER_VERIFY_HIDDEN_EVAL after "
             "profile env is applied."
+        ),
+    )
+    bench_p.add_argument(
+        "--verify-hidden-mode",
+        choices=(
+            "default",
+            "logits-first-committed-slice",
+            "logits_first_committed_slice",
+        ),
+        help=(
+            "Diagnostic label for verify hidden handling in prefill-ladder JSON."
         ),
     )
     bench_p.add_argument(

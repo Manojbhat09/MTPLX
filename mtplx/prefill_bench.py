@@ -330,11 +330,30 @@ def _apply_prefill_chunk_size_override(args: Any) -> int | None:
     return chunk_size
 
 
-def _apply_defer_verify_hidden_override(args: Any) -> bool:
-    if not bool(getattr(args, "no_defer_verify_hidden_eval", False)):
-        return False
-    os.environ["MTPLX_DEFER_VERIFY_HIDDEN_EVAL"] = "0"
-    return True
+def _apply_defer_verify_hidden_override(args: Any) -> str | None:
+    enable = bool(getattr(args, "defer_verify_hidden_eval", False))
+    disable = bool(getattr(args, "no_defer_verify_hidden_eval", False))
+    if enable and disable:
+        raise ValueError(
+            "--defer-verify-hidden-eval and --no-defer-verify-hidden-eval "
+            "cannot be used together"
+        )
+    if enable:
+        os.environ["MTPLX_DEFER_VERIFY_HIDDEN_EVAL"] = "1"
+        return "1"
+    if disable:
+        os.environ["MTPLX_DEFER_VERIFY_HIDDEN_EVAL"] = "0"
+        return "0"
+    return None
+
+
+def _apply_verify_hidden_mode_override(args: Any) -> str | None:
+    raw = str(getattr(args, "verify_hidden_mode", "") or "").strip().lower()
+    mode = raw.replace("-", "_")
+    if not mode:
+        return None
+    os.environ["MTPLX_VERIFY_HIDDEN_MODE"] = mode
+    return mode
 
 
 def _apply_prefill_stock_cache_only_override(args: Any) -> bool:
@@ -596,6 +615,9 @@ def _row_from_output(
         "verify_eval_unattributed_time_s": float(
             _stats_value(stats, "verify_eval_unattributed_time_s", 0.0) or 0.0
         ),
+        "verify_hidden_mode": str(
+            _stats_value(stats, "verify_hidden_mode", "") or ""
+        ),
         "draft_time_s": float(_stats_value(stats, "draft_time_s", 0.0) or 0.0),
         "repair_time_s": float(_stats_value(stats, "repair_time_s", 0.0) or 0.0),
         "target_forward_time_s": float(
@@ -726,8 +748,22 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
     mtp_history_policy_requested = str(getattr(args, "mtp_history_policy", "") or "").strip().lower().replace("-", "_")
     prefill_cache_cleanup_requested = bool(getattr(args, "prefill_cache_cleanup", False))
     prefill_chunk_size_requested = getattr(args, "prefill_chunk_size", None)
+    defer_verify_hidden_requested = bool(
+        getattr(args, "defer_verify_hidden_eval", False)
+    )
     no_defer_verify_hidden_requested = bool(
         getattr(args, "no_defer_verify_hidden_eval", False)
+    )
+    if defer_verify_hidden_requested and no_defer_verify_hidden_requested:
+        raise ValueError(
+            "--defer-verify-hidden-eval and --no-defer-verify-hidden-eval "
+            "cannot be used together"
+        )
+    verify_hidden_mode_requested = (
+        str(getattr(args, "verify_hidden_mode", "") or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
     )
     prefill_stock_cache_only_requested = bool(
         getattr(args, "prefill_stock_cache_only", False)
@@ -743,8 +779,12 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
         if prefill_chunk_size_value <= 0:
             raise ValueError("--prefill-chunk-size must be positive")
         profile_env["MTPLX_PREFILL_CHUNK_SIZE"] = str(prefill_chunk_size_value)
-    if no_defer_verify_hidden_requested:
+    if defer_verify_hidden_requested:
+        profile_env["MTPLX_DEFER_VERIFY_HIDDEN_EVAL"] = "1"
+    elif no_defer_verify_hidden_requested:
         profile_env["MTPLX_DEFER_VERIFY_HIDDEN_EVAL"] = "0"
+    if verify_hidden_mode_requested:
+        profile_env["MTPLX_VERIFY_HIDDEN_MODE"] = verify_hidden_mode_requested
     if prefill_stock_cache_only_requested and _unsafe_stock_cache_only_allowed():
         profile_env["MTPLX_PREFILL_STOCK_CACHE_ONLY"] = "1"
     payload: dict[str, Any] = {
@@ -803,8 +843,12 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
         payload["prefill_cache_cleanup_override"] = True
     if prefill_chunk_size_requested is not None:
         payload["prefill_chunk_size_override"] = int(prefill_chunk_size_requested)
-    if no_defer_verify_hidden_requested:
+    if defer_verify_hidden_requested:
+        payload["defer_verify_hidden_eval_override"] = True
+    elif no_defer_verify_hidden_requested:
         payload["defer_verify_hidden_eval_override"] = False
+    if verify_hidden_mode_requested:
+        payload["verify_hidden_mode_override"] = verify_hidden_mode_requested
     if prefill_stock_cache_only_requested:
         payload["prefill_stock_cache_only_override"] = True
         if not _unsafe_stock_cache_only_allowed():
@@ -820,7 +864,8 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
     mtp_history_policy = _apply_mtp_history_policy_override(args)
     prefill_cache_cleanup = _apply_prefill_cache_cleanup_override(args)
     prefill_chunk_size = _apply_prefill_chunk_size_override(args)
-    no_defer_verify_hidden = _apply_defer_verify_hidden_override(args)
+    defer_verify_hidden = _apply_defer_verify_hidden_override(args)
+    verify_hidden_mode = _apply_verify_hidden_mode_override(args)
     prefill_stock_cache_only = _apply_prefill_stock_cache_only_override(args)
     payload["env"] = _env_snapshot()
     if paged_attn_impl and paged_attn_impl != paged_attn_impl_requested:
@@ -831,8 +876,10 @@ def run_prefill_ladder(args: Any) -> dict[str, Any]:
         payload["prefill_cache_cleanup_override"] = True
     if prefill_chunk_size is not None:
         payload["prefill_chunk_size_override"] = prefill_chunk_size
-    if no_defer_verify_hidden and not no_defer_verify_hidden_requested:
-        payload["defer_verify_hidden_eval_override"] = False
+    if defer_verify_hidden is not None:
+        payload["defer_verify_hidden_eval_override"] = defer_verify_hidden == "1"
+    if verify_hidden_mode and verify_hidden_mode != verify_hidden_mode_requested:
+        payload["verify_hidden_mode_override"] = verify_hidden_mode
     if prefill_stock_cache_only and not prefill_stock_cache_only_requested:
         payload["prefill_stock_cache_only_override"] = True
 
