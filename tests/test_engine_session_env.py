@@ -1,5 +1,5 @@
 """Unit tests for engine_session bank-cap env-var overrides."""
-import os
+
 import importlib
 
 import pytest
@@ -48,3 +48,10 @@ def test_bank_bytes_from_env_empty_string_uses_default(monkeypatch):
     monkeypatch.setenv("TEST_BANK_BYTES", "")
     es = _reload_module()
     assert es._bank_bytes_from_env("TEST_BANK_BYTES", 7777) == 7777
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "0G", "-2G"])
+def test_bank_bytes_from_env_nonpositive_uses_default(monkeypatch, raw):
+    monkeypatch.setenv("TEST_BANK_BYTES", raw)
+    es = _reload_module()
+    assert es._bank_bytes_from_env("TEST_BANK_BYTES", 8888) == 8888

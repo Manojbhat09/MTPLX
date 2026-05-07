@@ -15,25 +15,6 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Iterator, Mapping
 
-
-def _bank_bytes_from_env(name: str, default: int) -> int:
-    """Read a SessionBank byte-cap override from the environment.
-
-    Supports plain integers (interpreted as bytes) and the suffixes K, M, G,
-    T (powers of 1024). Returns the default if unset or unparseable.
-    """
-    raw = os.environ.get(name)
-    if not raw:
-        return default
-    try:
-        s = raw.strip().upper()
-        suffixes = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
-        if s and s[-1] in suffixes:
-            return int(float(s[:-1]) * suffixes[s[-1]])
-        return int(s)
-    except (ValueError, IndexError):
-        return default
-
 from .session_bank import (
     CacheMissReason,
     DEFAULT_IDLE_TTL_S,
@@ -41,6 +22,32 @@ from .session_bank import (
     DEFAULT_PER_SESSION_MAX_BYTES,
     SessionBank,
 )
+
+
+def _bank_bytes_from_env(name: str, default: int) -> int:
+    """Read a SessionBank byte-cap override from the environment.
+
+    Supports plain integers (interpreted as bytes) and the suffixes K, M, G,
+    T (powers of 1024). Returns the default if unset, unparseable, or
+    nonpositive.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    s = raw.strip().upper()
+    if not s:
+        return default
+    try:
+        suffixes = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+        if s and s[-1] in suffixes:
+            value = int(float(s[:-1]) * suffixes[s[-1]])
+        else:
+            value = int(s)
+    except (OverflowError, ValueError, IndexError):
+        return default
+    if value < 1:
+        return default
+    return value
 
 
 @dataclass

@@ -11,8 +11,9 @@ All notable user-facing changes are recorded here.
   and `MTPLX_SESSION_BANK_PER_SESSION_BYTES` (overrides
   `DEFAULT_PER_SESSION_MAX_BYTES`, default 8 GiB). Both accept plain integers
   as bytes and `K`, `M`, `G`, `T` suffixes as powers of 1024, for example
-  `MTPLX_SESSION_BANK_PER_SESSION_BYTES=16G`. Defaults are unchanged, so
-  existing deployments see no behavior difference.
+  `MTPLX_SESSION_BANK_PER_SESSION_BYTES=16G`. Invalid or nonpositive values
+  fall back to the defaults, so existing deployments see no behavior
+  difference.
 
 ### Fixed
 
