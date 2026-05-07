@@ -4525,16 +4525,66 @@ def _quickstart_print_pi_handoff(args: Any, *, runtime_model: str, pi: dict[str,
     _quickstart_line(f"      Pi model: {pi.get('model_ref')}")
     _quickstart_line(f"      Loading model: {runtime_model}")
     _quickstart_line("      Keep this terminal open for the MTPLX server.")
-    pi_binary = shutil.which("pi")
-    if pi_binary:
-        _quickstart_line(f"      In another terminal: {pi.get('launch_command')}")
-    else:
-        _quickstart_line(
-            "      Pi is not on PATH yet. Install it with: "
-            "npm install -g @earendil-works/pi-coding-agent"
-        )
-        _quickstart_line(f"      Then run: {pi.get('launch_command')}")
+    _quickstart_line(f"      In another terminal: {pi.get('launch_command')}")
     _quickstart_line()
+
+
+def _quickstart_require_pi_cli(args: Any) -> bool:
+    """Return True when the Pi CLI is available, or install it interactively."""
+
+    if shutil.which("pi"):
+        return True
+
+    from mtplx.pi import pi_install_command
+
+    _quickstart_line()
+    _quickstart_line("[2/3] Pi is not installed")
+    _quickstart_line("      MTPLX has not loaded the model yet.")
+    _quickstart_line("      Install Pi first, then MTPLX will connect it to the local server.")
+    _quickstart_line()
+    _quickstart_line(f"      Install command: {pi_install_command()}")
+    _quickstart_line(f"      Then re-run: {_start_invocation(args, ' pi')}")
+    _quickstart_line()
+
+    if not sys.stdin.isatty():
+        return False
+
+    try:
+        answer = input("  Install Pi now? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        _quickstart_line("aborted")
+        return False
+    if answer not in {"", "y", "yes"}:
+        _quickstart_line("Pi install skipped. Re-run `mtplx start pi` after installing Pi.")
+        return False
+
+    npm = shutil.which("npm")
+    if not npm:
+        _quickstart_line("error: npm is not on PATH, so MTPLX cannot install Pi automatically.")
+        _quickstart_line("Install Node.js/npm, then run:")
+        _quickstart_line(f"  {pi_install_command()}")
+        return False
+
+    _quickstart_line(f"Running: {pi_install_command()}")
+    try:
+        result = subprocess.run([npm, "install", "-g", "@earendil-works/pi-coding-agent"], check=False)
+    except KeyboardInterrupt:
+        _quickstart_line("Pi install cancelled.")
+        return False
+    except OSError as exc:
+        _quickstart_line(f"error: Pi install failed to start: {exc}")
+        return False
+    if result.returncode != 0:
+        _quickstart_line(f"error: Pi install failed with exit code {result.returncode}")
+        return False
+    if not shutil.which("pi"):
+        _quickstart_line("Pi installed, but `pi` is still not visible on this PATH.")
+        _quickstart_line("Open a new terminal, then run:")
+        _quickstart_line(f"  {_start_invocation(args, ' pi')}")
+        return False
+    _quickstart_line("Pi installed. Continuing with MTPLX setup.")
+    _quickstart_line()
+    return True
 
 
 def _quickstart_run_openwebui(args: Any, *, runtime_model: str, inspection: dict[str, Any]) -> int:
@@ -4993,6 +5043,9 @@ def cmd_quickstart_public(args: Any) -> int:
             else:
                 _quickstart_line("then: load once -> chat in this terminal -> stream output -> show speed stats")
         return 0
+
+    if target == "pi" and not _quickstart_require_pi_cli(args):
+        return 2
 
     _quickstart_line(f"MTPLX {_start_command_name(args)}")
     _quickstart_line(f"[1/4] Checking model: {model}")

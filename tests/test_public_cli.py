@@ -985,6 +985,32 @@ def test_quickstart_pi_dry_run_json(monkeypatch, tmp_path, capsys):
     assert "--api-key mtplx-local" in payload["pi"]["server_command"]
 
 
+def test_start_pi_missing_cli_stops_before_model_check(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("MTPLX_CONFIG", str(tmp_path / "missing-config.toml"))
+
+    class NonInteractiveStdin:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(public.sys, "stdin", NonInteractiveStdin())
+    monkeypatch.setattr(public.shutil, "which", lambda name: None if name == "pi" else "/usr/bin/npm")
+
+    def fail_resolve(*_args, **_kwargs):
+        raise AssertionError("Pi preflight must run before model resolution")
+
+    monkeypatch.setattr(public, "_quickstart_resolve_model", fail_resolve)
+
+    code = main(["start", "pi", "--model", "models/example", "--yes"])
+
+    captured = capsys.readouterr().out
+    assert code == 2
+    assert "Pi is not installed" in captured
+    assert "MTPLX has not loaded the model yet" in captured
+    assert "npm install -g @earendil-works/pi-coding-agent" in captured
+    assert "Then re-run: mtplx start pi" in captured
+    assert "[1/4] Checking model" not in captured
+
+
 def test_pi_models_config_merge_preserves_other_providers(tmp_path):
     from mtplx.pi import write_pi_models_config
 

@@ -15,8 +15,13 @@ from typing import Any
 
 PI_PROVIDER_ID = "mtplx"
 PI_LOCAL_API_KEY = "mtplx-local"
+PI_NPM_PACKAGE = "@earendil-works/pi-coding-agent"
 PI_DEFAULT_CONTEXT_WINDOW = 131_072
 PI_DEFAULT_MAX_TOKENS = 4096
+
+
+def pi_install_command() -> str:
+    return f"npm install -g {PI_NPM_PACKAGE}"
 
 
 def pi_models_json_path(path: str | Path | None = None) -> Path:

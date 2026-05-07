@@ -92,6 +92,10 @@ mtplx pull Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed
 mtplx quickstart --profile sustained --port 8000  # API server only, no chat
 ```
 
+If `mtplx start pi` cannot find the `pi` command, it stops before loading the
+model, prints `npm install -g @earendil-works/pi-coding-agent`, and offers to
+install Pi from the wizard path.
+
 OpenAI-compatible smoke test:
 
 ```bash
