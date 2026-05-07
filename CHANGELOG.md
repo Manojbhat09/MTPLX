@@ -4,6 +4,16 @@ All notable user-facing changes are recorded here.
 
 ## Unreleased
 
+### Added
+
+- Added two operator-tunable environment variables for SessionBank capacity:
+  `MTPLX_SESSION_BANK_MAX_BYTES` (overrides `DEFAULT_MAX_BYTES`, default 24 GiB)
+  and `MTPLX_SESSION_BANK_PER_SESSION_BYTES` (overrides
+  `DEFAULT_PER_SESSION_MAX_BYTES`, default 8 GiB). Both accept plain integers
+  as bytes and `K`, `M`, `G`, `T` suffixes as powers of 1024, for example
+  `MTPLX_SESSION_BANK_PER_SESSION_BYTES=16G`. Defaults are unchanged, so
+  existing deployments see no behavior difference.
+
 ### Fixed
 
 - Fixed `_ToolAwareContentStreamTranslator` so it correctly handles assistant
@@ -166,5 +176,5 @@ All notable user-facing changes are recorded here.
 
 ### Roadmap
 
-- Next: kernel ladder for sustained no-fan throughput.
-- Later: additional MTP architectures and broader serving polish.
+- v0.2: kernel ladder for sustained no-fan throughput.
+- v0.3: additional MTP architectures and broader serving polish.
