@@ -46,6 +46,35 @@ def token_prefix_hash(token_ids: list[int] | tuple[int, ...]) -> str:
     return h.hexdigest()
 
 
+# Policies that share the committed-mtp-cache representation. An entry stored
+# under any of these policies can be safely reused for a lookup that requests
+# any other policy in this set, because the cache snapshot shape is identical
+# (``last_window`` is just a runtime trim of the same committed cache).
+_COMMITTED_CACHE_POLICIES = frozenset({"committed", "last_window"})
+
+
+def _mtp_history_policy_compatible(
+    entry_policy: str | None, lookup_policy: str | None
+) -> bool:
+    """Return True if a bank entry stored under ``entry_policy`` may be reused
+    for a lookup that resolved to ``lookup_policy``.
+
+    Equality is always compatible. Beyond that, ``committed`` and
+    ``last_window`` are treated as interchangeable because both rely on the
+    same committed mtp-history cache shape; the only difference between them
+    is a runtime trim that is applied during prefill, which is moot once the
+    cache is being restored from a stored snapshot.
+    """
+    if entry_policy == lookup_policy:
+        return True
+    if entry_policy is None or lookup_policy is None:
+        return False
+    return (
+        entry_policy in _COMMITTED_CACHE_POLICIES
+        and lookup_policy in _COMMITTED_CACHE_POLICIES
+    )
+
+
 def _tree_nbytes(value: Any) -> int:
     if value is None:
         return 0
@@ -299,7 +328,9 @@ class SessionBank:
         if template_hash is not None and entry.template_hash != template_hash:
             self.last_miss_reason = CacheMissReason.TEMPLATE_MISMATCH.value
             return None
-        if mtp_history_policy is not None and entry.mtp_history_policy != mtp_history_policy:
+        if mtp_history_policy is not None and not _mtp_history_policy_compatible(
+            entry.mtp_history_policy, mtp_history_policy
+        ):
             self.last_miss_reason = CacheMissReason.POLICY_MISMATCH.value
             return None
         if draft_head_identity is not None and entry.draft_head_identity != draft_head_identity:
