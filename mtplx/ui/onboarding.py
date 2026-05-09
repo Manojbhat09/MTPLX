@@ -24,10 +24,14 @@ from mtplx.constants import (
     EXPECTED_MTP_KEYS,
     EXPECTED_PREQUANTIZED_MTP_KEYS,
 )
-from mtplx.profiles import DEFAULT_HF_MODEL_ID, DEFAULT_MODEL_ID
+from mtplx.default_models import (
+    DefaultModelSelection,
+    is_verified_default_model_ref,
+    select_default_model,
+)
+from mtplx.profiles import DEFAULT_HF_MODEL_ID
 
 DEFAULT_HF_MODEL = DEFAULT_HF_MODEL_ID
-DEFAULT_LOCAL_MODEL = DEFAULT_MODEL_ID
 STATE_PATH = Path("~/.mtplx/quickstart.json").expanduser()
 
 # Tier ranks for sorting scanned-model lists. Lower = surfaced higher in the
@@ -82,29 +86,16 @@ def _pretty_path(value: str | Path | None) -> str:
         return text
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
-
-
-def _default_local_model_path() -> Path:
-    local = Path(DEFAULT_LOCAL_MODEL).expanduser()
-    if local.is_absolute():
-        return local
-    return (_repo_root() / local).resolve()
+def _verified_default_selection() -> DefaultModelSelection:
+    return select_default_model()
 
 
 def _verified_default_model() -> str:
-    local = _default_local_model_path()
-    if _is_model_dir(local):
-        return str(local)
-    return DEFAULT_HF_MODEL
+    return _verified_default_selection().model
 
 
 def _verified_default_label() -> str:
-    model = _verified_default_model()
-    if model == DEFAULT_HF_MODEL:
-        return f"{DEFAULT_HF_MODEL}  ·  cold-speed champion"
-    return f"{_pretty_path(model)}  ·  local speed champion"
+    return _verified_default_selection().label
 
 
 # ---------- state file ------------------------------------------------------
@@ -818,10 +809,7 @@ def screen_model(*, configured: str | None = None) -> str:
 
     verified_default = _verified_default_model()
     verified_label = _verified_default_label()
-    show_configured = bool(configured) and str(configured) not in {
-        DEFAULT_HF_MODEL,
-        verified_default,
-    }
+    show_configured = bool(configured) and not is_verified_default_model_ref(configured)
 
     options: list[tuple[str, str, str]] = []
     if show_configured:
@@ -835,7 +823,7 @@ def screen_model(*, configured: str | None = None) -> str:
         options.append(
             (
                 "2",
-                "Verified default",
+                "Verified default for this Mac",
                 verified_label,
             )
         )
@@ -857,7 +845,7 @@ def screen_model(*, configured: str | None = None) -> str:
         options.append(
             (
                 "1",
-                "Verified default",
+                "Verified default for this Mac",
                 verified_label,
             )
         )
@@ -886,14 +874,14 @@ def screen_model(*, configured: str | None = None) -> str:
         if choice == "2":
             return verified_default
         if choice == "3":
-            return _prompt_hf_repo_id(default=DEFAULT_HF_MODEL)
+            return _prompt_hf_repo_id(default=verified_default)
         # choice == "4"
         return _pick_local_model(default=str(configured))
 
     if choice == "1":
         return verified_default
     if choice == "2":
-        return _prompt_hf_repo_id(default=DEFAULT_HF_MODEL)
+        return _prompt_hf_repo_id(default=verified_default)
     # choice == "3"
     return _pick_local_model(default=None)
 
@@ -1136,12 +1124,15 @@ def run_onboarding_screens(*, configured_model: str | None = None) -> dict:
         profile = "sustained"
         max_mode = False
     target = screen_interface()
-    return {
+    state = {
         "model": model,
         "profile": profile,
         "max": max_mode,
         "target": target,
     }
+    if is_verified_default_model_ref(model):
+        state["model_selection"] = _verified_default_selection().to_dict()
+    return state
 
 
 def run_serve_onboarding_screens(
@@ -1163,13 +1154,16 @@ def run_serve_onboarding_screens(
         port=port,
         default_open_browser=default_open_browser,
     )
-    return {
+    state = {
         "model": model,
         "profile": profile,
         "max": max_mode,
         "target": "openwebui" if open_browser else "server",
         "open_browser": open_browser,
     }
+    if is_verified_default_model_ref(model):
+        state["model_selection"] = _verified_default_selection().to_dict()
+    return state
 
 
 def ensure_thermal_control_installed() -> bool:
@@ -1319,6 +1313,18 @@ def _quickstart_state_is_reusable(last: dict) -> bool:
     return model.startswith(("/", "~", "./", "../", "models/"))
 
 
+def _normalize_quickstart_state(last: dict) -> dict:
+    """Refresh saved verified-default refs while preserving custom models."""
+
+    if not is_verified_default_model_ref(last.get("model")):
+        return last
+    selection = _verified_default_selection()
+    refreshed = dict(last)
+    refreshed["model"] = selection.model
+    refreshed["model_selection"] = selection.to_dict()
+    return refreshed
+
+
 def confirm_same_as_last(last: dict) -> bool:
     """Ask the user whether to reuse the last configuration."""
 
@@ -1388,6 +1394,11 @@ def run_quickstart_flow(
     last = None if fresh else load_state()
     if last is not None and not _quickstart_state_is_reusable(last):
         last = None
+    refreshed_default_state = False
+    if last is not None:
+        normalized = _normalize_quickstart_state(last)
+        refreshed_default_state = normalized != last
+        last = normalized
     try:
         if last and not fresh:
             if confirm_same_as_last(last):
@@ -1398,6 +1409,8 @@ def run_quickstart_flow(
                     last = dict(last)
                     last["profile"] = "sustained"
                     last["max"] = False
+                    save_state(last)
+                elif refreshed_default_state:
                     save_state(last)
                 return last
         else:

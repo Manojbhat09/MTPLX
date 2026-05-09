@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from mtplx.constants import DEFAULT_RUNTIME_MODEL_DIR
+from mtplx.default_models import is_verified_default_model_ref
 from mtplx.profiles import DEFAULT_HF_MODEL_ID, DEFAULT_MODEL_ID, DEFAULT_PROFILE_NAME, resolve_profile_name
 
 
@@ -100,7 +101,7 @@ def _apply_model_default(args: Any, config: UserConfig) -> None:
     default_refs = {None, str(DEFAULT_RUNTIME_MODEL_DIR), DEFAULT_HF_MODEL_ID, DEFAULT_MODEL_ID}
     if (
         config.model
-        and current in default_refs
+        and (current in default_refs or is_verified_default_model_ref(current))
         and not _is_legacy_default_model_ref(config.model)
     ):
         args.model = config.model

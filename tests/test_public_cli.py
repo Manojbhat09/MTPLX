@@ -10,6 +10,7 @@ import pytest
 
 from mtplx.cli import build_parser, main
 from mtplx.commands import public
+from mtplx.profiles import DEFAULT_FP16_HF_MODEL_ID
 from mtplx.version import DISPLAY_VERSION, __version__
 
 
@@ -317,6 +318,31 @@ def test_start_dry_run_is_consumer_friendly(monkeypatch, tmp_path, capsys):
     assert "model: models/example" in captured
     assert "profile: sustained" in captured
     assert "then: load once -> chat in this terminal -> stream output -> show speed stats" in captured
+
+
+def test_start_auto_default_can_route_to_fp16(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("MTPLX_CONFIG", str(tmp_path / "missing-config.toml"))
+    monkeypatch.setenv("MTPLX_DEFAULT_MODEL_VARIANT", "fp16")
+
+    code = main(["start", "cli", "--dry-run", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["model"] == DEFAULT_FP16_HF_MODEL_ID
+    assert payload["default_model_selection"]["variant"] == "fp16"
+    assert payload["default_model_selection"]["precision"] == "FP16"
+
+
+def test_start_explicit_model_bypasses_auto_default(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("MTPLX_CONFIG", str(tmp_path / "missing-config.toml"))
+    monkeypatch.setenv("MTPLX_DEFAULT_MODEL_VARIANT", "fp16")
+
+    code = main(["start", "cli", "--dry-run", "--json", "--model", "local/custom"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["model"] == "local/custom"
+    assert payload["default_model_selection"] is None
 
 
 def test_start_default_target_is_browser(monkeypatch, tmp_path):
