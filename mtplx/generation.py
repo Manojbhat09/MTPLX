@@ -496,12 +496,19 @@ def _verify_hidden_mode() -> str:
 
 
 def _clear_cache_every() -> int:
-    raw = (os.environ.get("MTPLX_CLEAR_CACHE_EVERY") or "0").strip().lower()
+    raw = (os.environ.get("MTPLX_CLEAR_CACHE_EVERY") or "auto").strip().lower()
     if raw == "auto":
         context_tokens = _env_int("MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS", 0)
-        threshold = _env_int("MTPLX_CLEAR_CACHE_EVERY_CONTEXT_THRESHOLD", 98304)
+        # Lowered default 98304 -> 16384 so clear_cache fires for the typical
+        # opencode subagent context regime (16-40K) where wired-memory pressure
+        # has been observed in practice. The previous threshold only kicked in
+        # past 96K, well above the crash zone.
+        threshold = _env_int("MTPLX_CLEAR_CACHE_EVERY_CONTEXT_THRESHOLD", 16384)
         if context_tokens >= threshold and _contiguous_dense_decode_prefill_enabled():
-            return max(0, _env_int("MTPLX_CLEAR_CACHE_EVERY_LONG_CONTEXT", 16))
+            # Default 16 tokens was per-step aggressive (sync barrier every
+            # tick). Bumped to 256 to amortize the sync cost while still
+            # bounding allocator growth.
+            return max(0, _env_int("MTPLX_CLEAR_CACHE_EVERY_LONG_CONTEXT", 256))
         return 0
     try:
         return max(0, int(raw))

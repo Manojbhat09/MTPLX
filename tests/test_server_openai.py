@@ -133,6 +133,7 @@ def _fake_state(*, api_key: str | None = None, rate_limit: int = 0):
         fast_path_env_status={},
         profile_env_status={},
         mlx_cache_limit_status={"configured": False},
+        metal_memory_caps={"applied": False, "reason": "test"},
         mlx_fork_status={"ok": False},
         warmup_status={"enabled": False, "ran": False, "tokens": 0},
         last_metrics=[{"tok_s": 12.5, "accept_rate": 0.75}],
@@ -183,6 +184,7 @@ def test_mtplx_settings_endpoint_controls_server_reasoning():
     )
     assert initial.status_code == 200
     assert initial.json()["reasoning"] == "auto"
+    assert initial.json()["metal_memory_caps"] == {"applied": False, "reason": "test"}
 
     off = client.post(
         "/v1/mtplx/settings",

@@ -184,22 +184,22 @@ def test_auto_sustained_prefill_policy_keeps_dense_decode_through_128k(monkeypat
     monkeypatch.setenv("MTPLX_PREFILL_CHUNK_CACHE_CLEANUP_EVERY", "auto")
     monkeypatch.setenv("MTPLX_DEFER_VERIFY_HIDDEN_EVAL", "auto")
     monkeypatch.setenv("MTPLX_CLEAR_CACHE_EVERY", "auto")
-    monkeypatch.setenv("MTPLX_CLEAR_CACHE_EVERY_CONTEXT_THRESHOLD", "98304")
-    monkeypatch.setenv("MTPLX_CLEAR_CACHE_EVERY_LONG_CONTEXT", "16")
+    monkeypatch.setenv("MTPLX_CLEAR_CACHE_EVERY_CONTEXT_THRESHOLD", "16384")
+    monkeypatch.setenv("MTPLX_CLEAR_CACHE_EVERY_LONG_CONTEXT", "256")
 
     monkeypatch.setenv("MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS", "65536")
     assert _sustained_prefill_layout() == "contiguous_dense_decode"
     assert _prefill_chunk_size() == 2048
     assert _prefill_chunk_cache_cleanup_every() == 1
     assert _defer_verify_hidden_eval_enabled() is True
-    assert _clear_cache_every() == 0
+    assert _clear_cache_every() == 256
 
     monkeypatch.setenv("MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS", "131072")
     assert _sustained_prefill_layout() == "contiguous_dense_decode"
     assert _prefill_chunk_size() == 2048
     assert _prefill_chunk_cache_cleanup_every() == 1
     assert _defer_verify_hidden_eval_enabled() is True
-    assert _clear_cache_every() == 16
+    assert _clear_cache_every() == 256
 
     monkeypatch.setenv("MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS", "196608")
     assert _sustained_prefill_layout() == "contiguous_then_repage"
