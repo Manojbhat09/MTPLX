@@ -7,7 +7,8 @@ from mtplx.default_models import (
     is_verified_default_model_ref,
     select_default_model,
 )
-from mtplx.hardware import classify_apple_silicon_generation
+from mtplx import hardware as hardware_module
+from mtplx.hardware import classify_apple_silicon_generation, detect_apple_silicon
 from mtplx.profiles import DEFAULT_FP16_HF_MODEL_ID, DEFAULT_HF_MODEL_ID
 
 
@@ -33,6 +34,23 @@ from mtplx.profiles import DEFAULT_FP16_HF_MODEL_ID, DEFAULT_HF_MODEL_ID
 )
 def test_classify_apple_silicon_generation(chip, system, machine, expected):
     assert classify_apple_silicon_generation(chip, system=system, machine=machine) == expected
+
+
+def test_detect_apple_silicon_uses_system_profiler_when_sysctl_is_unparseable(monkeypatch):
+    monkeypatch.setattr(hardware_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(hardware_module.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(hardware_module, "_run_text", lambda *args, **kwargs: "Apple processor")
+    monkeypatch.setattr(
+        hardware_module,
+        "_hardware_json",
+        lambda: {"SPHardwareDataType": [{"chip_type": "Apple M2 Max"}]},
+    )
+
+    detected = detect_apple_silicon()
+
+    assert detected["chip"] == "Apple M2 Max"
+    assert detected["apple_silicon_generation"] == "m2"
+    assert detected["is_apple_silicon"] is True
 
 
 @pytest.mark.parametrize("generation", ["m1", "m2"])

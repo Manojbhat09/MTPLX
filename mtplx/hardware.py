@@ -115,10 +115,15 @@ def detect_apple_silicon() -> dict[str, Any]:
     chip = ""
     if system == "Darwin":
         chip = _run_text("sysctl", "-n", "machdep.cpu.brand_string")
-        if not chip:
+        generation = classify_apple_silicon_generation(chip, system=system, machine=machine)
+        if generation == "unknown":
             hardware = _first_item(_hardware_json(), "SPHardwareDataType")
-            chip = str(hardware.get("chip_type") or "")
-    generation = classify_apple_silicon_generation(chip, system=system, machine=machine)
+            profiler_chip = str(hardware.get("chip_type") or "").strip()
+            if profiler_chip:
+                chip = profiler_chip
+                generation = classify_apple_silicon_generation(chip, system=system, machine=machine)
+    else:
+        generation = classify_apple_silicon_generation(chip, system=system, machine=machine)
     return {
         "system": system,
         "machine": machine,
