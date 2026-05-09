@@ -6018,8 +6018,17 @@ def create_app(state: ServerState) -> FastAPI:
                     return chunks
 
                 def streamed_history_content() -> str:
-                    if tool_stream.has_tool_calls:
-                        return ""
+                    # Always capture the natural-language portion of the
+                    # response. Previously this returned "" whenever
+                    # tool_stream.has_tool_calls, which dropped any preamble
+                    # text (e.g. "Let me check..." before <tool_call>) from
+                    # the stored assistant_content. The next turn's lookup
+                    # encodes the same assistant message WITH the preamble
+                    # (clients echo back content + tool_calls), so the
+                    # prefix diverged and every tool-using turn paid a cold
+                    # prefill. tool_call markup itself is captured in
+                    # tool_stream and not in history_content_chunks, so
+                    # this is safe to return for the tool-call case too.
                     reasoning = (
                         "".join(history_reasoning_chunks)
                         .replace(THINK_OPEN, "")

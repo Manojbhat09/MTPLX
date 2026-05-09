@@ -934,6 +934,77 @@ def test_chat_stream_tool_calls_emit_delta_tool_calls(monkeypatch):
     assert "<tool_call>" not in response.text
 
 
+def test_chat_stream_tool_call_preamble_is_stored_for_postcommit(monkeypatch):
+    state = _fake_streaming_session_state()
+    state.args.stream_interval = 1
+    captured_generation_final: list[dict] = []
+    scheduled: list[dict] = []
+
+    def fake_store_generation_final(*_args, **kwargs):
+        captured_generation_final.append(kwargs)
+        return {
+            "stored": False,
+            "mode": "unsafe",
+            "reason": "tool_call_history_rewrite",
+        }
+
+    def fake_schedule(*_args, **kwargs):
+        scheduled.append(kwargs)
+        return {
+            "stored": False,
+            "mode": "async_pending",
+            "reason": kwargs["unsafe_reason"],
+        }
+
+    monkeypatch.setattr(
+        openai, "_store_generation_final_history_snapshot", fake_store_generation_final
+    )
+    monkeypatch.setattr(openai, "_schedule_idle_postcommit_snapshot", fake_schedule)
+    monkeypatch.setattr(
+        openai,
+        "_run_generation",
+        _fake_streaming_generation(
+            "Let me research first.\n\n"
+            "<tool_call>\n<function=session_status>\n</function>\n</tool_call>"
+        ),
+    )
+
+    with TestClient(create_app(state)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"x-mtplx-session-id": "stream-tool-preamble"},
+            json={
+                "messages": [{"role": "user", "content": "Status."}],
+                "tools": [_tool_schema()],
+                "tool_choice": "auto",
+                "stream": True,
+                "max_tokens": 64,
+                "enable_thinking": False,
+            },
+        )
+
+    assert response.status_code == 200
+    assert '"tool_calls"' in response.text
+    assert '"finish_reason": "tool_calls"' in response.text
+    streamed_content = "".join(
+        payload["choices"][0]["delta"]["content"]
+        for payload in _stream_payloads(response.text)
+        if payload["choices"][0]["delta"].get("content")
+    )
+    assert streamed_content == "Let me research first.\n\n"
+    assert "<tool_call>" not in response.text
+
+    assert captured_generation_final
+    assert scheduled
+    for call in (captured_generation_final[0], scheduled[0]):
+        assert call["assistant_content"] == "Let me research first."
+        assert "<tool_call>" not in call["assistant_content"]
+        assert call["assistant_tool_calls"][0]["function"] == {
+            "name": "session_status",
+            "arguments": "{}",
+        }
+
+
 def test_chat_stream_tools_plain_content_stays_incremental(monkeypatch):
     state = _fake_state()
     state.args.stream_interval = 1
