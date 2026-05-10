@@ -138,7 +138,14 @@ def test_invalid_default_model_variant_env_falls_back_to_auto(monkeypatch):
 def test_verified_default_refs_include_bf16_and_fp16():
     assert is_verified_default_model_ref(DEFAULT_HF_MODEL_ID)
     assert is_verified_default_model_ref(DEFAULT_FP16_HF_MODEL_ID)
+    assert is_verified_default_model_ref(
+        "/Users/example/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Speed"
+    )
+    assert is_verified_default_model_ref(
+        "/Users/example/.mtplx/models/Youssofal--Qwen3.6-27B-MTPLX-Optimized-Speed-FP16"
+    )
     assert not is_verified_default_model_ref("someone/custom-model")
+    assert not is_verified_default_model_ref("/Users/example/models/custom-model")
 
 
 def test_optimized_quality_prefers_complete_local_env_model(tmp_path, monkeypatch):

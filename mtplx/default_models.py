@@ -28,6 +28,14 @@ _OPTIMIZED_QUALITY_LOCAL_CANDIDATES = (
     "~/Documents/MTPLX/hf-staging/Qwen3.6-27B-MTPLX-Optimized-Quality",
     "~/.mtplx/models/Youssofal--Qwen3.6-27B-MTPLX-Optimized-Quality",
 )
+_VERIFIED_DEFAULT_LOCAL_NAMES = frozenset(
+    {
+        "Qwen3.6-27B-MTPLX-Optimized-Speed",
+        "Youssofal--Qwen3.6-27B-MTPLX-Optimized-Speed",
+        "Qwen3.6-27B-MTPLX-Optimized-Speed-FP16",
+        "Youssofal--Qwen3.6-27B-MTPLX-Optimized-Speed-FP16",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -216,9 +224,12 @@ def is_verified_default_model_ref(model: str | Path | None) -> bool:
     if text in refs:
         return True
     if text.startswith(("~", "/", "./", "../")):
+        path = Path(text).expanduser()
+        if path.name in _VERIFIED_DEFAULT_LOCAL_NAMES:
+            return True
         try:
-            expanded = str(Path(text).expanduser().resolve())
+            expanded = str(path.resolve())
         except OSError:
-            expanded = str(Path(text).expanduser())
+            expanded = str(path)
         return expanded in refs
     return False

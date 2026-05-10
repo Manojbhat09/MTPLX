@@ -19,8 +19,6 @@ import threading
 import time
 from types import SimpleNamespace
 
-import pytest
-
 from mtplx.server import openai
 
 

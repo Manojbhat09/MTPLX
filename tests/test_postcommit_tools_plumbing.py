@@ -25,8 +25,6 @@ import threading
 from threading import Lock
 from types import SimpleNamespace
 
-import pytest
-
 from mtplx.server import openai
 from mtplx.server.openai import (
     ChatMessage,

@@ -4,6 +4,37 @@ All notable user-facing changes are recorded here.
 
 ## Unreleased
 
+## v0.3.0
+
+### Added
+
+- Added hardware-aware verified default model routing. Fresh M1/M2 Apple
+  Silicon setups select the FP16 Optimized Speed variant by default, while
+  M3/M4/M5 and unknown hardware stay on the BF16 Optimized Speed default.
+  `MTPLX_DEFAULT_MODEL_VARIANT=auto|bf16|fp16` remains available for support
+  overrides, and explicit `--model` always wins.
+- Added the Optimized Quality model option to the start wizard. It points at
+  the Flat8 Optimized Quality artifact when present locally, otherwise the
+  verified Hugging Face repo.
+- Added SessionBank/model-owner scheduler integration so foreground generation
+  has priority over idle postcommit/cache-build work.
+- Added postcommit cache-reuse observability including cache hit/miss reason,
+  cached token counts, suffix token counts, and SessionBank max-entry tuning.
+
+### Fixed
+
+- Fixed returning-user verified-default configs so saved local Optimized Speed
+  paths are re-resolved through the current hardware-aware default instead of
+  pinning older Macs to the BF16 default.
+- Fixed explicit `--model` handling so saved config can never override a model
+  path or repo id typed on the command line.
+- Fixed SessionBank reuse above the 16K-token policy threshold, postcommit
+  prefix reachability, and streamed tool-call preamble retention.
+- Fixed TurboQuant startup so missing optional vLLM Metal external ops fall
+  back cleanly instead of 500ing.
+- Fixed `mtplx serve --host 0.0.0.0` presentation so the CLI distinguishes the
+  actual wildcard bind from the local browser/API URL.
+
 ## v0.2.1
 
 ### Added

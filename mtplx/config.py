@@ -96,6 +96,9 @@ def apply_user_config(args: Any, *, config_path: str | Path | None = None) -> Us
 
 
 def _apply_model_default(args: Any, config: UserConfig) -> None:
+    cli_flags = getattr(args, "_cli_flags", set())
+    if "model" in cli_flags:
+        return
     current = getattr(args, "model", None)
     default_refs = {None, str(DEFAULT_RUNTIME_MODEL_DIR), DEFAULT_HF_MODEL_ID, DEFAULT_MODEL_ID}
     if (

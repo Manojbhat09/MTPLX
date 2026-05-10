@@ -12,14 +12,8 @@ without needing a real MLX runtime.
 
 from __future__ import annotations
 
-import importlib
-import os
 from pathlib import Path
-from types import SimpleNamespace
 
-import pytest
-
-from mtplx import session_bank as sb
 from mtplx.session_bank import (
     CacheMissReason,
     SessionBank,

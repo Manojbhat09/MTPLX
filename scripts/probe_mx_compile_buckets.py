@@ -10,6 +10,8 @@ without making either one a prerequisite for the SessionBank fix:
 
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 import argparse
 import json
 import os

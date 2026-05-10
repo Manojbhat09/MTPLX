@@ -73,3 +73,24 @@ def test_apply_user_config_preserves_explicit_runtime_values(tmp_path):
     assert args.model == "models/local"
     assert args.cache_dir == "/tmp/explicit-cache"
     assert args.profile == "performance-cold"
+
+
+def test_apply_user_config_preserves_explicit_default_like_model(tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        'model = "mtplx/example"\n'
+        'profile = "exact"\n',
+        encoding="utf-8",
+    )
+    explicit_model = "/Users/example/models/Qwen3.6-27B-MTPLX-Optimized-Speed"
+    args = argparse.Namespace(
+        command="serve",
+        model=explicit_model,
+        cache_dir=None,
+        profile=DEFAULT_PROFILE_NAME,
+        _cli_flags={"model"},
+    )
+
+    apply_user_config(args, config_path=config)
+
+    assert args.model == explicit_model
