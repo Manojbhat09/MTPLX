@@ -4,6 +4,17 @@ All notable user-facing changes are recorded here.
 
 ## Unreleased
 
+## v0.3.1
+
+### Fixed
+
+- Fixed `--no-mtp` / AR OpenAI streaming so `[DONE]` and final stats are sent
+  immediately after the last visible token in the default async SessionBank
+  postcommit mode. Retokenized SessionBank postcommit now runs as idle async
+  maintenance work instead of holding the client stream open.
+- Fixed startup/runtime labeling for AR mode so `mtplx quickstart --no-mtp`
+  displays `Sustained AR` instead of `Sustained MTP`.
+
 ## v0.3.0
 
 ### Added
