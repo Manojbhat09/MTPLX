@@ -191,7 +191,7 @@ def test_mtplx_settings_endpoint_controls_server_reasoning():
         "/v1/mtplx/settings", headers={"Authorization": "Bearer mtplx-local"}
     )
     assert initial.status_code == 200
-    assert initial.json()["reasoning"] == "auto"
+    assert initial.json()["reasoning"] == "on"
     assert initial.json()["metal_memory_caps"] == {"applied": False, "reason": "test"}
 
     off = client.post(
@@ -767,6 +767,9 @@ class CaptureTokenizer:
     def encode(self, text):
         return [ord(char) for char in str(text)]
 
+    def decode(self, tokens, **_kwargs):
+        return "".join(chr(int(token)) for token in tokens)
+
 
 def _tool_schema():
     return {
@@ -849,11 +852,12 @@ def _stream_payloads(response_text: str) -> list[dict]:
     ]
 
 
-def test_chat_tools_are_passed_to_qwen_template_and_disable_default_thinking(
+def test_chat_tools_are_passed_to_qwen_template_and_inherit_default_thinking(
     monkeypatch,
 ):
     state = _fake_state()
     state.runtime.tokenizer = CaptureTokenizer()
+    state.args.stats_footer = False
     client = TestClient(create_app(state))
     monkeypatch.setattr(
         openai, "_run_generation", lambda *_args, **_kwargs: _fake_generation("ok")
@@ -876,7 +880,73 @@ def test_chat_tools_are_passed_to_qwen_template_and_disable_default_thinking(
     assert "MTPLX tool contract:" in messages[0]["content"]
     assert "session_status" in messages[0]["content"]
     assert kwargs["tools"] == [_tool_schema()]
+    assert kwargs["enable_thinking"] is True
+
+
+def test_chat_tools_honor_explicit_disable_thinking(monkeypatch):
+    state = _fake_state()
+    state.runtime.tokenizer = CaptureTokenizer()
+    client = TestClient(create_app(state))
+    monkeypatch.setattr(
+        openai, "_run_generation", lambda *_args, **_kwargs: _fake_generation("ok")
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-mtplx-cache-mode": "bypass"},
+        json={
+            "messages": [{"role": "user", "content": "Use the tool."}],
+            "tools": [_tool_schema()],
+            "tool_choice": "auto",
+            "enable_thinking": False,
+            "max_tokens": 8,
+        },
+    )
+
+    assert response.status_code == 200
+    _messages, kwargs = state.runtime.tokenizer.calls[0]
     assert kwargs["enable_thinking"] is False
+
+
+def test_streaming_tool_request_emits_raw_reasoning_by_default(monkeypatch):
+    state = _fake_state()
+    state.runtime.tokenizer = CaptureTokenizer()
+    state.args.stats_footer = False
+    client = TestClient(create_app(state))
+    monkeypatch.setattr(
+        openai,
+        "_run_generation",
+        _fake_streaming_generation("<think>raw tool reasoning</think>\nanswer"),
+    )
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"x-mtplx-cache-mode": "bypass"},
+        json={
+            "messages": [{"role": "user", "content": "Use the tool."}],
+            "tools": [_tool_schema()],
+            "tool_choice": "auto",
+            "stream": True,
+            "max_tokens": 32,
+        },
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    payloads = _stream_payloads(body)
+    reasoning = "".join(
+        choice.get("delta", {}).get("reasoning_content", "")
+        for payload in payloads
+        for choice in payload.get("choices", [])
+    )
+    content = "".join(
+        choice.get("delta", {}).get("content", "")
+        for payload in payloads
+        for choice in payload.get("choices", [])
+    )
+    assert reasoning == "raw tool reasoning"
+    assert content.strip() == "answer"
 
 
 def test_chat_template_preserves_assistant_tool_calls_and_tool_results():

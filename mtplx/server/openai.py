@@ -3935,6 +3935,8 @@ class _NonDuplicatingTokenDecoder(_IncrementalTokenDecoder):
 
 
 class _ThinkingContentStreamSplitter:
+    _TOOL_CALL_MARKER = "<tool_call"
+
     def __init__(self, *, thinking_enabled: bool) -> None:
         self._thinking_enabled = thinking_enabled
         self._inside_thinking = thinking_enabled
@@ -3976,6 +3978,18 @@ class _ThinkingContentStreamSplitter:
         keep = max(len(THINK_OPEN), len(THINK_CLOSE)) - 1
         while self._pending:
             if self._inside_thinking:
+                pending_lower = self._pending.lower()
+                if pending_lower.startswith(self._TOOL_CALL_MARKER):
+                    self._inside_thinking = False
+                    continue
+                if not final and self._TOOL_CALL_MARKER.startswith(pending_lower):
+                    break
+                if self._pending.startswith(THINK_OPEN):
+                    self._pending = self._pending[len(THINK_OPEN) :]
+                    self._reentry_count += 1
+                    continue
+                if not final and THINK_OPEN.startswith(self._pending):
+                    break
                 close_index = self._pending.find(THINK_CLOSE)
                 if close_index < 0:
                     emit_len = (
@@ -5331,9 +5345,9 @@ def _normalize_reasoning_mode(value: Any, *, default: str = "auto") -> str:
 def _set_server_reasoning_mode(state: ServerState, mode: str) -> None:
     normalized = _normalize_reasoning_mode(mode)
     state.args.reasoning = normalized
-    # Browser/Pi "auto" means no per-request override. The Qwen default remains
-    # thinking-capable, while tool requests still force thinking off unless the
-    # client explicitly opts in.
+    # Browser/Pi "auto" means no per-request override. The product default is
+    # thinking-capable so OpenAI-compatible agent clients can receive the raw
+    # reasoning stream unless they explicitly disable it.
     state.args.enable_thinking = False if normalized == "off" else True
 
 
@@ -5864,8 +5878,6 @@ def create_app(state: ServerState) -> FastAPI:
                 },
             )
         thinking_enabled = _thinking_enabled_for_request(state, request)
-        if tools_active and request.enable_thinking is None:
-            thinking_enabled = False
         request_generation_mode = _request_generation_mode_for_generation(
             state, request
         )
@@ -7049,7 +7061,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--reasoning-mode",
         choices=["auto", "on", "off"],
-        default="auto",
+        default="on",
         help="Server-default Qwen thinking mode for clients that do not send enable_thinking.",
     )
     parser.add_argument(

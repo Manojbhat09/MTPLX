@@ -585,7 +585,7 @@ def _cli_generation_budget(
     }
 
 
-def _reasoning_mode(args: Any, *, default: str = "off") -> str:
+def _reasoning_mode(args: Any, *, default: str = "on") -> str:
     raw = getattr(args, "reasoning", None)
     mode = str(raw or default).strip().lower()
     if mode not in {"auto", "on", "off"}:
@@ -5417,6 +5417,60 @@ def cmd_integrate_public(args: Any) -> int:
                 "messages": f"curl {server_url}/v1/messages",
             },
         }
+    elif action == "opencode":
+        payload = {
+            "integration": "opencode",
+            "server_url": server_url,
+            "base_url": api_base_url,
+            "api_base_url": api_base_url,
+            "model_id": model_id,
+            "config_path": "~/.config/opencode/opencode.json",
+            "server_command": (
+                f"mtplx quickstart --profile sustained --host {args.host} --port {args.port} "
+                "--reasoning on --no-stats-footer"
+            ),
+            "config": {
+                "provider": {
+                    "mtplx": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "MTPLX (local)",
+                        "options": {
+                            "baseURL": api_base_url,
+                            "apiKey": str(getattr(args, "api_key", None) or "mtplx-local"),
+                            "timeout": False,
+                            "chunkTimeout": 900000,
+                        },
+                        "models": {
+                            model_id: {
+                                "name": "MTPLX local",
+                                "reasoning": True,
+                                "interleaved": {"field": "reasoning_content"},
+                                "tool_call": True,
+                                "temperature": True,
+                                "limit": {
+                                    "context": 262144,
+                                    "output": 262144,
+                                },
+                                "modalities": {
+                                    "input": ["text"],
+                                    "output": ["text"],
+                                },
+                                "options": {
+                                    "enable_thinking": True,
+                                },
+                            }
+                        },
+                    }
+                },
+                "model": f"mtplx/{model_id}",
+                "small_model": f"mtplx/{model_id}",
+            },
+            "notes": [
+                "OpenCode's UI setting says reasoning summaries, but this config uses the raw interleaved reasoning_content stream.",
+                "Do not add OpenAI reasoningSummary/reasoningEffort fields for MTPLX; those are provider-summary controls, not Qwen raw thinking.",
+                "MTPLX now defaults reasoning on, and this config also sends enable_thinking=true explicitly for tool-active requests.",
+            ],
+        }
     else:
         raise SystemExit(f"unknown integration: {action}")
     if getattr(args, "smoke", False):
@@ -5428,7 +5482,7 @@ def cmd_integrate_public(args: Any) -> int:
         _print(payload)
     else:
         print(f"MTPLX connect: {action}")
-        print(f"base URL: {api_base_url if action == 'openwebui' else server_url}")
+        print(f"base URL: {api_base_url if action in {'openwebui', 'opencode'} else server_url}")
         print(f"model: {model_id}")
         print(f"start server: {payload.get('server_command')}")
         if action == "openwebui":
@@ -5439,6 +5493,11 @@ def cmd_integrate_public(args: Any) -> int:
             if getattr(args, "docker", False):
                 print("Docker:")
                 print(f"  {_shell_join(payload['docker_command_argv'])}")
+        elif action == "opencode":
+            print("OpenCode:")
+            print("  Config path: ~/.config/opencode/opencode.json")
+            print("  Provider: mtplx")
+            print("  Reasoning: raw reasoning_content stream, enable_thinking=true")
         else:
             env = payload.get("environment") or {}
             print("Claude Code environment:")

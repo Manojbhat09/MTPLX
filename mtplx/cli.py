@@ -487,8 +487,7 @@ def _add_reasoning_arg(parser: argparse.ArgumentParser, *, default: str | None =
         choices=["auto", "on", "off"],
         default=default,
         help=(
-            "Qwen thinking mode. CLI chat defaults to off for speed; "
-            "server/browser defaults to auto unless set."
+            "Qwen thinking mode. Defaults to on; use --reasoning off for terse/non-reasoning runs."
         ),
     )
 
@@ -854,6 +853,11 @@ def _cmd_connect(args: argparse.Namespace) -> int:
                     "command": "mtplx connect claude-code",
                     "purpose": "Use MTPLX through the Anthropic-compatible Claude Code path.",
                 },
+                {
+                    "name": "opencode",
+                    "command": "mtplx connect opencode",
+                    "purpose": "Use MTPLX in OpenCode with raw reasoning_content streaming.",
+                },
             ],
             "server": server_command,
         }
@@ -865,6 +869,7 @@ def _cmd_connect(args: argparse.Namespace) -> int:
             print("2. Pick a client:")
             print("   mtplx connect openwebui")
             print("   mtplx connect claude-code")
+            print("   mtplx connect opencode")
         return 0
     return cmd_integrate_public(args)
 
@@ -1777,8 +1782,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     quickstart_server_p.set_defaults(func=cmd_serve_public)
 
-    connect_p = sub.add_parser("connect", help="Show client setup for Open WebUI or Claude Code")
-    connect_p.add_argument("integration", nargs="?", choices=["openwebui", "claude-code"])
+    connect_p = sub.add_parser("connect", help="Show client setup for Open WebUI, Claude Code, or OpenCode")
+    connect_p.add_argument("integration", nargs="?", choices=["openwebui", "claude-code", "opencode"])
     connect_p.add_argument("--host", default="127.0.0.1")
     connect_p.add_argument("--port", type=int, default=8000)
     connect_p.add_argument("--model-id", default=DEFAULT_PUBLIC_MODEL_ID)
@@ -2502,7 +2507,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     integrate_p = sub.add_parser("integrate", help="Print client integration settings")
     integrate_sub = integrate_p.add_subparsers(dest="integration", required=True)
-    for integration_name in ("openwebui", "claude-code"):
+    for integration_name in ("openwebui", "claude-code", "opencode"):
         integration_p = integrate_sub.add_parser(integration_name)
         integration_p.add_argument("--host", default="127.0.0.1")
         integration_p.add_argument("--port", type=int, default=8000)

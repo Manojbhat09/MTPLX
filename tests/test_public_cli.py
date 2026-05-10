@@ -810,10 +810,10 @@ def test_quickstart_generation_default_uses_remaining_model_context(monkeypatch,
     )
 
     assert captured["max_tokens"] == 88
-    assert captured["enable_thinking"] is False
+    assert captured["enable_thinking"] is True
     assert payload["stats"]["max_tokens"] == 88
     assert payload["stats"]["remaining_context_tokens"] == 88
-    assert payload["stats"]["reasoning"] == "off"
+    assert payload["stats"]["reasoning"] == "on"
 
 
 def test_quickstart_generation_no_mtp_uses_ar(monkeypatch, tmp_path):
@@ -1658,6 +1658,7 @@ def test_product_helper_commands_parse():
     serve_start = parser.parse_args(["serve", "--port", "18012"])
     status = parser.parse_args(["status", "--deep"])
     connect = parser.parse_args(["connect", "openwebui", "--port", "18012"])
+    connect_opencode = parser.parse_args(["connect", "opencode", "--port", "18012"])
     models = parser.parse_args(["models", "--json"])
     report = parser.parse_args(["report", "--output-dir", "reports"])
     nightly = parser.parse_args(["bench", "nightly", "--out", "out.json"])
@@ -1668,6 +1669,7 @@ def test_product_helper_commands_parse():
     openwebui = parser.parse_args(["integrate", "openwebui", "--port", "18012", "--json"])
     openwebui_docker = parser.parse_args(["openwebui", "docker-command", "--mtplx-port", "18012"])
     claude = parser.parse_args(["integrate", "claude-code", "--port", "18012"])
+    opencode = parser.parse_args(["integrate", "opencode", "--port", "18012"])
     architectures = parser.parse_args(["model", "architectures", "--json"])
     qa_architectures = parser.parse_args(["model", "qa-architectures", "--json"])
     publish = parser.parse_args(["model", "publish-check", "--repo-id", "mtplx/example"])
@@ -1703,6 +1705,7 @@ def test_product_helper_commands_parse():
     assert status.deep is True
     assert connect.command == "connect"
     assert connect.integration == "openwebui"
+    assert connect_opencode.integration == "opencode"
     assert models.command == "models"
     assert report.command == "report"
     assert report.bundle is True
@@ -1717,6 +1720,7 @@ def test_product_helper_commands_parse():
     assert openwebui_docker.openwebui_action == "docker-command"
     assert openwebui_docker.mtplx_port == 18012
     assert claude.integration == "claude-code"
+    assert opencode.integration == "opencode"
     assert architectures.model_action == "architectures"
     assert qa_architectures.model_action == "qa-architectures"
     assert publish.model_action == "publish-check"
@@ -1768,6 +1772,21 @@ def test_integrate_openwebui_json(capsys):
     assert payload["docker_api_base_url"] == "http://host.docker.internal:18012/v1"
     assert "host.docker.internal:18012/v1" in payload["docker_command"]
     assert "--no-stats-footer" in payload["server_command"]
+
+
+def test_integrate_opencode_json_uses_raw_reasoning_contract(capsys):
+    code = main(["integrate", "opencode", "--port", "18012", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["integration"] == "opencode"
+    assert payload["api_base_url"] == "http://127.0.0.1:18012/v1"
+    assert "--reasoning on" in payload["server_command"]
+    model = payload["config"]["provider"]["mtplx"]["models"][payload["model_id"]]
+    assert model["reasoning"] is True
+    assert model["interleaved"] == {"field": "reasoning_content"}
+    assert model["options"]["enable_thinking"] is True
+    assert "reasoningSummary" not in model["options"]
 
 
 def test_config_set_dry_run_uses_selected_path(tmp_path, capsys):
