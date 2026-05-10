@@ -928,9 +928,14 @@ class VllmMetalPagedKVCache:
             return False
         if _env_truthy("MTPLX_ALLOW_PAGED_ACTIVE_ARRAY_SNAPSHOT"):
             return False
-        sustained = _env_truthy("MTPLX_SUSTAINED_PREFILL")
+        # Only the QA assertion env var should turn the dense-fallback path
+        # into a hard error. MTPLX_SUSTAINED_PREFILL is a *product* profile
+        # flag (set by `--profile sustained`) and must not abort production
+        # requests when the partitioned-paged kernel returns None - the
+        # caller in attention_split.py already handles None by routing to
+        # scaled_dot_product_attention with cache.state, which is correct.
         asserted = _env_truthy("MTPLX_ASSERT_NO_PAGED_ACTIVE_ARRAYS")
-        return (sustained or asserted) and int(self.offset) >= self._partition_threshold()
+        return asserted and int(self.offset) >= self._partition_threshold()
 
     def long_context_dense_fallback_forbidden(self) -> bool:
         return self._long_context_dense_fallback_forbidden()
