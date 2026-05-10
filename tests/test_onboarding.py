@@ -11,6 +11,7 @@ import builtins
 import json
 from pathlib import Path
 
+from mtplx.profiles import DEFAULT_FP16_HF_MODEL_ID
 from mtplx.ui import onboarding
 
 
@@ -75,6 +76,18 @@ def test_run_onboarding_screens_with_stubbed_input(monkeypatch, capsys):
     assert state["profile"] == "sustained"
     assert state["max"] is False
     assert state["target"] == "openwebui"
+
+
+def test_run_onboarding_screens_uses_fp16_default_when_policy_selects_it(monkeypatch):
+    monkeypatch.setenv("MTPLX_DEFAULT_MODEL_VARIANT", "fp16")
+    answers = iter(["1", "1", "1"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+
+    state = onboarding.run_onboarding_screens()
+
+    assert state["model"] == DEFAULT_FP16_HF_MODEL_ID
+    assert state["model_selection"]["variant"] == "fp16"
+    assert state["model_selection"]["precision"] == "FP16"
 
 
 def test_run_onboarding_sustained_max_sets_max_flag_when_thermal_available(monkeypatch):
@@ -310,6 +323,26 @@ def test_run_quickstart_flow_returning_user_reuses_sustained(tmp_path, monkeypat
     assert state["model"] == "mtplx/foo"
 
 
+def test_run_quickstart_flow_refreshes_saved_verified_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(tmp_path / "refresh-default.json"))
+    monkeypatch.setenv("MTPLX_DEFAULT_MODEL_VARIANT", "fp16")
+    onboarding.save_state(
+        {
+            "model": onboarding.DEFAULT_HF_MODEL,
+            "profile": "sustained",
+            "max": False,
+            "target": "terminal",
+        }
+    )
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "")
+
+    state = onboarding.run_quickstart_flow(fresh=False)
+
+    assert state is not None
+    assert state["model"] == DEFAULT_FP16_HF_MODEL_ID
+    assert state["model_selection"]["variant"] == "fp16"
+
+
 def test_run_quickstart_flow_legacy_stable_state_is_not_reused(tmp_path, monkeypatch):
     """Stable is still an explicit flag, but no longer a reusable Start mode."""
 
@@ -401,6 +434,17 @@ def test_screen_model_picks_canonical_default_when_configured_offered(monkeypatc
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
     chosen = onboarding.screen_model(configured=configured)
     assert chosen == onboarding.DEFAULT_HF_MODEL
+
+
+def test_screen_model_picks_hardware_default_when_configured_offered(monkeypatch):
+    monkeypatch.setenv("MTPLX_DEFAULT_MODEL_VARIANT", "fp16")
+    configured = "/Users/test/Documents/MTPLX/models/Qwen3.6-27B-MTPLX"
+    answers = iter(["2"])  # explicit "verified default"
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+
+    chosen = onboarding.screen_model(configured=configured)
+
+    assert chosen == DEFAULT_FP16_HF_MODEL_ID
 
 
 def test_screen_model_no_configured_uses_three_options(monkeypatch):

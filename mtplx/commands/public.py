@@ -30,6 +30,10 @@ from mtplx.benchmarks.validators.basic import (
     validate_python_syntax,
 )
 from mtplx.constants import DEFAULT_RUNTIME_MODEL_DIR
+from mtplx.default_models import (
+    is_verified_default_model_ref,
+    select_default_model,
+)
 from mtplx.env import collect_environment
 from mtplx.kpi import (
     EXIT_EXACTNESS,
@@ -54,7 +58,6 @@ from mtplx.backends.registry import (
     architecture_catalog,
 )
 from mtplx.profiles import (
-    DEFAULT_HF_MODEL_ID,
     DEFAULT_MODEL_ID,
     DEFAULT_PROFILE_NAME,
     DEFAULT_PUBLIC_MODEL_ID,
@@ -3911,7 +3914,13 @@ def _quickstart_heartbeat(label: str, *, interval_s: float = 5.0) -> _Quickstart
 
 
 def _quickstart_current_model(args: Any) -> str:
-    return str(getattr(args, "model", None) or DEFAULT_MODEL_ID)
+    model = getattr(args, "model", None)
+    explicit_model = bool(getattr(args, "_model_explicit", False))
+    if not explicit_model and is_verified_default_model_ref(model):
+        selection = select_default_model()
+        args._mtplx_default_model_selection = selection.to_dict()
+        return selection.model
+    return str(model or DEFAULT_MODEL_ID)
 
 
 def _quickstart_download_ref(model: str) -> str:
@@ -3919,15 +3928,18 @@ def _quickstart_download_ref(model: str) -> str:
 
     if repo_id_from_model_ref(model):
         return model
+    selection = select_default_model()
     default_local_refs = {
         DEFAULT_MODEL_ID,
+        selection.model,
         str(DEFAULT_RUNTIME_MODEL_DIR),
         DEFAULT_CHAMPION,
         str((repo_root() / DEFAULT_MODEL_ID).resolve()),
+        str((repo_root() / selection.model).resolve()),
         str((repo_root() / str(DEFAULT_RUNTIME_MODEL_DIR)).resolve()),
     }
     if model in default_local_refs:
-        return DEFAULT_HF_MODEL_ID
+        return selection.hf_model
     raise ValueError(
         "cannot download a local model path. Re-run with --model HF_ORG/HF_REPO "
         "or choose a folder that already exists."
@@ -3948,16 +3960,17 @@ def _quickstart_choose_model(args: Any, *, target: str = "terminal") -> tuple[st
         return model, download
 
     _quickstart_line(f"MTPLX {_start_command_name(args)}")
+    selection = select_default_model()
     _quickstart_line("Choose a model:")
-    _quickstart_line(f"  1. Use default verified model ({model})")
+    _quickstart_line(f"  1. Use verified default for this Mac ({selection.label})")
     _quickstart_line("  2. Choose a local model folder")
-    _quickstart_line(f"  3. Download verified default from Hugging Face ({DEFAULT_HF_MODEL_ID})")
+    _quickstart_line(f"  3. Download verified default from Hugging Face ({selection.hf_model})")
     choice = input("Select [1]: ").strip()
     if choice == "2":
         chosen = input("Model folder: ").strip()
         return (chosen or model), False
     if choice == "3":
-        return DEFAULT_HF_MODEL_ID, True
+        return selection.hf_model, True
     return model, download
 
 
@@ -4939,6 +4952,7 @@ def cmd_quickstart_public(args: Any) -> int:
     is_tty = sys.stdin.isatty() and sys.stdout.isatty()
     has_explicit_target = raw_target is not None
     has_explicit_model = "model" in cli_flags
+    args._model_explicit = has_explicit_model
     has_explicit_profile_flag = "profile" in cli_flags
     has_explicit_max = "max" in cli_flags
     has_prompt = bool(getattr(args, "prompt", None))
@@ -5030,6 +5044,9 @@ def cmd_quickstart_public(args: Any) -> int:
     if depth_error is not None:
         return depth_error
     model, download = _quickstart_choose_model(args, target=target)
+    default_selection = getattr(args, "_mtplx_default_model_selection", None)
+    if isinstance(default_selection, dict) and model != default_selection.get("model"):
+        default_selection = None
     cache_dir = getattr(args, "cache_dir", None)
     if getattr(args, "dry_run", False):
         openwebui = _quickstart_openwebui_payload(args) if target == "openwebui" else None
@@ -5043,6 +5060,7 @@ def cmd_quickstart_public(args: Any) -> int:
             "generation_mode": _generation_mode_from_args(args),
             "max": bool(getattr(args, "max", False)),
             "download_if_missing": download,
+            "default_model_selection": default_selection,
             "terminal_chat": target == "terminal",
             "openwebui": openwebui,
             "pi": pi,
@@ -5060,6 +5078,12 @@ def cmd_quickstart_public(args: Any) -> int:
         else:
             _quickstart_line(f"MTPLX {_start_command_name(args)}")
             _quickstart_line(f"model: {model}")
+            if isinstance(default_selection, dict):
+                _quickstart_line(
+                    "verified default for this Mac: "
+                    f"{default_selection.get('display_name')} "
+                    f"({default_selection.get('reason')})"
+                )
             _quickstart_line(f"profile: {payload['profile']}")
             _quickstart_line(
                 "mode: "
@@ -5084,6 +5108,12 @@ def cmd_quickstart_public(args: Any) -> int:
         return 2
 
     _quickstart_line(f"MTPLX {_start_command_name(args)}")
+    if isinstance(default_selection, dict):
+        _quickstart_line(
+            "Verified default for this Mac: "
+            f"{default_selection.get('display_name')} "
+            f"({default_selection.get('reason')})"
+        )
     _quickstart_line(f"[1/4] Checking model: {model}")
     try:
         runtime_model, resolution = _quickstart_resolve_model(model, cache_dir=cache_dir, download=download)
@@ -5122,7 +5152,7 @@ def cmd_quickstart_public(args: Any) -> int:
                 download_model = _quickstart_download_ref(model)
                 label = "selected model" if download_model == model else "verified default"
             except ValueError:
-                download_model = DEFAULT_HF_MODEL_ID
+                download_model = select_default_model().hf_model
                 label = "verified default"
             answer = input(f"Model is missing. Download the {label} ({download_model}) now? [Y/n] ").strip().lower()
             if answer in {"", "y", "yes"}:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import subprocess
 import sys
 from importlib import metadata
@@ -81,6 +82,57 @@ def _first_item(payload: dict[str, Any], key: str) -> dict[str, Any]:
     return {}
 
 
+_APPLE_SILICON_GENERATION_RE = re.compile(r"\bM([1-5])\b", re.IGNORECASE)
+
+
+def classify_apple_silicon_generation(
+    chip: str | None,
+    *,
+    system: str | None = None,
+    machine: str | None = None,
+) -> str:
+    """Normalize local Mac hardware into the generation used by model policy."""
+
+    system_value = system or platform.system()
+    machine_value = machine or platform.machine()
+    chip_value = str(chip or "").strip()
+    lowered = chip_value.lower()
+    if system_value == "Darwin" and machine_value in {"x86_64", "i386"}:
+        return "intel"
+    if "intel" in lowered:
+        return "intel"
+    match = _APPLE_SILICON_GENERATION_RE.search(chip_value)
+    if match:
+        return f"m{match.group(1)}".lower()
+    return "unknown"
+
+
+def detect_apple_silicon() -> dict[str, Any]:
+    """Return the cheap local hardware facts needed for default-model routing."""
+
+    system = platform.system()
+    machine = platform.machine()
+    chip = ""
+    if system == "Darwin":
+        chip = _run_text("sysctl", "-n", "machdep.cpu.brand_string")
+        generation = classify_apple_silicon_generation(chip, system=system, machine=machine)
+        if generation == "unknown":
+            hardware = _first_item(_hardware_json(), "SPHardwareDataType")
+            profiler_chip = str(hardware.get("chip_type") or "").strip()
+            if profiler_chip:
+                chip = profiler_chip
+                generation = classify_apple_silicon_generation(chip, system=system, machine=machine)
+    else:
+        generation = classify_apple_silicon_generation(chip, system=system, machine=machine)
+    return {
+        "system": system,
+        "machine": machine,
+        "chip": chip,
+        "apple_silicon_generation": generation,
+        "is_apple_silicon": generation in {"m1", "m2", "m3", "m4", "m5"},
+    }
+
+
 def inspect_hardware() -> dict[str, Any]:
     """Return the hardware facts used by prefill QA and release claims."""
 
@@ -93,6 +145,7 @@ def inspect_hardware() -> dict[str, Any]:
         str(hardware.get("chip_type") or "")
         or _run_text("sysctl", "-n", "machdep.cpu.brand_string")
     )
+    generation = classify_apple_silicon_generation(chip, system=system, machine=machine)
     ram_bytes = 0
     raw_mem = _run_text("sysctl", "-n", "hw.memsize") if system == "Darwin" else ""
     try:
@@ -139,6 +192,7 @@ def inspect_hardware() -> dict[str, Any]:
         "macos_version": macos_version,
         "darwin_kernel": platform.release(),
         "chip": chip,
+        "apple_silicon_generation": generation,
         "model_identifier": hardware.get("machine_model") or hardware.get("machine_name") or "",
         "cpu_cores": logical_cpu or physical_cpu,
         "physical_cpu_cores": physical_cpu,

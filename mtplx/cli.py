@@ -527,6 +527,7 @@ def cmd_hardware_public(args: argparse.Namespace) -> int:
         return 0
     print("MTPLX hardware inspect")
     print(f"chip: {payload.get('chip') or 'unknown'}")
+    print(f"Apple Silicon generation: {payload.get('apple_silicon_generation') or 'unknown'}")
     print(f"macOS: {payload.get('macos_version') or 'unknown'}")
     print(f"MLX: {payload.get('mlx_version') or 'not installed'}")
     print(f"Python: {payload.get('python_version')} ({payload.get('machine')})")
