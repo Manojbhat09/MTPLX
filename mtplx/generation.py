@@ -161,7 +161,13 @@ def _mtp_history_last_window_tokens() -> int:
 def _resolve_mtp_history_policy(requested_policy: str, prompt_tokens: int) -> str:
     requested = _normalize_mtp_history_policy(requested_policy)
     env_policy = os.environ.get("MTPLX_MTP_HISTORY_POLICY")
-    if env_policy and requested == "committed":
+    # Honor the env-var override whenever the caller requested either the
+    # default "committed" or the auto-resolution path. Previously this only
+    # fired when ``requested == "committed"``, which silently dropped the
+    # override in every server hot path that resolves to "auto" via the
+    # sustained profile (profiles.py:93). Sustained users could not opt
+    # out of the last_window flip without editing the profile.
+    if env_policy and requested in ("committed", "auto"):
         requested = _normalize_mtp_history_policy(env_policy)
     if requested != "auto":
         return requested
