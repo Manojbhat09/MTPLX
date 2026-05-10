@@ -4,7 +4,9 @@ import pytest
 
 from mtplx.default_models import (
     DEFAULT_MODEL_VARIANT_ENV,
+    QUALITY_MODEL_ENV,
     is_verified_default_model_ref,
+    optimized_quality_model_ref,
     select_default_model,
 )
 from mtplx import hardware as hardware_module
@@ -137,3 +139,14 @@ def test_verified_default_refs_include_bf16_and_fp16():
     assert is_verified_default_model_ref(DEFAULT_HF_MODEL_ID)
     assert is_verified_default_model_ref(DEFAULT_FP16_HF_MODEL_ID)
     assert not is_verified_default_model_ref("someone/custom-model")
+
+
+def test_optimized_quality_prefers_complete_local_env_model(tmp_path, monkeypatch):
+    local_quality = tmp_path / "Qwen3.6-27B-MTPLX-Optimized-Quality"
+    local_quality.mkdir()
+    (local_quality / "config.json").write_text("{}", encoding="utf-8")
+    (local_quality / "mtp.safetensors").write_bytes(b"mtp")
+    (local_quality / "model-00001-of-00001.safetensors").write_bytes(b"model")
+    monkeypatch.setenv(QUALITY_MODEL_ENV, str(local_quality))
+
+    assert optimized_quality_model_ref() == str(local_quality)

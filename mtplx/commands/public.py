@@ -31,7 +31,10 @@ from mtplx.benchmarks.validators.basic import (
 )
 from mtplx.constants import DEFAULT_RUNTIME_MODEL_DIR
 from mtplx.default_models import (
+    OPTIMIZED_QUALITY_DESCRIPTION,
+    is_optimized_quality_model_ref,
     is_verified_default_model_ref,
+    optimized_quality_model_ref,
     select_default_model,
 )
 from mtplx.env import collect_environment
@@ -61,12 +64,13 @@ from mtplx.profiles import (
     DEFAULT_MODEL_ID,
     DEFAULT_PROFILE_NAME,
     DEFAULT_PUBLIC_MODEL_ID,
+    QUALITY_PUBLIC_MODEL_ID,
     apply_profile_env,
     get_profile,
 )
 
 
-DEFAULT_CHAMPION = "models/Qwen3.6-27B-MTPLX-Flat4-CyanKiwiMTP"
+DEFAULT_CHAMPION = "models/Qwen3.6-27B-MTPLX-Optimized-Speed"
 QUICKSTART_SPEED_MIN_TOKENS = 64
 QUICKSTART_SPEED_MAX_TOKENS = 192
 QUICKSTART_SPEED_PROMPT = (
@@ -3156,6 +3160,12 @@ def cmd_serve_public(args: Any) -> int:
     depth_error = _validate_public_depth(args, printer=_print_serve_start_line)
     if depth_error is not None:
         return depth_error
+    early_model_id = getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
+    if early_model_id == DEFAULT_PUBLIC_MODEL_ID:
+        args.model_id = _public_model_id_for_ref(
+            str(getattr(args, "model", "")),
+            default_model_id=early_model_id,
+        )
     _print_serve_start_banner(args)
     if _port_is_busy(str(getattr(args, "host", "127.0.0.1")), int(getattr(args, "port", 8000))):
         if bool(getattr(args, "quickstart_pi", False)):
@@ -3291,6 +3301,10 @@ def cmd_serve_public(args: Any) -> int:
                 _print_serve_start_line("     (without --strict-fast-path, MTPLX starts in stock-MLX compatibility)")
                 return 2
             relax_mlx_fork_assert = True
+    model_id = getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
+    if model_id == DEFAULT_PUBLIC_MODEL_ID:
+        model_id = _public_model_id_for_ref(str(runtime_model), default_model_id=model_id)
+    args.model_id = model_id
     _print_serve_handoff(args, runtime_model, profile.name)
     cmd = [
         sys.executable,
@@ -3327,7 +3341,7 @@ def cmd_serve_public(args: Any) -> int:
         "--warmup-tokens",
         str(getattr(args, "warmup_tokens", 16)),
         "--model-id",
-        str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID),
+        str(model_id),
     ]
     if draft_sampler is not None:
         cmd.extend(
@@ -3963,13 +3977,17 @@ def _quickstart_choose_model(args: Any, *, target: str = "terminal") -> tuple[st
     selection = select_default_model()
     _quickstart_line("Choose a model:")
     _quickstart_line(f"  1. Use verified default for this Mac ({selection.label})")
-    _quickstart_line("  2. Choose a local model folder")
-    _quickstart_line(f"  3. Download verified default from Hugging Face ({selection.hf_model})")
+    quality_ref = optimized_quality_model_ref()
+    _quickstart_line(f"  2. Optimized Quality ({OPTIMIZED_QUALITY_DESCRIPTION})")
+    _quickstart_line("  3. Choose a local model folder")
+    _quickstart_line(f"  4. Download verified default from Hugging Face ({selection.hf_model})")
     choice = input("Select [1]: ").strip()
     if choice == "2":
+        return quality_ref, download
+    if choice == "3":
         chosen = input("Model folder: ").strip()
         return (chosen or model), False
-    if choice == "3":
+    if choice == "4":
         return selection.hf_model, True
     return model, download
 
@@ -4445,10 +4463,21 @@ def _quickstart_generate(
     }
 
 
+def _public_model_id_for_ref(model_ref: str, *, default_model_id: str) -> str:
+    if is_optimized_quality_model_ref(model_ref):
+        return QUALITY_PUBLIC_MODEL_ID
+    return default_model_id
+
+
 def _quickstart_openwebui_payload(args: Any) -> dict[str, Any]:
     host = str(getattr(args, "host", "127.0.0.1"))
     port = int(getattr(args, "port", 8000))
     model_id = str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID)
+    if model_id == DEFAULT_PUBLIC_MODEL_ID:
+        model_id = _public_model_id_for_ref(
+            str(getattr(args, "model", "")),
+            default_model_id=model_id,
+        )
     base = f"http://{_connect_host_for_bind(host)}:{port}"
     profile = str(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
     return {
@@ -4488,6 +4517,11 @@ def _quickstart_pi_payload(args: Any, *, write_config: bool = False) -> dict[str
     host = str(getattr(args, "host", "127.0.0.1"))
     port = int(getattr(args, "port", 8000))
     model_id = str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID)
+    if model_id == DEFAULT_PUBLIC_MODEL_ID:
+        model_id = _public_model_id_for_ref(
+            str(getattr(args, "model", "")),
+            default_model_id=model_id,
+        )
     base_url = f"http://{_connect_host_for_bind(host)}:{port}/v1"
     api_key = str(getattr(args, "api_key", None) or PI_LOCAL_API_KEY)
     provider = build_pi_provider_config(

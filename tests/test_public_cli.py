@@ -10,7 +10,7 @@ import pytest
 
 from mtplx.cli import build_parser, main
 from mtplx.commands import public
-from mtplx.profiles import DEFAULT_FP16_HF_MODEL_ID
+from mtplx.profiles import DEFAULT_FP16_HF_MODEL_ID, QUALITY_PUBLIC_MODEL_ID
 from mtplx.version import DISPLAY_VERSION, __version__
 
 
@@ -343,6 +343,15 @@ def test_start_explicit_model_bypasses_auto_default(monkeypatch, tmp_path, capsy
     assert code == 0
     assert payload["model"] == "local/custom"
     assert payload["default_model_selection"] is None
+
+
+def test_quality_model_ref_uses_quality_public_model_id():
+    value = public._public_model_id_for_ref(
+        "/tmp/Qwen3.6-27B-MTPLX-Optimized-Quality",
+        default_model_id="mtplx-qwen36-27b-optimized-speed",
+    )
+
+    assert value == QUALITY_PUBLIC_MODEL_ID
 
 
 def test_start_default_target_is_browser(monkeypatch, tmp_path):
@@ -1849,6 +1858,63 @@ def test_serve_dispatches_packaged_openai_server(monkeypatch, capsys):
     assert "--no-enable-thinking" in calls["cmd"]
     assert "--no-stats-footer" in calls["cmd"]
     assert "--strict-warmup" in calls["cmd"]
+
+
+def test_serve_uses_quality_public_model_id_for_quality_local_path(monkeypatch):
+    calls = {}
+    quality_path = "/tmp/Qwen3.6-27B-MTPLX-Optimized-Quality"
+
+    monkeypatch.setattr(
+        public,
+        "_resolve_runtime_model_path",
+        lambda model, cache_dir=None: (model, None),
+    )
+    monkeypatch.setattr(
+        public,
+        "_model_gate",
+        lambda model, unsafe_force_unverified=False, yes=False: (
+            {"compatibility": {"tier": "verified", "can_run": True, "exit_code": 0}},
+            None,
+        ),
+    )
+    monkeypatch.setattr(public, "_port_is_busy", lambda host, port: False)
+
+    def fake_execvpe(_executable, cmd, _env):
+        calls["cmd"] = cmd
+        raise SystemExit(0)
+
+    monkeypatch.setattr(public.os, "execvpe", fake_execvpe)
+    args = SimpleNamespace(
+        model=quality_path,
+        model_id="mtplx-qwen36-27b-optimized-speed",
+        cache_dir=None,
+        profile="sustained",
+        unsafe_force_unverified=False,
+        yes=True,
+        host="127.0.0.1",
+        port=8000,
+        depth=3,
+        no_mtp=False,
+        api_key=None,
+        rate_limit=0,
+        stream_interval=1,
+        max_response_tokens=None,
+        temperature=0.6,
+        top_p=0.95,
+        reasoning="off",
+        reasoning_parser="qwen3",
+        stats_footer=False,
+        warmup_tokens=0,
+        strict_warmup=False,
+        strict_fast_path=False,
+        max=False,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        public.cmd_serve_public(args)
+
+    assert exc.value.code == 0
+    assert calls["cmd"][calls["cmd"].index("--model-id") + 1] == QUALITY_PUBLIC_MODEL_ID
 
 
 def test_serve_uses_model_contract_depth_when_depth_not_explicit(monkeypatch):

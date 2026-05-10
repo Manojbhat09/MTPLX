@@ -26,7 +26,11 @@ from mtplx.constants import (
 )
 from mtplx.default_models import (
     DefaultModelSelection,
+    OPTIMIZED_QUALITY_DESCRIPTION,
+    OPTIMIZED_QUALITY_LABEL,
     is_verified_default_model_ref,
+    is_optimized_quality_model_ref,
+    optimized_quality_model_ref,
     select_default_model,
 )
 from mtplx.profiles import DEFAULT_HF_MODEL_ID
@@ -96,6 +100,16 @@ def _verified_default_model() -> str:
 
 def _verified_default_label() -> str:
     return _verified_default_selection().label
+
+
+def _optimized_quality_label() -> str:
+    return f"{OPTIMIZED_QUALITY_LABEL}  ·  {OPTIMIZED_QUALITY_DESCRIPTION}"
+
+
+def _model_display(value: str | Path | None) -> str:
+    if is_optimized_quality_model_ref(value):
+        return OPTIMIZED_QUALITY_LABEL
+    return _pretty_path(value)
 
 
 # ---------- state file ------------------------------------------------------
@@ -753,7 +767,7 @@ def _print_summary(
     title: str = "Ready to go",
     plain_heading: str = "Your quickstart configuration:",
 ) -> None:
-    model_display = _pretty_path(state.get("model")) or "?"
+    model_display = _model_display(state.get("model")) or "?"
     try:
         from rich.panel import Panel
         from rich.table import Table
@@ -809,7 +823,11 @@ def screen_model(*, configured: str | None = None) -> str:
 
     verified_default = _verified_default_model()
     verified_label = _verified_default_label()
-    show_configured = bool(configured) and not is_verified_default_model_ref(configured)
+    show_configured = (
+        bool(configured)
+        and not is_verified_default_model_ref(configured)
+        and not is_optimized_quality_model_ref(configured)
+    )
 
     options: list[tuple[str, str, str]] = []
     if show_configured:
@@ -830,13 +848,20 @@ def screen_model(*, configured: str | None = None) -> str:
         options.append(
             (
                 "3",
+                "Optimized Quality",
+                _optimized_quality_label(),
+            )
+        )
+        options.append(
+            (
+                "4",
                 "Custom Hugging Face repo",
                 "e.g. Qwen/Qwen3-Next-80B-A3B-Instruct",
             )
         )
         options.append(
             (
-                "4",
+                "5",
                 "Local folder",
                 "e.g. ~/models/your-model  ·  or a parent like ~/.lmstudio/models",
             )
@@ -852,13 +877,20 @@ def screen_model(*, configured: str | None = None) -> str:
         options.append(
             (
                 "2",
+                "Optimized Quality",
+                _optimized_quality_label(),
+            )
+        )
+        options.append(
+            (
+                "3",
                 "Custom Hugging Face repo",
                 "e.g. Qwen/Qwen3-Next-80B-A3B-Instruct",
             )
         )
         options.append(
             (
-                "3",
+                "4",
                 "Local folder",
                 "e.g. ~/models/your-model  ·  or a parent like ~/.lmstudio/models",
             )
@@ -874,15 +906,19 @@ def screen_model(*, configured: str | None = None) -> str:
         if choice == "2":
             return verified_default
         if choice == "3":
+            return optimized_quality_model_ref()
+        if choice == "4":
             return _prompt_hf_repo_id(default=verified_default)
-        # choice == "4"
+        # choice == "5"
         return _pick_local_model(default=str(configured))
 
     if choice == "1":
         return verified_default
     if choice == "2":
+        return optimized_quality_model_ref()
+    if choice == "3":
         return _prompt_hf_repo_id(default=verified_default)
-    # choice == "3"
+    # choice == "4"
     return _pick_local_model(default=None)
 
 
@@ -1328,7 +1364,7 @@ def _normalize_quickstart_state(last: dict) -> dict:
 def confirm_same_as_last(last: dict) -> bool:
     """Ask the user whether to reuse the last configuration."""
 
-    model_display = _pretty_path(last.get("model")) or "?"
+    model_display = _model_display(last.get("model")) or "?"
     try:
         from rich.panel import Panel
         from rich.table import Table

@@ -9,13 +9,25 @@ from typing import Any, Mapping
 
 from mtplx.constants import DEFAULT_RUNTIME_MODEL_DIR
 from mtplx.hardware import classify_apple_silicon_generation, detect_apple_silicon
-from mtplx.profiles import DEFAULT_FP16_HF_MODEL_ID, DEFAULT_HF_MODEL_ID, DEFAULT_MODEL_ID
+from mtplx.profiles import (
+    DEFAULT_FP16_HF_MODEL_ID,
+    DEFAULT_HF_MODEL_ID,
+    DEFAULT_MODEL_ID,
+    QUALITY_HF_MODEL_ID,
+)
 
 
 DEFAULT_MODEL_VARIANT_ENV = "MTPLX_DEFAULT_MODEL_VARIANT"
+QUALITY_MODEL_ENV = "MTPLX_OPTIMIZED_QUALITY_MODEL"
 DEFAULT_MODEL_VARIANTS = frozenset({"auto", "bf16", "fp16"})
 _LEGACY_APPLE_FP16_GENERATIONS = frozenset({"m1", "m2"})
 _NEWER_APPLE_BF16_GENERATIONS = frozenset({"m3", "m4", "m5"})
+OPTIMIZED_QUALITY_LABEL = "Qwen3.6 27B MTPLX Optimized Quality"
+OPTIMIZED_QUALITY_DESCRIPTION = "Flat8 target with INT8 MTP sidecar"
+_OPTIMIZED_QUALITY_LOCAL_CANDIDATES = (
+    "~/Documents/MTPLX/hf-staging/Qwen3.6-27B-MTPLX-Optimized-Quality",
+    "~/.mtplx/models/Youssofal--Qwen3.6-27B-MTPLX-Optimized-Quality",
+)
 
 
 @dataclass(frozen=True)
@@ -57,6 +69,43 @@ class DefaultModelSelection:
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def _is_complete_local_model(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    if (
+        (path / "mtplx_pair.json").is_file()
+        and (path / "target").is_dir()
+        and (path / "assistant").is_dir()
+    ):
+        return True
+    if not (path / "config.json").is_file():
+        return False
+    has_weights = any(path.glob("model-*.safetensors")) or (path / "model.safetensors").is_file()
+    has_mtp = (path / "mtp.safetensors").is_file()
+    return has_weights and has_mtp
+
+
+def optimized_quality_model_ref() -> str:
+    env_ref = str(os.environ.get(QUALITY_MODEL_ENV) or "").strip()
+    candidates = (env_ref, *_OPTIMIZED_QUALITY_LOCAL_CANDIDATES) if env_ref else _OPTIMIZED_QUALITY_LOCAL_CANDIDATES
+    for candidate in candidates:
+        path = Path(candidate).expanduser()
+        if _is_complete_local_model(path):
+            return str(path)
+    return QUALITY_HF_MODEL_ID
+
+
+def is_optimized_quality_model_ref(model: str | Path | None) -> bool:
+    if model is None:
+        return False
+    text = str(model).strip()
+    if not text:
+        return False
+    if text == QUALITY_HF_MODEL_ID:
+        return True
+    return "qwen3.6-27b-mtplx-optimized-quality" in text.lower()
 
 
 def _normalize_variant(value: str | None) -> tuple[str, str | None]:

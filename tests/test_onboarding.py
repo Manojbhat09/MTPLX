@@ -447,19 +447,39 @@ def test_screen_model_picks_hardware_default_when_configured_offered(monkeypatch
     assert chosen == DEFAULT_FP16_HF_MODEL_ID
 
 
-def test_screen_model_no_configured_uses_three_options(monkeypatch):
-    """Without a configured path, the screen falls back to the original 3
-    options and option 1 maps to the canonical HF default."""
+def test_screen_model_no_configured_uses_default_first(monkeypatch):
+    """Without a configured path, option 1 maps to the hardware default."""
     answers = iter(["1"])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
     chosen = onboarding.screen_model(configured=None)
     assert chosen == onboarding.DEFAULT_HF_MODEL
 
 
+def test_screen_model_optimized_quality_prefers_local_model(tmp_path, monkeypatch, capsys):
+    from mtplx import default_models
+
+    local_quality = tmp_path / "Qwen3.6-27B-MTPLX-Optimized-Quality"
+    local_quality.mkdir()
+    (local_quality / "config.json").write_text("{}", encoding="utf-8")
+    (local_quality / "mtp.safetensors").write_bytes(b"mtp")
+    (local_quality / "model-00001-of-00001.safetensors").write_bytes(b"model")
+    monkeypatch.setenv(default_models.QUALITY_MODEL_ENV, str(local_quality))
+
+    answers = iter(["2"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+
+    chosen = onboarding.screen_model(configured=None)
+
+    captured = capsys.readouterr().out
+    assert chosen == str(local_quality)
+    assert "Optimized Quality" in captured
+    assert str(local_quality) not in captured
+
+
 def test_custom_hf_repo_rejects_pasted_terminal_output(monkeypatch, capsys):
     answers = iter(
         [
-            "2",
+            "3",
             "Last login: Mon May  4 00:55:41 on ttys000",
             "trevon/Qwen3.5-27B-MLX-MTP",
         ]
@@ -476,7 +496,7 @@ def test_custom_hf_repo_rejects_pasted_terminal_output(monkeypatch, capsys):
 def test_custom_hf_repo_blank_after_invalid_does_not_accept_default(monkeypatch, capsys):
     answers = iter(
         [
-            "2",
+            "3",
             "Last login: Mon May  4 00:55:41 on ttys000",
             "",
             "trevon/Qwen3.5-27B-MLX-MTP",
@@ -494,7 +514,7 @@ def test_custom_hf_repo_blank_after_invalid_does_not_accept_default(monkeypatch,
 def test_custom_hf_repo_accepts_huggingface_url(monkeypatch):
     answers = iter(
         [
-            "2",
+            "3",
             "https://huggingface.co/trevon/Qwen3.5-27B-MLX-MTP/tree/main",
         ]
     )
@@ -873,7 +893,7 @@ def test_screen_model_local_folder_routes_through_picker(tmp_path, monkeypatch):
         return str(target)
 
     monkeypatch.setattr(onboarding, "_pick_local_model", fake_picker)
-    monkeypatch.setattr(builtins, "input", lambda _prompt="": "3")
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "4")
 
     chosen = onboarding.screen_model(configured=None)
 
