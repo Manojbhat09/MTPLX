@@ -2397,6 +2397,10 @@ PUBLIC_POSTCOMMIT_KEYS = (
     "nbytes",
     "elapsed_s",
     "history_suffix_tokens",
+    "cache_hit",
+    "cached_tokens",
+    "suffix_tokens",
+    "cache_miss_reason",
     "error",
 )
 

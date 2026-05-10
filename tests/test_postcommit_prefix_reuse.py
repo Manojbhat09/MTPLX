@@ -241,3 +241,31 @@ def test_postcommit_cache_miss_reason_records_miss(monkeypatch):
     assert result["stored"] is True
     assert result["cache_hit"] is False
     assert result["cache_miss_reason"] == "prefix_divergence_at_token"
+
+
+def test_public_stats_include_postcommit_cache_observability():
+    """The API-visible stats must not hide the prefix-reuse fields."""
+    public = openai._public_mtplx_stats(
+        {
+            "stats": {
+                "session_postcommit_snapshot": {
+                    "stored": True,
+                    "mode": "retokenized_history",
+                    "cache_hit": True,
+                    "cached_tokens": 20_594,
+                    "suffix_tokens": 122,
+                    "cache_miss_reason": None,
+                    "token_hash": "internal-only",
+                }
+            }
+        }
+    )
+
+    assert public["session_postcommit_snapshot"] == {
+        "stored": True,
+        "mode": "retokenized_history",
+        "cache_hit": True,
+        "cached_tokens": 20_594,
+        "suffix_tokens": 122,
+        "cache_miss_reason": None,
+    }
