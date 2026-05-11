@@ -4,6 +4,31 @@ All notable user-facing changes are recorded here.
 
 ## Unreleased
 
+## v0.3.2
+
+### Added
+
+- Added first-class OpenCode Desktop integration to `mtplx start`, including
+  OpenAI-compatible provider config generation, the `reasoning_content`
+  interleaved reasoning field, tool-call support metadata, long chunk timeout,
+  and no hidden server-side max-token cap.
+- Added `mtplx doctor opencode` diagnostics for the OpenCode config, provider
+  payload, server health, and reasoning/tool-call compatibility surface.
+
+### Changed
+
+- Forced raw reasoning streaming for the OpenCode target so reasoning tokens are
+  emitted through `reasoning_content` instead of only summarized assistant text.
+- Restored the Sustained prefill default to 2048-token chunks for both dense and
+  repage paths. Local release QA showed this is the safer user-facing default
+  for OpenCode/Pi-style long-context sessions, with bounded memory and better
+  representative TTFT behavior than the 4096 split.
+
+### Fixed
+
+- Fixed OpenCode serving ergonomics around schema-aware tool prompting,
+  malformed tool-call fallback, and SessionBank/OpenCode prefix reuse telemetry.
+
 ## v0.3.1
 
 ### Fixed
