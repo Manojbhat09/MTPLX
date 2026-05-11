@@ -1098,6 +1098,8 @@ def test_quickstart_pi_dry_run_json(monkeypatch, tmp_path, capsys):
     assert payload["pi"]["provider"]["compat"]["supportsDeveloperRole"] is False
     assert payload["pi"]["provider"]["compat"]["supportsReasoningEffort"] is False
     assert payload["pi"]["provider"]["compat"]["maxTokensField"] == "max_tokens"
+    assert payload["pi"]["no_hidden_max_tokens"] is True
+    assert "maxTokens" not in json.dumps(payload["pi"]["provider"]["models"])
     assert "--api-key mtplx-local" in payload["pi"]["server_command"]
 
 
@@ -1158,6 +1160,8 @@ def test_pi_models_config_merge_preserves_other_providers(tmp_path):
     assert payload["providers"]["other"]["models"][0]["id"] == "other-model"
     assert payload["providers"]["mtplx"]["baseUrl"] == "http://127.0.0.1:18012/v1"
     assert payload["providers"]["mtplx"]["models"][0]["id"] == "mtplx-test-model"
+    assert "maxTokens" not in payload["providers"]["mtplx"]["models"][0]
+    assert result["no_hidden_max_tokens"] is True
 
 
 def test_start_pi_handoff_writes_config_and_starts_authenticated_server(

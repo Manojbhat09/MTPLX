@@ -4799,6 +4799,9 @@ def _quickstart_pi_payload(args: Any, *, write_config: bool = False) -> dict[str
         "api_key": api_key,
         "config_path": str(pi_models_json_path()),
         "provider": provider,
+        "no_hidden_max_tokens": "maxTokens" not in json.dumps(
+            provider.get("models", [])
+        ),
         "launch_command": pi_launch_command(model_id),
         "server_console": True,
         "server_controls": [

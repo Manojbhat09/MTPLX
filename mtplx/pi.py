@@ -19,7 +19,7 @@ PI_PROVIDER_ID = "mtplx"
 PI_LOCAL_API_KEY = "mtplx-local"
 PI_NPM_PACKAGE = "@earendil-works/pi-coding-agent"
 PI_DEFAULT_CONTEXT_WINDOW = 131_072
-PI_DEFAULT_MAX_TOKENS = 4096
+PI_DEFAULT_MAX_TOKENS: int | None = None
 
 
 def pi_install_command() -> str:
@@ -92,7 +92,7 @@ def build_pi_provider_config(
     model_name: str | None = None,
     api_key: str = PI_LOCAL_API_KEY,
     context_window: int = PI_DEFAULT_CONTEXT_WINDOW,
-    max_tokens: int = PI_DEFAULT_MAX_TOKENS,
+    max_tokens: int | None = PI_DEFAULT_MAX_TOKENS,
 ) -> dict[str, Any]:
     """Build the Pi provider block MTPLX needs.
 
@@ -101,6 +101,22 @@ def build_pi_provider_config(
     ``system`` instead of ``developer`` and ``max_tokens`` instead of the newer
     OpenAI field.
     """
+
+    model_config: dict[str, Any] = {
+        "id": str(model_id),
+        "name": model_name or f"MTPLX {model_id}",
+        "reasoning": False,
+        "input": ["text"],
+        "contextWindow": int(context_window),
+        "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+        },
+    }
+    if max_tokens is not None:
+        model_config["maxTokens"] = int(max_tokens)
 
     return {
         "baseUrl": str(base_url).rstrip("/"),
@@ -112,22 +128,7 @@ def build_pi_provider_config(
             "supportsReasoningEffort": False,
             "maxTokensField": "max_tokens",
         },
-        "models": [
-            {
-                "id": str(model_id),
-                "name": model_name or f"MTPLX {model_id}",
-                "reasoning": False,
-                "input": ["text"],
-                "contextWindow": int(context_window),
-                "maxTokens": int(max_tokens),
-                "cost": {
-                    "input": 0,
-                    "output": 0,
-                    "cacheRead": 0,
-                    "cacheWrite": 0,
-                },
-            }
-        ],
+        "models": [model_config],
     }
 
 
@@ -174,7 +175,7 @@ def write_pi_models_config(
     path: str | Path | None = None,
     provider_id: str = PI_PROVIDER_ID,
     context_window: int = PI_DEFAULT_CONTEXT_WINDOW,
-    max_tokens: int = PI_DEFAULT_MAX_TOKENS,
+    max_tokens: int | None = PI_DEFAULT_MAX_TOKENS,
 ) -> dict[str, Any]:
     """Write the MTPLX provider into Pi's config and return a handoff payload."""
 
@@ -218,6 +219,7 @@ def write_pi_models_config(
         "launch_command": pi_launch_command(model_id, provider_id=provider_id),
         "api_key": api_key,
         "context_window": int(context_window),
-        "max_tokens": int(max_tokens),
+        "max_tokens": None if max_tokens is None else int(max_tokens),
+        "no_hidden_max_tokens": max_tokens is None,
         "written": True,
     }
