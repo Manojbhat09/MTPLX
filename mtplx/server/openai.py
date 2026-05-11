@@ -466,6 +466,28 @@ def _open_pi_later(command: str, *, model_id: str, delay_s: float = 1.0) -> None
     timer.start()
 
 
+def _open_opencode_later(*, delay_s: float = 1.0) -> None:
+    def open_opencode() -> None:
+        try:
+            from mtplx.opencode import launch_opencode_app
+
+            result = launch_opencode_app()
+            if result.get("ok"):
+                _startup_line("OpenCode Desktop opened.")
+            else:
+                _startup_line(
+                    f"warning: could not open OpenCode automatically: {result.get('error')}"
+                )
+                _startup_line("open OpenCode manually and select the MTPLX model.")
+        except Exception as exc:
+            _startup_line(f"warning: could not open OpenCode automatically: {exc}")
+            _startup_line("open OpenCode manually and select the MTPLX model.")
+
+    timer = Timer(delay_s, open_opencode)
+    timer.daemon = True
+    timer.start()
+
+
 def _server_console_enabled(state: Any) -> bool:
     return bool(getattr(getattr(state, "args", None), "server_console", False))
 
@@ -1380,15 +1402,94 @@ def _tool_names(tools: list[dict[str, Any]] | None) -> list[str]:
     return [name for tool in (tools or []) if (name := _tool_spec_name(tool))]
 
 
+def _tool_json_schema(tool: dict[str, Any]) -> dict[str, Any]:
+    function = tool.get("function")
+    source = function if isinstance(function, dict) else tool
+    parameters = source.get("parameters") if isinstance(source, dict) else None
+    return parameters if isinstance(parameters, dict) else {}
+
+
+def _schema_type_label(schema: Any) -> str:
+    if not isinstance(schema, dict):
+        return "any"
+    if isinstance(schema.get("enum"), list) and schema["enum"]:
+        values = [str(value) for value in schema["enum"][:4]]
+        suffix = "|..." if len(schema["enum"]) > 4 else ""
+        return "|".join(values) + suffix
+    for key in ("anyOf", "oneOf"):
+        variants = schema.get(key)
+        if isinstance(variants, list) and variants:
+            labels = [_schema_type_label(item) for item in variants[:3]]
+            return "|".join(label for label in labels if label) or "any"
+    raw_type = schema.get("type")
+    if isinstance(raw_type, list):
+        raw_type = next((item for item in raw_type if item != "null"), raw_type[0])
+    if raw_type == "array":
+        items = schema.get("items")
+        return f"{_schema_type_label(items)}[]"
+    if raw_type == "object":
+        return "object"
+    if isinstance(raw_type, str) and raw_type:
+        return raw_type
+    return "any"
+
+
+def _tool_signature(tool: dict[str, Any]) -> str | None:
+    name = _tool_spec_name(tool)
+    if not name:
+        return None
+    schema = _tool_json_schema(tool)
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return f"{name}()"
+    required = schema.get("required")
+    required_names = [str(item) for item in required] if isinstance(required, list) else []
+    ordered_names: list[str] = []
+    for prop in required_names:
+        if prop in properties and prop not in ordered_names:
+            ordered_names.append(prop)
+    for prop in properties:
+        if prop not in ordered_names:
+            ordered_names.append(str(prop))
+    parts: list[str] = []
+    for prop in ordered_names[:8]:
+        prop_schema = properties.get(prop)
+        optional = "" if prop in required_names else "?"
+        parts.append(f"{prop}{optional}:{_schema_type_label(prop_schema)}")
+    if len(ordered_names) > 8:
+        parts.append("...")
+    return f"{name}({', '.join(parts)})"
+
+
+def _tool_call_example(tools: list[dict[str, Any]]) -> tuple[str, str]:
+    if not tools:
+        return "tool_name", "{}"
+    tool = tools[0]
+    name = _tool_spec_name(tool) or "tool_name"
+    schema = _tool_json_schema(tool)
+    properties = schema.get("properties")
+    required = schema.get("required")
+    args: dict[str, str] = {}
+    if isinstance(properties, dict):
+        required_names = [str(item) for item in required] if isinstance(required, list) else []
+        for prop in (required_names or list(properties))[:3]:
+            if prop in properties:
+                label = _schema_type_label(properties.get(prop))
+                args[prop] = f"<{label}>"
+    return name, json.dumps(args, separators=(",", ":"))
+
+
 def _mtplx_tool_contract_text(tools: list[dict[str, Any]]) -> str:
-    names = _tool_names(tools)
-    allowed = ", ".join(names) if names else "(none)"
-    example = names[0] if names else "tool_name"
+    signatures = [signature for tool in tools if (signature := _tool_signature(tool))]
+    allowed = "; ".join(signatures) if signatures else "(none)"
+    example_name, example_args = _tool_call_example(tools)
+    if len(allowed) > 1200:
+        allowed = allowed[:1197].rstrip() + "..."
     return (
-        f"{_MTPLX_TOOL_CONTRACT_SENTINEL} use only declared tools: {allowed}. "
-        "For a tool call emit exactly "
-        f'<tool_call>{{"name":"{example}","arguments":{{...}}}}</tool_call>. '
-        "Never invent tool names or emit undeclared Agent/task/Explore tools. "
+        f"{_MTPLX_TOOL_CONTRACT_SENTINEL} declared tools and schemas: {allowed}. "
+        "Call only these exact tool names and exact argument keys/case. "
+        f'Emit one tool call as <tool_call>{{"name":"{example_name}","arguments":{example_args}}}</tool_call>. '
+        "Never invent Agent/task/Explore or any undeclared tool. "
         "If no declared tool applies, answer normally."
     )
 
@@ -2051,11 +2152,13 @@ def _sentinel_next_turn_start(
         return None
     role = sentinel_role
     role_title = role[:1].upper() + role[1:]
-    markers = [
+    strict_markers = [
         f"<|im_start|>{role}\n",
         f"<|im_start|>{role}\r\n",
         f"<|start_header_id|>{role}<|end_header_id|>\n\n",
         f"\n### {role_title}:\n",
+    ]
+    loose_markers = [
         f"\n{role}:",
         f"\n{role_title}:",
         f"{role}:",
@@ -2063,8 +2166,24 @@ def _sentinel_next_turn_start(
     ]
     candidates = [
         idx
-        for marker in markers
+        for marker in strict_markers
         if (idx := rendered.rfind(marker, 0, sentinel_at)) >= 0
+    ]
+    if candidates:
+        return max(candidates)
+
+    # Loose "tool:" / "User:" style markers are fallback support for simple
+    # templates only. With OpenCode/Qwen tool schemas, the rendered prompt can
+    # contain words like "tool:" thousands of characters before the synthetic
+    # sentinel. Treating those as a chat boundary stores a short unreachable
+    # SessionBank prefix and forces the next tool-result request to cold
+    # prefill. Only accept loose markers that are close to the sentinel.
+    loose_lookback_chars = 1024
+    window_start = max(0, sentinel_at - loose_lookback_chars)
+    candidates = [
+        idx
+        for marker in loose_markers
+        if (idx := rendered.rfind(marker, window_start, sentinel_at)) >= 0
     ]
     if not candidates:
         return None
@@ -2559,6 +2678,8 @@ PUBLIC_MTPLX_STATS_KEYS = (
     "tool_parse_fallback",
     "tool_parse_fallback_reason",
     "tool_parse_fallback_kind",
+    "request_session_source",
+    "request_session_prefix_diagnostic",
 )
 PUBLIC_POSTCOMMIT_KEYS = (
     "stored",
@@ -2785,6 +2906,8 @@ def _store_retokenized_history_snapshot(
     policy_fingerprint: str,
     acquire_model_lock_blocking: bool = True,
     tool_specs: list[dict[str, Any]] | None = None,
+    session: Any | None = None,
+    expected_session_revision: int | None = None,
 ) -> dict[str, Any]:
     if session_id is None:
         return {"stored": False, "reason": "no_session_id"}
@@ -2868,6 +2991,25 @@ def _store_retokenized_history_snapshot(
             "reason": "sessionbank_snapshot_skipped",
             "elapsed_s": time.perf_counter() - started,
         }
+    session_commit: dict[str, Any] | None = None
+    if session is not None:
+        try:
+            commit = session.commit_retokenized_prefix(
+                token_ids=history_ids,
+                expected_revision=expected_session_revision,
+                nbytes=int(entry.nbytes),
+            )
+            session_commit = {
+                "committed": bool(commit.committed),
+                "reason": commit.reason,
+                "prefix_len": int(commit.prefix_len),
+            }
+        except BaseException as exc:
+            session_commit = {
+                "committed": False,
+                "reason": f"session_commit_error:{type(exc).__name__}",
+                "prefix_len": int(getattr(session, "prefix_len", 0) or 0),
+            }
     return {
         "stored": True,
         "mode": "retokenized_history",
@@ -2887,6 +3029,7 @@ def _store_retokenized_history_snapshot(
         "cached_tokens": int(getattr(prompt_state, "cached_tokens", 0) or 0),
         "suffix_tokens": int(getattr(prompt_state, "suffix_tokens", 0) or 0),
         "cache_miss_reason": getattr(prompt_state, "cache_miss_reason", None),
+        "session_commit": session_commit,
     }
 
 
@@ -3210,6 +3353,8 @@ def _schedule_idle_postcommit_snapshot(
                     policy_fingerprint=policy_fingerprint,
                     acquire_model_lock_blocking=False,
                     tool_specs=tool_specs,
+                    session=session,
+                    expected_session_revision=expected_session_revision,
                 )
                 if postcommit.get("stored"):
                     _log(postcommit)
@@ -5938,6 +6083,9 @@ def create_app(state: ServerState) -> FastAPI:
             request_generation_mode=request_generation_mode,
             request_depth=request_depth,
         )
+        prefix_diagnostic = getattr(state.sessions, "last_prefix_diagnostic", None)
+        if isinstance(prefix_diagnostic, dict):
+            request_observability["request_session_prefix_diagnostic"] = prefix_diagnostic
         model = request.model or state.model_id
         response_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
@@ -6464,24 +6612,21 @@ def create_app(state: ServerState) -> FastAPI:
                     # prefill. tool_call markup itself is captured in
                     # tool_stream and not in history_content_chunks, so
                     # this is safe to return for the tool-call case too.
-                    reasoning = (
-                        "".join(history_reasoning_chunks)
-                        .replace(THINK_OPEN, "")
-                        .replace(THINK_CLOSE, "")
-                        .strip()
-                    )
+                    #
+                    # Deliberately DO NOT fold reasoning_content back into
+                    # assistant content. OpenAI-compatible clients such as
+                    # OpenCode render `reasoning_content` separately and do
+                    # not echo it as normal assistant `content` on the next
+                    # request. Storing it here creates a SessionBank prefix
+                    # the next turn can never match, which forces full cold
+                    # prefill in multi-turn tool sessions.
                     content = (
                         "".join(history_content_chunks)
                         .replace(THINK_OPEN, "")
                         .replace(THINK_CLOSE, "")
                         .strip()
                     )
-                    pieces: list[str] = []
-                    if reasoning:
-                        pieces.append(f"{THINK_OPEN}\n{reasoning}\n{THINK_CLOSE}")
-                    if content:
-                        pieces.append(content)
-                    return "\n\n".join(pieces)
+                    return content
 
                 for field, text in splitter.start():
                     if text:
@@ -6621,10 +6766,33 @@ def create_app(state: ServerState) -> FastAPI:
                                     release = (
                                         commit_item
                                         if isinstance(commit_item, dict)
-                                        else {"generated": generated, "postcommit": {}}
+                                        else {
+                                            "generated": generated,
+                                            "postcommit": {},
+                                        }
                                     )
                                     generated = release.get("generated") or generated
                                     postcommit = release.get("postcommit") or {}
+                                    if assistant_tool_calls:
+                                        prompt_prefix_commit = session.commit_prompt_prefix(
+                                            prompt_ids=prompt_ids,
+                                            finish_reason=str(
+                                                generated.get("finish_reason")
+                                                or "tool_calls"
+                                            ),
+                                            boundary_kind="tool_call_prompt_prefix",
+                                        )
+                                        generated["stats"][
+                                            "session_prompt_prefix_commit"
+                                        ] = {
+                                            "committed": bool(
+                                                prompt_prefix_commit.committed
+                                            ),
+                                            "reason": prompt_prefix_commit.reason,
+                                            "prefix_len": int(
+                                                prompt_prefix_commit.prefix_len
+                                            ),
+                                        }
                                     generated["stats"][
                                         "session_postcommit_snapshot"
                                     ] = _schedule_idle_postcommit_snapshot(
@@ -6636,9 +6804,12 @@ def create_app(state: ServerState) -> FastAPI:
                                         thinking_enabled=thinking_enabled,
                                         policy_fingerprint=policy_fingerprint,
                                         unsafe_reason=str(
-                                            postcommit.get("reason") or "unsafe_history"
+                                            postcommit.get("reason")
+                                            or "unsafe_history"
                                         ),
-                                        tool_specs=tool_specs if tools_active else None,
+                                        tool_specs=(
+                                            tool_specs if tools_active else None
+                                        ),
                                         session=session,
                                         expected_session_revision=getattr(
                                             session, "revision", None
@@ -7180,6 +7351,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Open Pi in Terminal after the MTPLX server is ready.",
     )
     parser.add_argument(
+        "--launch-opencode",
+        action="store_true",
+        help="Open OpenCode Desktop after the MTPLX server is ready.",
+    )
+    parser.add_argument(
         "--server-console",
         action="store_true",
         help="Accept live server-control commands such as /reasoning and /mtp on stdin.",
@@ -7250,6 +7426,9 @@ def main(argv: list[str] | None = None) -> None:
             _open_pi_later(command, model_id=str(args.model_id))
         else:
             _startup_line("warning: --launch-pi was set but no Pi command was provided.")
+    if args.launch_opencode:
+        _startup_line("Opening OpenCode Desktop...")
+        _open_opencode_later()
     uvicorn.run(
         app, host=args.host, port=args.port, log_level="warning", access_log=False
     )

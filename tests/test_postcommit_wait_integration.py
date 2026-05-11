@@ -15,12 +15,12 @@ from __future__ import annotations
 
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
 
-from mtplx.engine_session import EngineSession
+from mtplx.engine_session import EngineSession, EngineSessionManager
 from mtplx.server import openai
 
 
@@ -88,6 +88,100 @@ def test_scheduling_stashes_future_on_session(monkeypatch: pytest.MonkeyPatch) -
     assert session.pending_postcommit is None
 
     state.generation_executor.shutdown(wait=True)
+
+
+def test_tool_call_prompt_prefix_anchors_next_waiter() -> None:
+    """Streaming tool calls publish the prompt prefix before async postcommit.
+
+    The structured assistant/tool history is retokenized in the idle
+    postcommit lane, but the immediate tool-result request must still resolve
+    to the same session so it can wait for that pending work.
+    """
+    session = EngineSession("sess-tool")
+
+    commit = session.commit_prompt_prefix(
+        prompt_ids=[1, 2, 3, 4],
+        finish_reason="tool_calls",
+        boundary_kind="tool_call_prompt_prefix",
+    )
+
+    assert commit.committed is True
+    assert commit.reason == "committed_prompt_prefix"
+    assert session.committed_token_ids == (1, 2, 3, 4)
+    assert session.last_finish_reason == "tool_calls"
+    assert session.revision == 1
+    assert session.boundaries[-1].kind == "tool_call_prompt_prefix"
+
+
+def test_tool_call_prompt_prefix_does_not_rewind_session() -> None:
+    session = EngineSession("sess-tool")
+    session.commit_prompt_prefix(prompt_ids=[1, 2, 3, 4], finish_reason="tool_calls")
+
+    commit = session.commit_prompt_prefix(
+        prompt_ids=[1, 2],
+        finish_reason="tool_calls",
+    )
+
+    assert commit.committed is False
+    assert commit.reason == "prompt_prefix_older_than_session"
+    assert session.committed_token_ids == (1, 2, 3, 4)
+    assert session.revision == 1
+
+
+def test_pending_near_prefix_resolves_tool_result_waiter() -> None:
+    manager = EngineSessionManager()
+    session = manager.get_or_create("sess-tool")
+    session.commit_prompt_prefix(
+        prompt_ids=[1, 2, 3, 4],
+        finish_reason="tool_calls",
+        boundary_kind="tool_call_prompt_prefix",
+    )
+    future: Future = Future()
+    session.set_pending_postcommit(future)
+
+    session_id, source = manager.resolve_session_id(prompt_ids=[1, 2, 3, 99, 100])
+
+    assert session_id == "sess-tool"
+    assert source == "pending_postcommit_near_prefix"
+    assert manager.last_prefix_diagnostic is not None
+    assert manager.last_prefix_diagnostic["reason"] == "pending_postcommit_near_prefix_match"
+    assert manager.last_prefix_diagnostic["near_prefix_gap"] == 1
+
+    future.set_result(None)
+    session.wait_for_pending_postcommit(timeout_s=1.0)
+
+
+def test_retokenized_prefix_replaces_prompt_anchor_boundary() -> None:
+    session = EngineSession("sess-tool")
+    session.commit_prompt_prefix(prompt_ids=[1, 2, 3, 4], finish_reason="tool_calls")
+
+    commit = session.commit_retokenized_prefix(
+        token_ids=[1, 2, 3, 99, 100],
+        expected_revision=1,
+        nbytes=123,
+    )
+
+    assert commit.committed is True
+    assert commit.reason == "committed_retokenized_prefix"
+    assert session.committed_token_ids == (1, 2, 3, 99, 100)
+    assert session.prefix_len == 5
+    assert session.bytes_estimate == 123
+    assert session.revision == 2
+
+
+def test_retokenized_prefix_does_not_rewind_prompt_anchor() -> None:
+    session = EngineSession("sess-tool")
+    session.commit_prompt_prefix(prompt_ids=[1, 2, 3, 4], finish_reason="tool_calls")
+
+    commit = session.commit_retokenized_prefix(
+        token_ids=[1, 2, 3],
+        expected_revision=1,
+    )
+
+    assert commit.committed is False
+    assert commit.reason == "retokenized_prefix_older_than_session"
+    assert session.committed_token_ids == (1, 2, 3, 4)
+    assert session.revision == 1
 
 
 def test_wait_times_out_when_postcommit_hangs(monkeypatch: pytest.MonkeyPatch) -> None:

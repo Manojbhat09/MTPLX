@@ -747,7 +747,7 @@ def _print_welcome() -> None:
     body.append("Three quick questions to get you set up:\n", style="")
     body.append("  1. Which model?\n", style="dim")
     body.append("  2. Which runtime mode?\n", style="dim")
-    body.append("  3. Browser chat, terminal chat, or Pi?\n\n", style="dim")
+    body.append("  3. Browser chat, terminal chat, Pi, or OpenCode?\n\n", style="dim")
     body.append("For each step, type the number of your choice and press Enter.", style="italic")
     panel = Panel(
         body,
@@ -1080,7 +1080,7 @@ def screen_mode() -> tuple[str, bool]:
 
 
 def screen_interface() -> str:
-    """Return the target string (``openwebui``, ``terminal``, or ``pi``)."""
+    """Return the target string (``openwebui``, ``terminal``, ``pi``, or ``opencode``)."""
 
     _step_panel(
         step=3,
@@ -1102,14 +1102,21 @@ def screen_interface() -> str:
                 "Connect to Pi [coding agent]",
                 "Writes Pi's MTPLX model config and starts the local OpenAI-compatible server.",
             ),
+            (
+                "4",
+                "Connect to OpenCode Desktop [coding agent]",
+                "Writes OpenCode's MTPLX provider config with raw reasoning and starts the server.",
+            ),
         ],
     )
-    choice = _prompt_choice("Select", ["1", "2", "3"], default="1")
+    choice = _prompt_choice("Select", ["1", "2", "3", "4"], default="1")
     if choice == "1":
         return "openwebui"
     if choice == "2":
         return "terminal"
-    return "pi"
+    if choice == "3":
+        return "pi"
+    return "opencode"
 
 
 def screen_server_surface(
@@ -1340,7 +1347,18 @@ def _quickstart_state_is_reusable(last: dict) -> bool:
         return False
     if profile not in {"performance-cold", "sustained"}:
         return False
-    if target not in {"openwebui", "open-webui", "web", "terminal", "cli", "pi", "pie"}:
+    if target not in {
+        "openwebui",
+        "open-webui",
+        "web",
+        "terminal",
+        "cli",
+        "pi",
+        "pie",
+        "opencode",
+        "open-code",
+        "oc",
+    }:
         return False
     if not model or "\n" in model or "\r" in model:
         return False
@@ -1569,4 +1587,6 @@ def interface_label(target: str | None) -> str:
         return "CLI  ·  this terminal"
     if target in ("pi", "pie"):
         return "Pi  ·  coding agent"
+    if target in ("opencode", "open-code", "oc"):
+        return "OpenCode Desktop  ·  coding agent"
     return target or "?"

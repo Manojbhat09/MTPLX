@@ -83,7 +83,7 @@ QUICKSTART_SPEED_PROMPT = (
     "Create a compact single-file HTML5 Canvas Flappy Bird game. "
     "Draw visuals procedurally, include physics, score, restart, and no prose."
 )
-QUICKSTART_TARGETS = {"terminal", "openwebui", "open-webui", "pi"}
+QUICKSTART_TARGETS = {"terminal", "openwebui", "open-webui", "pi", "opencode"}
 LONG_RESPONSE_DIRECT_PROFILE = (
     "vllm_metal_paged_attn_partitioned_block_16_blocks_1024_"
     "partition_threshold_2048_impl_mlx_vector_paged"
@@ -661,6 +661,7 @@ def _deep_doctor_report(args: Any, base: dict[str, Any]) -> dict[str, Any]:
         "integrations": {
             "openwebui": "mtplx integrate openwebui --port 8000",
             "claude_code": "mtplx integrate claude-code --port 8000",
+            "opencode": "mtplx start opencode --port 18083",
         },
         "product_policy": {
             "fanmax_counts_for_product_gate": False,
@@ -668,6 +669,71 @@ def _deep_doctor_report(args: Any, base: dict[str, Any]) -> dict[str, Any]:
         },
     }
     return base
+
+
+def _opencode_doctor_report(args: Any) -> dict[str, Any]:
+    from mtplx.opencode import (
+        detect_opencode_desktop,
+        opencode_config_path,
+    )
+
+    config_path = opencode_config_path()
+    parsed: dict[str, Any] | None = None
+    error: str | None = None
+    if config_path.exists():
+        try:
+            value = json.loads(config_path.read_text(encoding="utf-8"))
+            parsed = value if isinstance(value, dict) else {}
+        except Exception as exc:
+            error = str(exc)
+    provider = (
+        ((parsed or {}).get("provider") or {}).get("mtplx")
+        if isinstance((parsed or {}).get("provider"), dict)
+        else None
+    )
+    model_ref = (parsed or {}).get("model") if isinstance(parsed, dict) else None
+    model_id = str(model_ref or "").split("/", 1)[-1] if model_ref else DEFAULT_PUBLIC_MODEL_ID
+    model_config = None
+    if isinstance(provider, dict):
+        models = provider.get("models")
+        if isinstance(models, dict):
+            model_config = models.get(model_id) or next(iter(models.values()), None)
+    options = provider.get("options") if isinstance(provider, dict) else {}
+    base_url = ""
+    if isinstance(options, dict):
+        base_url = str(options.get("baseURL") or "")
+    server_url = base_url.rstrip("/")
+    if server_url.endswith("/v1"):
+        server_url = server_url[:-3]
+    health = _http_json(server_url + "/health", timeout=1.5) if server_url else {}
+    return {
+        "config_path": str(config_path),
+        "config_exists": config_path.exists(),
+        "config_error": error,
+        "detected": detect_opencode_desktop(),
+        "provider_present": isinstance(provider, dict),
+        "model_ref": model_ref,
+        "base_url": base_url,
+        "server_url": server_url,
+        "server_health": health,
+        "reasoning_field": (
+            (model_config or {}).get("interleaved", {}).get("field")
+            if isinstance(model_config, dict)
+            else None
+        ),
+        "reasoning_enabled": (
+            bool((model_config or {}).get("reasoning"))
+            if isinstance(model_config, dict)
+            else False
+        ),
+        "tool_call_enabled": (
+            bool((model_config or {}).get("tool_call"))
+            if isinstance(model_config, dict)
+            else False
+        ),
+        "has_hidden_max_tokens": "maxTokens" in json.dumps(model_config or {}),
+        "expected_start_command": "mtplx start opencode --port 18083 --profile sustained --max",
+    }
 
 
 def _git_value(args: list[str], *, cwd: Path) -> str | None:
@@ -821,6 +887,8 @@ def cmd_doctor(args: Any) -> int:
         thermal_control=thermal_control,
         server_dependencies=server_deps if getattr(args, "deep", False) else None,
     )
+    if getattr(args, "topic", None) == "opencode":
+        report["opencode"] = _opencode_doctor_report(args)
     if getattr(args, "deep", False):
         report = _deep_doctor_report(args, report)
     if getattr(args, "bundle", False):
@@ -864,6 +932,15 @@ def cmd_doctor(args: Any) -> int:
             config = report.get("config") or {}
             print(f"launcher: {launchers.get('global_launcher') or launchers.get('global') or 'unknown'}")
             print(f"config: {config.get('path') or 'default'}")
+        if report.get("opencode"):
+            opencode = report["opencode"]
+            print("OpenCode:")
+            print(f"  config: {opencode.get('config_path')}")
+            print(f"  provider: {'present' if opencode.get('provider_present') else 'missing'}")
+            print(f"  model: {opencode.get('model_ref') or 'missing'}")
+            print(f"  base URL: {opencode.get('base_url') or 'missing'}")
+            print(f"  reasoning field: {opencode.get('reasoning_field') or 'missing'}")
+            print(f"  hidden maxTokens: {str(bool(opencode.get('has_hidden_max_tokens'))).lower()}")
     return 0
 
 
@@ -3222,6 +3299,17 @@ def cmd_serve_public(args: Any) -> int:
                 _open_browser_url(chat_url)
                 _print_serve_start_line("Use the existing server, or stop that terminal with Ctrl-C to restart.")
                 return 0
+        if bool(getattr(args, "quickstart_opencode", False)):
+            base = _server_url(str(getattr(args, "host", "127.0.0.1")), int(getattr(args, "port", 8000)))
+            health = _http_json(base + "/health", timeout=1.5)
+            if health.get("ok"):
+                model_id = health.get("model") or getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
+                _print_serve_start_line("MTPLX is already running.")
+                _print_serve_start_line(f"OpenAI API Base URL: {base}/v1")
+                _print_serve_start_line(f"OpenCode model: mtplx/{model_id}")
+                _quickstart_launch_opencode_now()
+                _print_serve_start_line("Use the existing server, or stop that terminal with Ctrl-C to restart.")
+                return 0
         _print_serve_start_line(f"error: port {int(args.port)} is already in use")
         _print_serve_start_line("try: mtplx status")
         server_command = _server_command_name(args)
@@ -3392,6 +3480,8 @@ def cmd_serve_public(args: Any) -> int:
                 pi_launch_command(str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID)),
             ]
         )
+    if bool(getattr(args, "quickstart_opencode", False)):
+        cmd.extend(["--launch-opencode", "--server-console"])
     if bool(getattr(args, "stock_ar", False)):
         cmd.append("--stock-ar")
     if relax_mlx_fork_assert:
@@ -4597,6 +4687,113 @@ def _quickstart_pi_payload(args: Any, *, write_config: bool = False) -> dict[str
     return payload
 
 
+def _inspection_context_window(inspection: dict[str, Any] | None) -> int:
+    if not isinstance(inspection, dict):
+        return 262_144
+    candidates: list[int] = []
+    for key in (
+        "context_window",
+        "context_length",
+        "max_context_length",
+        "max_model_len",
+        "model_max_length",
+    ):
+        value = inspection.get(key)
+        if isinstance(value, int):
+            candidates.append(value)
+    compatibility = inspection.get("compatibility")
+    if isinstance(compatibility, dict):
+        for key in ("context_window", "context_length", "max_context_length"):
+            value = compatibility.get(key)
+            if isinstance(value, int):
+                candidates.append(value)
+    sane = [value for value in candidates if 0 < value <= 1_000_000]
+    return max(sane) if sane else 262_144
+
+
+def _quickstart_opencode_payload(
+    args: Any,
+    *,
+    write_config: bool = False,
+    inspection: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from mtplx.opencode import (
+        build_opencode_provider_config,
+        detect_opencode_desktop,
+        opencode_config_path,
+        opencode_model_ref,
+        write_opencode_config,
+    )
+
+    host = str(getattr(args, "host", "127.0.0.1"))
+    port = int(getattr(args, "port", 8000))
+    model_id = str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID)
+    if model_id == DEFAULT_PUBLIC_MODEL_ID:
+        model_id = _public_model_id_for_ref(
+            str(getattr(args, "model", "")),
+            default_model_id=model_id,
+        )
+    base_url = f"http://{_connect_host_for_bind(host)}:{port}/v1"
+    context_window = _inspection_context_window(inspection)
+    provider_fragment = build_opencode_provider_config(
+        base_url=base_url,
+        model_id=model_id,
+        model_name=f"MTPLX {model_id}",
+        context_window=context_window,
+        output_limit=context_window,
+        enable_thinking=True,
+        top_p=float(getattr(args, "top_p", 0.95)),
+    )
+    payload = {
+        "integration": "opencode",
+        "server_url": f"http://{_connect_host_for_bind(host)}:{port}",
+        "base_url": base_url,
+        "api_base_url": base_url,
+        "model_id": model_id,
+        "model_ref": opencode_model_ref(model_id),
+        "config_path": str(opencode_config_path()),
+        "provider": provider_fragment["provider"]["mtplx"],
+        "config": provider_fragment,
+        "detected": detect_opencode_desktop(),
+        "context_window": context_window,
+        "output_limit": context_window,
+        "reasoning_field": "reasoning_content",
+        "no_hidden_max_tokens": True,
+        "server_console": True,
+        "server_controls": [
+            "/reasoning on|off|auto|status",
+            "/mtp on|off|status",
+            "/stats",
+            "/help",
+        ],
+        "server_command": (
+            f"mtplx start opencode --host {host} --port {port} "
+            f"--model {shlex.quote(str(getattr(args, 'model', DEFAULT_RUNTIME_MODEL_DIR)))} "
+            f"--profile {str(getattr(args, 'profile', None) or DEFAULT_PROFILE_NAME)} "
+            f"{'--max ' if bool(getattr(args, 'max', False)) else ''}"
+            f"{'--no-mtp ' if _generation_mode_from_args(args) == GENERATION_MODE_AR else ''}"
+            "--reasoning on --no-stats"
+        ),
+        "opencode_steps": [
+            f"OpenCode config: {opencode_config_path()}",
+            f"Model in OpenCode: {opencode_model_ref(model_id)}",
+            f"OpenAI-compatible API base URL: {base_url}",
+            "Reasoning stream field: reasoning_content",
+        ],
+    }
+    if write_config:
+        payload["config_write"] = write_opencode_config(
+            base_url=base_url,
+            model_id=model_id,
+            model_name=f"MTPLX {model_id}",
+            context_window=context_window,
+            output_limit=context_window,
+            enable_thinking=True,
+            top_p=float(getattr(args, "top_p", 0.95)),
+        )
+    return payload
+
+
 def _quickstart_print_openwebui_handoff(args: Any, *, runtime_model: str) -> None:
     # The full banner + status panel are rendered by `_print_serve_start_banner`
     # inside `cmd_serve_public`, so this hand-off only emits a brief progress
@@ -4635,6 +4832,44 @@ def _quickstart_launch_pi_now(*, model_id: str) -> None:
     else:
         _print_serve_start_line(f"Could not open Pi automatically: {result.get('error')}")
         _print_serve_start_line(f"Run manually: {command}")
+
+
+def _quickstart_print_opencode_handoff(
+    args: Any,
+    *,
+    runtime_model: str,
+    opencode: dict[str, Any],
+) -> None:
+    _quickstart_line("[2/3] Connecting MTPLX to OpenCode Desktop...")
+    config_write = (
+        opencode.get("config_write")
+        if isinstance(opencode.get("config_write"), dict)
+        else {}
+    )
+    config_path = config_write.get("config_path") or opencode.get("config_path")
+    backup_path = config_write.get("backup_path")
+    _quickstart_line(f"      OpenCode config: {config_path}")
+    if backup_path:
+        _quickstart_line(f"      Backed up unreadable old OpenCode config: {backup_path}")
+    _quickstart_line(f"      OpenCode model: {opencode.get('model_ref')}")
+    _quickstart_line(f"      API base URL: {opencode.get('api_base_url')}")
+    _quickstart_line("      Reasoning: raw reasoning_content stream")
+    _quickstart_line("      Response cap: none hidden by MTPLX")
+    _quickstart_line(f"      Loading model: {runtime_model}")
+    _quickstart_line("      Keep this terminal open for the MTPLX server.")
+    _quickstart_line("      OpenCode will open automatically when MTPLX is ready.")
+    _quickstart_line()
+
+
+def _quickstart_launch_opencode_now() -> None:
+    from mtplx.opencode import launch_opencode_app
+
+    result = launch_opencode_app()
+    if result.get("ok"):
+        _print_serve_start_line("Opening OpenCode Desktop...")
+    else:
+        _print_serve_start_line(f"Could not open OpenCode automatically: {result.get('error')}")
+        _print_serve_start_line("Open OpenCode manually and select the MTPLX model.")
 
 
 def _quickstart_require_pi_cli(args: Any) -> bool:
@@ -4760,6 +4995,52 @@ def _quickstart_run_pi(args: Any, *, runtime_model: str, inspection: dict[str, A
         strict_fast_path=bool(getattr(args, "strict_fast_path", False)),
         quickstart_openwebui=False,
         quickstart_pi=True,
+        open_browser=False,
+        max=bool(getattr(args, "max", False)),
+        max_idle_min=int(getattr(args, "max_idle_min", 15)),
+    )
+    return cmd_serve_public(serve_args)
+
+
+def _quickstart_run_opencode(args: Any, *, runtime_model: str, inspection: dict[str, Any]) -> int:
+    if _reasoning_mode(args, default="auto") in {"auto", "on"}:
+        args.reasoning = "on"
+    opencode = _quickstart_opencode_payload(
+        args,
+        write_config=True,
+        inspection=inspection,
+    )
+    _quickstart_print_opencode_handoff(
+        args,
+        runtime_model=runtime_model,
+        opencode=opencode,
+    )
+    serve_args = SimpleNamespace(
+        model=runtime_model,
+        cache_dir=getattr(args, "cache_dir", None),
+        profile=getattr(args, "profile", None) or DEFAULT_PROFILE_NAME,
+        model_id=getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID,
+        unsafe_force_unverified=bool(getattr(args, "unsafe_force_unverified", False)),
+        yes=True,
+        host=str(getattr(args, "host", "127.0.0.1")),
+        port=int(getattr(args, "port", 8000)),
+        api_key=getattr(args, "api_key", None),
+        depth=int(getattr(args, "depth", 3)),
+        no_mtp=bool(getattr(args, "no_mtp", False)),
+        rate_limit=int(getattr(args, "rate_limit", 0)),
+        stream_interval=int(getattr(args, "stream_interval", 1)),
+        warmup_tokens=int(getattr(args, "warmup_tokens", 16)),
+        max_response_tokens=getattr(args, "max_response_tokens", None),
+        temperature=float(getattr(args, "temperature", 0.6)),
+        top_p=float(getattr(args, "top_p", 0.95)),
+        reasoning="on",
+        reasoning_parser=getattr(args, "reasoning_parser", "qwen3"),
+        stats_footer=False,
+        strict_warmup=bool(getattr(args, "strict_warmup", False)),
+        strict_fast_path=bool(getattr(args, "strict_fast_path", False)),
+        quickstart_openwebui=False,
+        quickstart_pi=False,
+        quickstart_opencode=True,
         open_browser=False,
         max=bool(getattr(args, "max", False)),
         max_idle_min=int(getattr(args, "max_idle_min", 15)),
@@ -5096,6 +5377,8 @@ def cmd_quickstart_public(args: Any) -> int:
         target = "terminal"
     elif raw_target in {"pi", "pie"}:
         target = "pi"
+    elif raw_target in {"opencode", "open-code", "oc"}:
+        target = "opencode"
     else:
         target = raw_target
     if target not in QUICKSTART_TARGETS:
@@ -5103,6 +5386,8 @@ def cmd_quickstart_public(args: Any) -> int:
         _quickstart_line(f"try: {_start_invocation(args)}")
         _quickstart_line(f"try: {_start_invocation(args, ' cli')}")
         return 2
+    if target == "opencode" and "port" not in cli_flags:
+        args.port = 18083
     depth_error = _validate_public_depth(args, printer=_quickstart_line)
     if depth_error is not None:
         return depth_error
@@ -5114,6 +5399,7 @@ def cmd_quickstart_public(args: Any) -> int:
     if getattr(args, "dry_run", False):
         openwebui = _quickstart_openwebui_payload(args) if target == "openwebui" else None
         pi = _quickstart_pi_payload(args) if target == "pi" else None
+        opencode = _quickstart_opencode_payload(args) if target == "opencode" else None
         payload = {
             "action": _start_command_name(args),
             "target": target,
@@ -5127,10 +5413,13 @@ def cmd_quickstart_public(args: Any) -> int:
             "terminal_chat": target == "terminal",
             "openwebui": openwebui,
             "pi": pi,
+            "opencode": opencode,
             "stats_visible": bool(getattr(args, "show_stats", True)),
             "next": (
                 _start_invocation(args)
                 if target == "openwebui"
+                else _start_invocation(args, " opencode")
+                if target == "opencode"
                 else _start_invocation(args, " pi")
                 if target == "pi"
                 else _start_invocation(args, " cli")
@@ -5160,6 +5449,10 @@ def cmd_quickstart_public(args: Any) -> int:
             _quickstart_line(f"download if missing: {str(download).lower()}")
             if target == "openwebui":
                 _quickstart_line(f"then: start local server -> open browser chat at {openwebui['chat_url']}")
+            elif target == "opencode":
+                _quickstart_line(
+                    f"then: write OpenCode config -> start local server -> open {opencode['model_ref']}"
+                )
             elif target == "pi":
                 _quickstart_line(
                     f"then: write Pi config -> start local server -> run {pi['launch_command']}"
@@ -5275,6 +5568,9 @@ def cmd_quickstart_public(args: Any) -> int:
             if target == "pi":
                 args.model = runtime_model
                 return _quickstart_run_pi(args, runtime_model=runtime_model, inspection=inspection)
+            if target == "opencode":
+                args.model = runtime_model
+                return _quickstart_run_opencode(args, runtime_model=runtime_model, inspection=inspection)
             return _quickstart_run_terminal_chat(args, runtime_model=runtime_model, inspection=inspection)
         detail = (resolution.get("error") or {}).get("detail") if isinstance(resolution.get("error"), dict) else None
         _quickstart_line("model is not available locally")
@@ -5311,6 +5607,9 @@ def cmd_quickstart_public(args: Any) -> int:
     if target == "pi":
         args.model = runtime_model
         return _quickstart_run_pi(args, runtime_model=runtime_model, inspection=inspection)
+    if target == "opencode":
+        args.model = runtime_model
+        return _quickstart_run_opencode(args, runtime_model=runtime_model, inspection=inspection)
     return _quickstart_run_terminal_chat(args, runtime_model=runtime_model, inspection=inspection)
 
 

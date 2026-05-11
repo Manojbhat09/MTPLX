@@ -119,6 +119,14 @@ def hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def common_prefix_len(left: list[int] | tuple[int, ...], right: list[int] | tuple[int, ...]) -> int:
+    limit = min(len(left), len(right))
+    for index in range(limit):
+        if int(left[index]) != int(right[index]):
+            return index
+    return limit
+
+
 def _message_role(message: Any) -> str:
     if isinstance(message, Mapping):
         return str(message.get("role", ""))
@@ -189,13 +197,13 @@ def is_background_request(
     )
 
 
-_DEFAULT_POSTCOMMIT_WAIT_TIMEOUT_S = 10.0
+_DEFAULT_POSTCOMMIT_WAIT_TIMEOUT_S = 30.0
 
 
 def _postcommit_wait_timeout_s() -> float:
     """Read MTPLX_POSTCOMMIT_WAIT_TIMEOUT_S from the environment.
 
-    Defaults to 10s. Values <= 0 disable the wait (returns 0.0). Bad values
+    Defaults to 30s. Values <= 0 disable the wait (returns 0.0). Bad values
     fall back to the default so a typo does not leave the server hanging.
     """
     raw = os.environ.get("MTPLX_POSTCOMMIT_WAIT_TIMEOUT_S")
@@ -270,6 +278,10 @@ class EngineSession:
         """
         with self._postcommit_lock:
             self.pending_postcommit = future
+
+    def has_pending_postcommit(self) -> bool:
+        with self._postcommit_lock:
+            return self.pending_postcommit is not None
 
     def wait_for_pending_postcommit(
         self,
@@ -431,6 +443,101 @@ class EngineSession:
         self.add_boundary(boundary_kind, tokens, nbytes=nbytes)
         return EngineSessionCommit(True, "committed", self.prefix_len)
 
+    def commit_prompt_prefix(
+        self,
+        *,
+        prompt_ids: list[int] | tuple[int, ...],
+        finish_reason: str,
+        boundary_kind: str = "prompt_prefix",
+    ) -> EngineSessionCommit:
+        """Publish a safe foreground prompt prefix for async postcommit waiters.
+
+        Streaming tool-call responses cannot commit the structured assistant
+        history directly; that history is canonicalized by a low-priority
+        retokenized postcommit. The next tool-result request still needs to
+        resolve to this EngineSession so it can wait for that postcommit
+        instead of cold-prefilling. Publishing the already-prefilled prompt
+        prefix gives the resolver a stable session anchor without claiming the
+        assistant/tool history has landed yet.
+        """
+        tokens = tuple(int(token) for token in prompt_ids)
+        if not tokens:
+            return EngineSessionCommit(False, "empty_prompt_prefix", self.prefix_len)
+        current = self.committed_token_ids
+        if current:
+            if len(tokens) < len(current):
+                return EngineSessionCommit(
+                    False,
+                    "prompt_prefix_older_than_session",
+                    self.prefix_len,
+                )
+            if tokens[: len(current)] != current:
+                return EngineSessionCommit(
+                    False,
+                    "prompt_prefix_not_extending_session",
+                    self.prefix_len,
+                )
+            if len(tokens) == len(current):
+                return EngineSessionCommit(False, "prompt_prefix_unchanged", self.prefix_len)
+        self.committed_token_ids = tokens
+        self.last_commit_s = time.time()
+        self.last_finish_reason = str(finish_reason)
+        self.revision += 1
+        self._record_interval_boundaries(tokens)
+        self.add_boundary(boundary_kind, tokens)
+        return EngineSessionCommit(True, "committed_prompt_prefix", self.prefix_len)
+
+    def commit_retokenized_prefix(
+        self,
+        *,
+        token_ids: list[int] | tuple[int, ...],
+        expected_revision: int | None = None,
+        boundary_kind: str = "retokenized_history",
+        nbytes: int = 0,
+    ) -> EngineSessionCommit:
+        """Publish canonical retokenized history after async postcommit.
+
+        Streaming tool-call turns first publish the foreground prompt as a
+        temporary same-session anchor. The idle postcommit later renders the
+        canonical assistant/tool history. Publishing that canonical prefix
+        prevents the next OpenCode turn from resolving by a stale prompt
+        boundary that can differ by one chat-template token.
+        """
+        tokens = tuple(int(token) for token in token_ids)
+        if not tokens:
+            return EngineSessionCommit(False, "empty_retokenized_prefix", self.prefix_len)
+        if expected_revision is not None and self.revision != int(expected_revision):
+            return EngineSessionCommit(False, "stale_session_revision", self.prefix_len)
+        current = self.committed_token_ids
+        if current:
+            if len(tokens) < len(current):
+                return EngineSessionCommit(
+                    False,
+                    "retokenized_prefix_older_than_session",
+                    self.prefix_len,
+                )
+            matched = common_prefix_len(current, tokens)
+            if matched < len(current) and (len(current) - matched) > 2:
+                return EngineSessionCommit(
+                    False,
+                    "retokenized_prefix_not_extending_session",
+                    self.prefix_len,
+                )
+            if len(tokens) == len(current) and matched == len(current):
+                return EngineSessionCommit(
+                    False,
+                    "retokenized_prefix_unchanged",
+                    self.prefix_len,
+                )
+        self.committed_token_ids = tokens
+        self.last_commit_s = time.time()
+        self.last_finish_reason = "postcommit"
+        self.bytes_estimate = int(nbytes)
+        self.revision += 1
+        self._record_interval_boundaries(tokens)
+        self.add_boundary(boundary_kind, tokens, nbytes=nbytes)
+        return EngineSessionCommit(True, "committed_retokenized_prefix", self.prefix_len)
+
     def add_boundary(
         self,
         kind: str,
@@ -526,6 +633,7 @@ class EngineSessionManager:
         self.idle_ttl_s = float(idle_ttl_s)
         self._sessions: dict[str, EngineSession] = {}
         self._lock = Lock()
+        self.last_prefix_diagnostic: dict[str, Any] | None = None
 
     def resolve_session_id(
         self,
@@ -564,7 +672,34 @@ class EngineSessionManager:
         if prompt_ids:
             best = self.longest_prefix_session(prompt_ids)
             if best is not None:
+                self.last_prefix_diagnostic = self._prefix_diagnostic(
+                    prompt_ids,
+                    selected=best,
+                    exact=True,
+                )
                 return best.session_id, "longest_prefix"
+            pending, matched = self.pending_near_prefix_session(prompt_ids)
+            if pending is not None:
+                diagnostic = self._prefix_diagnostic(prompt_ids)
+                diagnostic.update(
+                    {
+                        "best_session_id": pending.session_id,
+                        "best_prefix_len": len(pending.committed_token_ids),
+                        "matched_prefix_len": int(matched),
+                        "divergence_at_token": int(matched),
+                        "best_token_hash": token_hash_short(
+                            pending.committed_token_ids
+                        ),
+                        "reason": "pending_postcommit_near_prefix_match",
+                        "near_prefix_gap": len(pending.committed_token_ids)
+                        - int(matched),
+                    }
+                )
+                self.last_prefix_diagnostic = diagnostic
+                return pending.session_id, "pending_postcommit_near_prefix"
+            self.last_prefix_diagnostic = self._prefix_diagnostic(prompt_ids)
+        else:
+            self.last_prefix_diagnostic = None
         return f"anon-{hash_text(str(time.time_ns()))}", "new"
 
     def get_or_create(self, session_id: str) -> EngineSession:
@@ -581,6 +716,8 @@ class EngineSessionManager:
         best: EngineSession | None = None
         for session in self._sessions.values():
             prefix = session.committed_token_ids
+            if not prefix:
+                continue
             if len(prefix) > len(tokens):
                 continue
             if tokens[: len(prefix)] != prefix:
@@ -588,6 +725,84 @@ class EngineSessionManager:
             if best is None or len(prefix) > len(best.committed_token_ids):
                 best = session
         return best
+
+    def pending_near_prefix_session(
+        self,
+        token_ids: list[int] | tuple[int, ...],
+        *,
+        max_token_gap: int = 2,
+    ) -> tuple[EngineSession | None, int]:
+        """Return a pending-postcommit session with a near-exact prompt prefix."""
+        tokens = tuple(int(token) for token in token_ids)
+        best: EngineSession | None = None
+        best_matched = 0
+        for session in self._sessions.values():
+            if not session.has_pending_postcommit():
+                continue
+            prefix = session.committed_token_ids
+            if not prefix:
+                continue
+            if len(prefix) > len(tokens) + int(max_token_gap):
+                continue
+            matched = common_prefix_len(tokens, prefix)
+            gap = len(prefix) - matched
+            if gap < 0 or gap > int(max_token_gap):
+                continue
+            if best is None or matched > best_matched or (
+                matched == best_matched and len(prefix) > len(best.committed_token_ids)
+            ):
+                best = session
+                best_matched = matched
+        return best, best_matched
+
+    def nearest_prefix_session(
+        self,
+        token_ids: list[int] | tuple[int, ...],
+    ) -> tuple[EngineSession | None, int]:
+        tokens = tuple(int(token) for token in token_ids)
+        best: EngineSession | None = None
+        best_len = 0
+        for session in self._sessions.values():
+            prefix = session.committed_token_ids
+            if not prefix:
+                continue
+            matched = common_prefix_len(tokens, prefix)
+            if matched > best_len:
+                best = session
+                best_len = matched
+        return best, best_len
+
+    def _prefix_diagnostic(
+        self,
+        token_ids: list[int] | tuple[int, ...],
+        *,
+        selected: EngineSession | None = None,
+        exact: bool = False,
+    ) -> dict[str, Any]:
+        tokens = tuple(int(token) for token in token_ids)
+        session, matched = (selected, len(selected.committed_token_ids)) if selected is not None else self.nearest_prefix_session(tokens)
+        if session is None:
+            return {
+                "prompt_len": len(tokens),
+                "exact_prefix_match": False,
+                "best_session_id": None,
+                "best_prefix_len": 0,
+                "matched_prefix_len": 0,
+                "divergence_at_token": None,
+                "reason": "no_existing_session_prefix",
+            }
+        divergence_at = None if exact else matched
+        return {
+            "prompt_len": len(tokens),
+            "exact_prefix_match": bool(exact),
+            "best_session_id": session.session_id,
+            "best_prefix_len": len(session.committed_token_ids),
+            "matched_prefix_len": int(matched),
+            "divergence_at_token": divergence_at,
+            "best_token_hash": token_hash_short(session.committed_token_ids),
+            "prompt_token_hash": token_hash_short(tokens),
+            "reason": "exact_prefix_match" if exact else "prefix_divergence_at_token",
+        }
 
     def evict_stale(self) -> int:
         now = time.time()
@@ -626,4 +841,5 @@ class EngineSessionManager:
             "sessions": sessions,
             "count": len(sessions),
             "session_bank": self.bank.to_dict(),
+            "last_prefix_diagnostic": self.last_prefix_diagnostic,
         }

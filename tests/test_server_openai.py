@@ -805,6 +805,26 @@ def _add_tool_schema():
     }
 
 
+def _write_tool_schema():
+    return {
+        "type": "function",
+        "function": {
+            "name": "write",
+            "description": "Write a file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filePath": {"type": "string"},
+                    "content": {"type": "string"},
+                    "createDirs": {"type": "boolean"},
+                },
+                "required": ["filePath", "content"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 def _fake_generation(text: str):
     return {
         "text": text,
@@ -881,6 +901,35 @@ def test_chat_tools_are_passed_to_qwen_template_and_inherit_default_thinking(
     assert "session_status" in messages[0]["content"]
     assert kwargs["tools"] == [_tool_schema()]
     assert kwargs["enable_thinking"] is True
+
+
+def test_tool_contract_includes_exact_schema_keys_for_opencode_write(monkeypatch):
+    state = _fake_state()
+    state.runtime.tokenizer = CaptureTokenizer()
+    state.args.stats_footer = False
+    client = TestClient(create_app(state))
+    monkeypatch.setattr(
+        openai, "_run_generation", lambda *_args, **_kwargs: _fake_generation("ok")
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-mtplx-cache-mode": "bypass"},
+        json={
+            "messages": [{"role": "user", "content": "Write a file."}],
+            "tools": [_write_tool_schema()],
+            "tool_choice": "auto",
+            "max_tokens": 8,
+        },
+    )
+
+    assert response.status_code == 200
+    messages, _kwargs = state.runtime.tokenizer.calls[0]
+    contract = messages[0]["content"]
+    assert "write(filePath:string, content:string, createDirs?:boolean)" in contract
+    assert '"filePath":"<string>"' in contract
+    assert '"content":"<string>"' in contract
+    assert "exact argument keys/case" in contract
 
 
 def test_chat_tools_honor_explicit_disable_thinking(monkeypatch):
@@ -1146,6 +1195,70 @@ def test_chat_stream_tool_call_preamble_is_stored_for_postcommit(monkeypatch):
             "name": "session_status",
             "arguments": "{}",
         }
+
+
+def test_chat_stream_tool_call_postcommit_strips_reasoning_content(monkeypatch):
+    state = _fake_streaming_session_state()
+    state.args.stream_interval = 1
+    captured_generation_final: list[dict] = []
+    scheduled: list[dict] = []
+
+    def fake_store_generation_final(*_args, **kwargs):
+        captured_generation_final.append(kwargs)
+        return {
+            "stored": False,
+            "mode": "unsafe",
+            "reason": "tool_call_history_rewrite",
+        }
+
+    def fake_schedule(*_args, **kwargs):
+        scheduled.append(kwargs)
+        return {
+            "stored": False,
+            "mode": "async_pending",
+            "reason": kwargs["unsafe_reason"],
+        }
+
+    monkeypatch.setattr(
+        openai, "_store_generation_final_history_snapshot", fake_store_generation_final
+    )
+    monkeypatch.setattr(openai, "_schedule_idle_postcommit_snapshot", fake_schedule)
+    monkeypatch.setattr(
+        openai,
+        "_run_generation",
+        _fake_streaming_generation(
+            "<think>raw private plan</think>\n"
+            "Let me check.\n"
+            "<tool_call>\n<function=session_status>\n</function>\n</tool_call>"
+        ),
+    )
+
+    with TestClient(create_app(state)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"x-mtplx-session-id": "stream-tool-reasoning"},
+            json={
+                "messages": [{"role": "user", "content": "Status."}],
+                "tools": [_tool_schema()],
+                "tool_choice": "auto",
+                "stream": True,
+                "max_tokens": 64,
+            },
+        )
+
+    assert response.status_code == 200
+    reasoning = "".join(
+        payload["choices"][0]["delta"].get("reasoning_content", "")
+        for payload in _stream_payloads(response.text)
+        for _choice in [payload["choices"][0]]
+    )
+    assert reasoning == "raw private plan"
+    assert captured_generation_final
+    assert scheduled
+    for call in (captured_generation_final[0], scheduled[0]):
+        assert call["assistant_content"] == "Let me check."
+        assert "raw private plan" not in call["assistant_content"]
+        assert "<think>" not in call["assistant_content"]
 
 
 def test_chat_stream_tools_plain_content_stays_incremental(monkeypatch):

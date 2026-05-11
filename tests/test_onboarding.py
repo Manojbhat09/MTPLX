@@ -65,6 +65,7 @@ def test_interface_label_covers_all_targets():
     assert "CLI" in onboarding.interface_label("cli")
     assert "CLI" in onboarding.interface_label("terminal")
     assert "Pi" in onboarding.interface_label("pi")
+    assert "OpenCode" in onboarding.interface_label("opencode")
 
 
 def test_run_onboarding_screens_with_stubbed_input(monkeypatch, capsys):
@@ -132,6 +133,17 @@ def test_run_onboarding_can_select_pi(monkeypatch):
     assert state["profile"] == "sustained"
     assert state["max"] is False
     assert state["target"] == "pi"
+
+
+def test_run_onboarding_can_select_opencode(monkeypatch):
+    answers = iter(["1", "1", "4"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+
+    state = onboarding.run_onboarding_screens()
+
+    assert state["profile"] == "sustained"
+    assert state["max"] is False
+    assert state["target"] == "opencode"
 
 
 def test_run_serve_onboarding_screens_defaults_to_api_server(monkeypatch):

@@ -296,6 +296,7 @@ def test_start_help_is_a_user_journey(capsys):
     assert "mtplx start --max" in captured
     assert "mtplx start cli" in captured
     assert "mtplx start pi" in captured
+    assert "mtplx start opencode" in captured
     assert "mtplx start --download" in captured
     assert "/speed" in captured
     assert "Aliases:" in captured
@@ -416,6 +417,35 @@ def test_start_target_aliases_route_correctly(monkeypatch, tmp_path, capsys):
     assert run("terminal")["target"] == "terminal"
     assert run("pi")["target"] == "pi"
     assert run("pie")["target"] == "pi"
+    assert run("opencode")["target"] == "opencode"
+    assert run("open-code")["target"] == "opencode"
+    assert run("oc")["target"] == "opencode"
+
+
+def test_start_opencode_dry_run_json_writes_no_hidden_cap(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("MTPLX_CONFIG", str(tmp_path / "missing-config.toml"))
+    monkeypatch.setenv("MTPLX_OPENCODE_CONFIG", str(tmp_path / "opencode.json"))
+
+    code = main(
+        [
+            "start",
+            "opencode",
+            "--dry-run",
+            "--json",
+            "--model",
+            "models/example",
+            "--yes",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["target"] == "opencode"
+    assert payload["opencode"]["api_base_url"] == "http://127.0.0.1:18083/v1"
+    assert payload["opencode"]["model_ref"].startswith("mtplx/")
+    assert payload["opencode"]["no_hidden_max_tokens"] is True
+    assert "maxTokens" not in json.dumps(payload["opencode"]["config"])
+    assert payload["opencode"]["provider"]["models"]
 
 
 def test_terminal_quickstart_max_uses_verified_max_session(monkeypatch):
@@ -538,7 +568,18 @@ def test_one_shot_max_uses_verified_max_session(monkeypatch):
 def test_start_parser_accepts_target_choices():
     """Parser must accept the new `web` and `cli` target literals."""
     parser = build_parser()
-    for target in ("web", "cli", "openwebui", "open-webui", "terminal", "pi", "pie"):
+    for target in (
+        "web",
+        "cli",
+        "openwebui",
+        "open-webui",
+        "terminal",
+        "pi",
+        "pie",
+        "opencode",
+        "open-code",
+        "oc",
+    ):
         args = parser.parse_args(["start", target, "--dry-run"])
         assert args.target == target
     # Default target (no positional) is now None — the absence of an explicit
@@ -1648,6 +1689,7 @@ def test_product_helper_commands_parse():
         ["start", "--prompt", "hello", "--max-tokens", "16", "--no-stats"]
     )
     start_openwebui = parser.parse_args(["start", "openwebui", "--port", "18012"])
+    start_opencode = parser.parse_args(["start", "opencode", "--port", "18083"])
     start_openwebui_strict = parser.parse_args(["start", "openwebui", "--strict-fast-path"])
     quickstart = parser.parse_args(["quickstart", "--port", "18012"])
     quickstart_alias = parser.parse_args(["quick-start", "--port", "18013"])
@@ -1657,6 +1699,7 @@ def test_product_helper_commands_parse():
     ask_stats = parser.parse_args(["ask", "hello", "--stats"])
     serve_start = parser.parse_args(["serve", "--port", "18012"])
     status = parser.parse_args(["status", "--deep"])
+    doctor_opencode = parser.parse_args(["doctor", "opencode", "--json"])
     connect = parser.parse_args(["connect", "openwebui", "--port", "18012"])
     connect_opencode = parser.parse_args(["connect", "opencode", "--port", "18012"])
     models = parser.parse_args(["models", "--json"])
@@ -1682,6 +1725,8 @@ def test_product_helper_commands_parse():
     assert start.show_stats is False
     assert start_openwebui.target == "openwebui"
     assert start_openwebui.port == 18012
+    assert start_opencode.target == "opencode"
+    assert start_opencode.port == 18083
     assert start_openwebui.strict_fast_path is False
     assert start_openwebui_strict.strict_fast_path is True
     assert quickstart.command == "quickstart"
@@ -1703,6 +1748,8 @@ def test_product_helper_commands_parse():
     assert serve_start.stats_footer is True
     assert status.command == "status"
     assert status.deep is True
+    assert doctor_opencode.command == "doctor"
+    assert doctor_opencode.topic == "opencode"
     assert connect.command == "connect"
     assert connect.integration == "openwebui"
     assert connect_opencode.integration == "opencode"

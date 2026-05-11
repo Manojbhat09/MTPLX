@@ -32,6 +32,7 @@ from mtplx.server.openai import (
     _generation_final_postcommit_compatibility,
     _history_ids_for_postcommit,
     _schedule_idle_postcommit_snapshot,
+    _sentinel_next_turn_start,
     _store_retokenized_history_snapshot,
     parse_args,
 )
@@ -332,6 +333,28 @@ def test_generation_final_rejects_unreachable_qwen_terminal_thinking_prefix():
 
     assert compatibility["safe"] is False
     assert compatibility["reason"] == "retokenized_history_mismatch"
+
+
+def test_tool_sentinel_does_not_match_far_schema_text():
+    rendered = (
+        "system: declared tools and schemas: write(filePath:string, content:string). "
+        "The word tool: appears in schema prose, not as a chat boundary.\n"
+        + ("x" * 2048)
+        + "__MTPLX_POSTCOMMIT_SENTINEL_4f02c7d2__"
+    )
+
+    assert _sentinel_next_turn_start(rendered, sentinel_role="tool") is None
+
+
+def test_tool_sentinel_accepts_near_loose_boundary():
+    rendered = (
+        "system: tools are active\nassistant: <tool_call>{}</tool_call>\n"
+        "tool:__MTPLX_POSTCOMMIT_SENTINEL_4f02c7d2__"
+    )
+
+    assert _sentinel_next_turn_start(rendered, sentinel_role="tool") == rendered.rfind(
+        "tool:"
+    )
 
 
 def test_history_ids_without_tools_diverges_from_next_prompt_with_tools():
