@@ -39,6 +39,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -330,6 +331,7 @@ class ChatCompletionRequest(BaseModel):
     model: str | None = None
     messages: list[ChatMessage] = Field(default_factory=list)
     max_tokens: int | None = None
+    max_completion_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
@@ -341,6 +343,10 @@ class ChatCompletionRequest(BaseModel):
     tools: list[dict[str, Any]] | None = None
     tool_choice: Any = None
     parallel_tool_calls: bool | None = None
+    stream_options: dict[str, Any] | None = None
+    response_format: Any = None
+    metadata: dict[str, Any] | None = None
+    user: str | None = None
 
 
 class MTPLXSettingsUpdate(BaseModel):
@@ -1311,6 +1317,11 @@ _TOOL_PARSE_COUNTER_KEYS = (
     "unknown_tool_name",
     "malformed_tool_call",
     "unclosed_tool_call",
+    "tool_stream_xml_started",
+    "tool_stream_json_buffered",
+    "tool_template_fallback",
+    "android_studio_request_detected",
+    "openai_error_response",
 )
 
 
@@ -1366,7 +1377,14 @@ def _record_tool_parse_event(
             counters["tool_parse_fallback"] = (
                 int(counters.get("tool_parse_fallback", 0) or 0) + 1
             )
-    if event == "tool_parse_success" or _server_console_enabled(state):
+    if event in {
+        "tool_parse_success",
+        "tool_template_fallback",
+        "tool_stream_xml_started",
+        "tool_stream_json_buffered",
+        "android_studio_request_detected",
+        "openai_error_response",
+    } or _server_console_enabled(state):
         return
     try:
         print(
@@ -1384,6 +1402,40 @@ def _record_tool_parse_event(
         )
     except BaseException:
         pass
+
+
+def _openai_error_type(status_code: int) -> str:
+    if status_code == 401:
+        return "authentication_error"
+    if status_code == 403:
+        return "permission_error"
+    if status_code == 404:
+        return "not_found_error"
+    if status_code == 409:
+        return "conflict_error"
+    if status_code == 422:
+        return "invalid_request_error"
+    if 400 <= status_code < 500:
+        return "invalid_request_error"
+    return "server_error"
+
+
+def _openai_error_content(
+    message: str,
+    *,
+    status_code: int,
+    code: str | None = None,
+    param: str | None = None,
+    error_type: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "error": {
+            "message": message,
+            "type": error_type or _openai_error_type(status_code),
+            "code": code or str(status_code),
+            "param": param,
+        }
+    }
 
 
 def _tool_spec_name(tool: dict[str, Any]) -> str | None:
@@ -1773,10 +1825,329 @@ def _stream_tool_call_deltas(
             }
 
 
+def _json_string_inner(text: str) -> str:
+    return json.dumps(text, ensure_ascii=False)[1:-1]
+
+
+def _find_casefold(haystack: str, needle: str, start: int = 0) -> int:
+    return haystack.lower().find(needle.lower(), start)
+
+
+def _tool_delta(
+    index: int,
+    *,
+    call_id: str | None = None,
+    name: str | None = None,
+    arguments: str | None = None,
+) -> dict[str, Any]:
+    function: dict[str, Any] = {}
+    if name is not None:
+        function["name"] = name
+    if arguments is not None:
+        function["arguments"] = arguments
+    item: dict[str, Any] = {"index": index, "function": function}
+    if call_id is not None:
+        item["id"] = call_id
+        item["type"] = "function"
+    return {"tool_calls": [item]}
+
+
+class _ToolCallStreamParser:
+    """Protocol-shaped base for streaming tool-call parsers."""
+
+    dialect = "unknown"
+
+    @property
+    def tool_calls(self) -> list[dict[str, Any]] | None:
+        return None
+
+    @property
+    def fallback_reason(self) -> str | None:
+        return None
+
+    @property
+    def raw_text(self) -> str:
+        return ""
+
+    @property
+    def started(self) -> bool:
+        return False
+
+    def feed(self, text: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def finish(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+
+class _QwenXMLToolCallStreamParser(_ToolCallStreamParser):
+    """Incrementally translate Qwen XML tool calls into OpenAI deltas.
+
+    This parser handles the native shape Qwen tends to emit:
+    `<tool_call><function=name><parameter=key>value</parameter>...</function></tool_call>`.
+    It deliberately validates only the tool name early. Argument schema
+    validation remains the client's job, but malformed XML never blocks the
+    stream or gets treated as a successful tool call.
+    """
+
+    dialect = "qwen_xml"
+    _PARAM_CLOSE = "</parameter>"
+    _FUNCTION_CLOSE = "</function>"
+
+    def __init__(
+        self,
+        *,
+        tools: list[dict[str, Any]],
+        call_index: int = 0,
+    ) -> None:
+        self._tools = tools
+        self._known = {name for tool in tools if (name := _tool_spec_name(tool))}
+        self._call_index = int(call_index)
+        self._call_id = f"call_{uuid.uuid4().hex[:24]}"
+        self._buf = ""
+        self._raw = ""
+        self._stage = "find_function"
+        self._name: str | None = None
+        self._current_key: str | None = None
+        self._current_value_parts: list[str] = []
+        self._params: dict[str, str] = {}
+        self._arg_open = False
+        self._done = False
+        self._tool_calls: list[dict[str, Any]] | None = None
+        self._fallback_reason: str | None = None
+        self._started = False
+        self._name_delta_emitted = False
+
+    @property
+    def tool_calls(self) -> list[dict[str, Any]] | None:
+        return self._tool_calls
+
+    @property
+    def fallback_reason(self) -> str | None:
+        return self._fallback_reason
+
+    @property
+    def raw_text(self) -> str:
+        return self._raw
+
+    @property
+    def started(self) -> bool:
+        return self._started
+
+    def feed(self, text: str) -> list[dict[str, Any]]:
+        if self._done or self._fallback_reason:
+            self._raw += text
+            return []
+        self._raw += text
+        self._buf += text
+        deltas: list[dict[str, Any]] = []
+        while True:
+            if self._stage == "find_function":
+                function_start = _find_casefold(self._buf, "<function=")
+                if function_start < 0:
+                    return deltas
+                function_end = self._buf.find(">", function_start)
+                if function_end < 0:
+                    return deltas
+                raw_name = self._buf[function_start + len("<function=") : function_end]
+                name = raw_name.strip()
+                if not name:
+                    self._fallback_reason = "tool_call function is missing a name"
+                    return deltas
+                if name not in self._known:
+                    self._fallback_reason = f"unknown tool '{name}'"
+                    return deltas
+                self._name = name
+                self._started = True
+                self._buf = self._buf[function_end + 1 :]
+                self._stage = "find_parameter"
+                continue
+
+            if self._stage == "find_parameter":
+                param_start = _find_casefold(self._buf, "<parameter=")
+                function_close = _find_casefold(self._buf, self._FUNCTION_CLOSE)
+                if function_close >= 0 and (
+                    param_start < 0 or function_close < param_start
+                ):
+                    self._buf = self._buf[function_close + len(self._FUNCTION_CLOSE) :]
+                    if not self._name_delta_emitted:
+                        deltas.append(
+                            _tool_delta(
+                                self._call_index,
+                                call_id=self._call_id,
+                                name=str(self._name or ""),
+                                arguments="",
+                            )
+                        )
+                        self._name_delta_emitted = True
+                    suffix = "}" if self._arg_open else "{}"
+                    deltas.append(
+                        _tool_delta(self._call_index, arguments=suffix)
+                    )
+                    self._done = True
+                    self._tool_calls = [
+                        {
+                            "id": self._call_id,
+                            "type": "function",
+                            "function": {
+                                "name": str(self._name or ""),
+                                "arguments": _json_object_string(
+                                    self._params,
+                                    context=f"tool_call[{self._call_index}]",
+                                ),
+                            },
+                        }
+                    ]
+                    return deltas
+                if param_start < 0:
+                    return deltas
+                param_end = self._buf.find(">", param_start)
+                if param_end < 0:
+                    return deltas
+                raw_key = self._buf[param_start + len("<parameter=") : param_end]
+                key = raw_key.strip()
+                if not key:
+                    self._fallback_reason = (
+                        f"tool '{self._name}' contains an empty parameter name"
+                    )
+                    return deltas
+                self._current_key = key
+                self._current_value_parts = []
+                if not self._name_delta_emitted:
+                    deltas.append(
+                        _tool_delta(
+                            self._call_index,
+                            call_id=self._call_id,
+                            name=str(self._name or ""),
+                            arguments="",
+                        )
+                    )
+                    self._name_delta_emitted = True
+                prefix = "," if self._arg_open else "{"
+                self._arg_open = True
+                deltas.append(
+                    _tool_delta(
+                        self._call_index,
+                        arguments=f"{prefix}{json.dumps(key, ensure_ascii=False)}:",
+                    )
+                )
+                deltas.append(_tool_delta(self._call_index, arguments='"'))
+                self._buf = self._buf[param_end + 1 :]
+                self._stage = "in_parameter"
+                continue
+
+            if self._stage == "in_parameter":
+                close_start = _find_casefold(self._buf, self._PARAM_CLOSE)
+                if close_start < 0:
+                    hold = len(self._PARAM_CLOSE) - 1
+                    if len(self._buf) <= hold:
+                        return deltas
+                    value_piece = self._buf[:-hold]
+                    self._buf = self._buf[-hold:]
+                    if not self._current_value_parts and value_piece.startswith("\n"):
+                        value_piece = value_piece[1:]
+                    if value_piece:
+                        self._current_value_parts.append(value_piece)
+                        deltas.append(
+                            _tool_delta(
+                                self._call_index,
+                                arguments=_json_string_inner(value_piece),
+                            )
+                        )
+                    return deltas
+                value_piece = self._buf[:close_start]
+                # Qwen usually formats XML parameters as newline-delimited
+                # blocks. Preserve user payload text, but drop the formatting
+                # newline immediately before the closing tag to match the
+                # existing final parser's stripped value semantics.
+                if value_piece.endswith("\n"):
+                    value_piece = value_piece[:-1]
+                if not self._current_value_parts and value_piece.startswith("\n"):
+                    value_piece = value_piece[1:]
+                if value_piece:
+                    self._current_value_parts.append(value_piece)
+                    deltas.append(
+                        _tool_delta(
+                            self._call_index,
+                            arguments=_json_string_inner(value_piece),
+                        )
+                    )
+                key = str(self._current_key or "")
+                self._params[key] = "".join(self._current_value_parts).strip()
+                deltas.append(_tool_delta(self._call_index, arguments='"'))
+                self._buf = self._buf[close_start + len(self._PARAM_CLOSE) :]
+                self._stage = "find_parameter"
+                continue
+
+            return deltas
+
+    def finish(self) -> list[dict[str, Any]]:
+        if self._done or self._fallback_reason:
+            return []
+        deltas = self.feed("")
+        if self._done or self._fallback_reason:
+            return deltas
+        if self._started:
+            self._fallback_reason = "unclosed <tool_call> block"
+            return []
+        return []
+
+
+class _BufferedFallbackToolCallParser(_ToolCallStreamParser):
+    """Final-parse fallback for JSON-style or unknown tool-call payloads."""
+
+    dialect = "buffered"
+
+    def __init__(
+        self,
+        *,
+        tools: list[dict[str, Any]],
+        argument_chunk_chars: int,
+    ) -> None:
+        self._tools = tools
+        self._argument_chunk_chars = max(1, int(argument_chunk_chars))
+        self._raw = ""
+        self._tool_calls: list[dict[str, Any]] | None = None
+        self._fallback_reason: str | None = None
+
+    @property
+    def tool_calls(self) -> list[dict[str, Any]] | None:
+        return self._tool_calls
+
+    @property
+    def fallback_reason(self) -> str | None:
+        return self._fallback_reason
+
+    @property
+    def raw_text(self) -> str:
+        return self._raw
+
+    def feed(self, text: str) -> list[dict[str, Any]]:
+        self._raw += text
+        return []
+
+    def finish(self) -> list[dict[str, Any]]:
+        try:
+            tool_calls = _parse_generated_tool_calls(self._raw, tools=self._tools)
+        except HTTPException as exc:
+            self._fallback_reason = _tool_protocol_reason(exc)
+            return []
+        if not tool_calls:
+            return []
+        self._tool_calls = tool_calls
+        return list(
+            _stream_tool_call_deltas(
+                tool_calls,
+                argument_chunk_chars=self._argument_chunk_chars,
+            )
+        )
+
+
 class _ToolAwareContentStreamTranslator:
     """Translate streamed assistant text into OpenAI tool-call deltas when needed."""
 
     _START_MARKER = "<tool_call"
+    _CLOSE_MARKER = "</tool_call>"
 
     def __init__(
         self,
@@ -1789,8 +2160,10 @@ class _ToolAwareContentStreamTranslator:
         self._pending = ""
         self._trailing = ""
         self._mode = "passthrough" if not tools else "undecided"
+        self._tool_parser: _ToolCallStreamParser | None = None
         self.tool_calls: list[dict[str, Any]] | None = None
         self.fallback_reason: str | None = None
+        self.tool_parser_dialect: str | None = None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -1888,8 +2261,21 @@ class _ToolAwareContentStreamTranslator:
             return self._tool_deltas_if_complete(final=True)
         if self._mode == "done":
             if self._trailing.strip():
+                stripped_trailing = self._trailing.strip().lower()
+                if self._CLOSE_MARKER.endswith(stripped_trailing):
+                    self._trailing = ""
+                    return []
+                cleaned = re.sub(
+                    r"^\s*</tool_call>\s*",
+                    "",
+                    self._trailing,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                if not cleaned.strip():
+                    self._trailing = ""
+                    return []
                 self.fallback_reason = "text after tool_call block"
-                trailing = self._trailing
+                trailing = cleaned
                 self._trailing = ""
                 self._mode = "content"
                 return [{"content": trailing}]
@@ -1902,32 +2288,54 @@ class _ToolAwareContentStreamTranslator:
         return []
 
     def _tool_deltas_if_complete(self, *, final: bool) -> list[dict[str, Any]]:
-        if not final:
-            return []
-        try:
-            tool_calls = _parse_generated_tool_calls(self._pending, tools=self._tools)
-        except HTTPException as exc:
-            self.fallback_reason = _tool_protocol_reason(exc)
-            content = self._pending
-            self._pending = ""
+        if self._tool_parser is None:
+            self._tool_parser = _QwenXMLToolCallStreamParser(tools=self._tools)
+            self.tool_parser_dialect = self._tool_parser.dialect
+        chunk = self._pending
+        self._pending = ""
+        deltas = self._tool_parser.feed(chunk)
+        if self._tool_parser.fallback_reason:
+            self.fallback_reason = self._tool_parser.fallback_reason
+            content = self._tool_parser.raw_text
+            self._tool_parser = None
             self._mode = "content"
             return [{"content": content}]
-        if not tool_calls:
-            if final:
-                content = self._pending
-                self._pending = ""
-                self._mode = "content"
-                return [{"content": content}]
-            return []
-        self.tool_calls = tool_calls
-        self._pending = ""
-        self._mode = "done"
-        return list(
-            _stream_tool_call_deltas(
-                tool_calls,
-                argument_chunk_chars=self._argument_chunk_chars,
-            )
+        if self._tool_parser.tool_calls:
+            self.tool_calls = self._tool_parser.tool_calls
+            self._mode = "done"
+            return deltas
+        if not final:
+            return deltas
+        final_deltas = self._tool_parser.finish()
+        if self._tool_parser.tool_calls:
+            self.tool_calls = self._tool_parser.tool_calls
+            self._mode = "done"
+            return deltas + final_deltas
+        if self._tool_parser.fallback_reason:
+            self.fallback_reason = self._tool_parser.fallback_reason
+            content = self._tool_parser.raw_text
+            self._tool_parser = None
+            self._mode = "content"
+            return [{"content": content}]
+        buffered = _BufferedFallbackToolCallParser(
+            tools=self._tools,
+            argument_chunk_chars=self._argument_chunk_chars,
         )
+        self.tool_parser_dialect = buffered.dialect
+        buffered.feed(self._tool_parser.raw_text)
+        buffered_deltas = buffered.finish()
+        if buffered.tool_calls:
+            self.tool_calls = buffered.tool_calls
+            self._mode = "done"
+            return buffered_deltas
+        if buffered.fallback_reason:
+            self.fallback_reason = buffered.fallback_reason
+            content = buffered.raw_text
+            self._mode = "content"
+            return [{"content": content}]
+        content = buffered.raw_text
+        self._mode = "content"
+        return [{"content": content}]
 
 
 def _template_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
@@ -2037,6 +2445,7 @@ def _encode_messages(
     strip_assistant_reasoning_history: bool = False,
     add_generation_prompt: bool = True,
     tools: list[dict[str, Any]] | None = None,
+    template_observability: dict[str, Any] | None = None,
 ) -> list[int]:
     normalized: list[dict[str, Any]] = []
     for message in messages:
@@ -2078,25 +2487,47 @@ def _encode_messages(
                     **fallback_kwargs,
                 )
             )
-        except TypeError as exc:
+        except (TypeError, Exception) as exc:
             if tools:
-                raise HTTPException(
-                    status_code=500,
-                    detail="tokenizer chat template does not support tool schemas",
-                ) from exc
-        except Exception as exc:
-            if tools:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"tokenizer chat template failed with tool schemas: {exc}",
-                ) from exc
+                try:
+                    if template_observability is not None:
+                        template_observability["tool_template_fallback"] = True
+                    return _coerce_token_ids(
+                        tokenizer.apply_chat_template(
+                            normalized,
+                            tokenize=True,
+                            add_generation_prompt=add_generation_prompt,
+                        )
+                    )
+                except Exception as schema_free_exc:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            "tokenizer chat template failed after removing native "
+                            f"tool schemas: {schema_free_exc}"
+                        ),
+                    ) from schema_free_exc
             pass
     except Exception as exc:
         if tools:
-            raise HTTPException(
-                status_code=500,
-                detail=f"tokenizer chat template failed with tool schemas: {exc}",
-            ) from exc
+            try:
+                if template_observability is not None:
+                    template_observability["tool_template_fallback"] = True
+                return _coerce_token_ids(
+                    tokenizer.apply_chat_template(
+                        normalized,
+                        tokenize=True,
+                        add_generation_prompt=add_generation_prompt,
+                    )
+                )
+            except Exception as schema_free_exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "tokenizer chat template failed after removing native "
+                        f"tool schemas: {schema_free_exc}"
+                    ),
+                ) from schema_free_exc
             pass
     prompt = "\n".join(f"{item['role']}: {item['content']}" for item in normalized)
     if add_generation_prompt:
@@ -2287,6 +2718,10 @@ def _json_safe(value: Any) -> Any:
 
 
 def _request_extra(model: BaseModel, key: str, default: Any = None) -> Any:
+    if hasattr(model, key):
+        value = getattr(model, key)
+        if value is not None:
+            return value
     extra = getattr(model, "model_extra", None) or {}
     return extra.get(key, default)
 
@@ -2294,6 +2729,14 @@ def _request_extra(model: BaseModel, key: str, default: Any = None) -> Any:
 def _request_metadata(model: BaseModel) -> dict[str, Any]:
     metadata = _request_extra(model, "metadata", {})
     return metadata if isinstance(metadata, dict) else {}
+
+
+def _request_max_tokens(request: BaseModel) -> int | None:
+    value = getattr(request, "max_tokens", None)
+    if value is not None:
+        return int(value)
+    alias = getattr(request, "max_completion_tokens", None)
+    return None if alias is None else int(alias)
 
 
 def _normalize_generation_mode(value: Any, *, default: str = "mtp") -> str:
@@ -2680,6 +3123,7 @@ PUBLIC_MTPLX_STATS_KEYS = (
     "tool_parse_fallback",
     "tool_parse_fallback_reason",
     "tool_parse_fallback_kind",
+    "tool_parser_dialect",
     "request_session_source",
     "request_session_prefix_diagnostic",
 )
@@ -2719,6 +3163,21 @@ def _request_observability(
     request_generation_mode: str,
     request_depth: int,
 ) -> dict[str, Any]:
+    declared_extra_keys = [
+        key
+        for key in (
+            "max_completion_tokens",
+            "stream_options",
+            "response_format",
+            "metadata",
+            "parallel_tool_calls",
+            "user",
+        )
+        if getattr(request, key, None) is not None
+    ]
+    model_extra_keys = sorted((getattr(request, "model_extra", None) or {}).keys())
+    user_agent = headers.get("user-agent") or headers.get("User-Agent") or ""
+    client_hint = "android_studio" if "android" in user_agent.lower() or "jetbrains" in user_agent.lower() else None
     user_texts = [
         _content_to_text(message.content)
         for message in request.messages
@@ -2741,10 +3200,13 @@ def _request_observability(
         "request_message_chars": [
             len(_content_to_text(message.content)) for message in request.messages
         ],
-        "request_extra_keys": sorted(
-            (getattr(request, "model_extra", None) or {}).keys()
-        ),
+        "request_extra_keys": sorted(set(model_extra_keys + declared_extra_keys)),
         "request_metadata_keys": sorted(metadata.keys()),
+        "request_client_hint": client_hint,
+        "request_tool_count": len(request.tools or []),
+        "request_tool_names": [
+            name for tool in (request.tools or []) if (name := _tool_spec_name(tool))
+        ],
         "request_session_source": session_source,
         "request_session_candidate_headers": candidate_headers,
         "request_generation_mode": request_generation_mode,
@@ -6006,6 +6468,7 @@ def create_app(state: ServerState) -> FastAPI:
             raise HTTPException(status_code=400, detail="messages must not be empty")
         headers = dict(raw_request.headers)
         metadata = _request_metadata(request)
+        request_max_tokens = _request_max_tokens(request)
         cache_bypass = headers.get("x-mtplx-cache-mode", "").lower() in {
             "bypass",
             "stateless",
@@ -6019,7 +6482,7 @@ def create_app(state: ServerState) -> FastAPI:
         tools_active = _tools_active_for_request(tool_specs, request.tool_choice)
         background = is_background_request(
             messages=request.messages,
-            max_tokens=request.max_tokens,
+            max_tokens=request_max_tokens,
             headers=headers,
             metadata=metadata,
             main_system_hash=state.main_system_prompt_hash,
@@ -6053,12 +6516,14 @@ def create_app(state: ServerState) -> FastAPI:
             request,
             generation_mode=request_generation_mode,
         )
+        template_observability: dict[str, Any] = {}
         prompt_ids = _encode_messages(
             state.runtime.tokenizer,
             request.messages,
             enable_thinking=thinking_enabled,
             strip_assistant_reasoning_history=state.args.strip_assistant_reasoning_history,
             tools=tool_specs if tools_active else None,
+            template_observability=template_observability,
         )
         current_system_hash = system_prompt_hash(request.messages)
         if current_system_hash is not None and not background:
@@ -6105,6 +6570,11 @@ def create_app(state: ServerState) -> FastAPI:
             request_generation_mode=request_generation_mode,
             request_depth=request_depth,
         )
+        request_observability.update(template_observability)
+        if template_observability.get("tool_template_fallback"):
+            _record_tool_parse_event(state, event="tool_template_fallback")
+        if request_observability.get("request_client_hint") == "android_studio":
+            _record_tool_parse_event(state, event="android_studio_request_detected")
         prefix_diagnostic = getattr(state.sessions, "last_prefix_diagnostic", None)
         if isinstance(prefix_diagnostic, dict):
             request_observability["request_session_prefix_diagnostic"] = prefix_diagnostic
@@ -6117,7 +6587,7 @@ def create_app(state: ServerState) -> FastAPI:
                 return _run_generation(
                     state,
                     prompt_ids,
-                    max_tokens=request.max_tokens,
+                    max_tokens=request_max_tokens,
                     temperature=request.temperature,
                     top_p=request.top_p,
                     top_k=request.top_k,
@@ -6140,7 +6610,7 @@ def create_app(state: ServerState) -> FastAPI:
                 generated_result = _run_generation(
                     state,
                     prompt_ids,
-                    max_tokens=request.max_tokens,
+                    max_tokens=request_max_tokens,
                     temperature=request.temperature,
                     top_p=request.top_p,
                     top_k=request.top_k,
@@ -6340,7 +6810,7 @@ def create_app(state: ServerState) -> FastAPI:
                             generated = _run_generation(
                                 state,
                                 prompt_ids,
-                                max_tokens=request.max_tokens,
+                                max_tokens=request_max_tokens,
                                 temperature=request.temperature,
                                 top_p=request.top_p,
                                 top_k=request.top_k,
@@ -6365,7 +6835,7 @@ def create_app(state: ServerState) -> FastAPI:
                                 generated = _run_generation(
                                     state,
                                     prompt_ids,
-                                    max_tokens=request.max_tokens,
+                                    max_tokens=request_max_tokens,
                                     temperature=request.temperature,
                                     top_p=request.top_p,
                                     top_k=request.top_k,
@@ -6518,11 +6988,9 @@ def create_app(state: ServerState) -> FastAPI:
                 def error_chunk(exc: BaseException) -> str:
                     if isinstance(exc, HTTPException):
                         message = str(exc.detail)
-                        error_type = str(exc.status_code)
                         status_code = exc.status_code
                     else:
                         message = str(exc)
-                        error_type = type(exc).__name__
                         status_code = 500
                     payload = {
                         "id": response_id,
@@ -6532,11 +7000,11 @@ def create_app(state: ServerState) -> FastAPI:
                         "choices": [
                             {"index": 0, "delta": {}, "finish_reason": "error"}
                         ],
-                        "error": {
-                            "message": message,
-                            "type": error_type,
-                            "status_code": status_code,
-                        },
+                        **_openai_error_content(
+                            message,
+                            status_code=status_code,
+                            code=type(exc).__name__,
+                        ),
                     }
                     return f"data: {json.dumps(payload)}\n\n"
 
@@ -6735,7 +7203,25 @@ def create_app(state: ServerState) -> FastAPI:
                             for chunk in finish_translated_stream_chunks():
                                 yield mark_sse_sent(chunk)
                             assistant_tool_calls = tool_stream.tool_calls
+                            if tool_stream.tool_parser_dialect:
+                                generated["stats"]["tool_parser_dialect"] = (
+                                    tool_stream.tool_parser_dialect
+                                )
                             if assistant_tool_calls:
+                                if tool_stream.tool_parser_dialect == "qwen_xml":
+                                    _record_tool_parse_event(
+                                        state,
+                                        event="tool_stream_xml_started",
+                                        response_id=response_id,
+                                        stream=True,
+                                    )
+                                elif tool_stream.tool_parser_dialect == "buffered":
+                                    _record_tool_parse_event(
+                                        state,
+                                        event="tool_stream_json_buffered",
+                                        response_id=response_id,
+                                        stream=True,
+                                    )
                                 _record_tool_parse_event(
                                     state,
                                     event="tool_parse_success",
@@ -7091,11 +7577,49 @@ def create_app(state: ServerState) -> FastAPI:
             }
         )
 
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+        _record_tool_parse_event(state, event="openai_error_response")
+        return JSONResponse(
+            status_code=exc.status_code,
+            headers=getattr(exc, "headers", None),
+            content=_openai_error_content(
+                str(exc.detail),
+                status_code=exc.status_code,
+                code=type(exc).__name__,
+            ),
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        _record_tool_parse_event(state, event="openai_error_response")
+        first = exc.errors()[0] if exc.errors() else {}
+        loc = first.get("loc") if isinstance(first, dict) else None
+        param = ".".join(str(item) for item in loc) if isinstance(loc, (list, tuple)) else None
+        message = first.get("msg") if isinstance(first, dict) else str(exc)
+        return JSONResponse(
+            status_code=422,
+            content=_openai_error_content(
+                str(message),
+                status_code=422,
+                code="request_validation_error",
+                param=param,
+            ),
+        )
+
     @app.exception_handler(Exception)
     async def unhandled_exception(_request: Request, exc: Exception) -> JSONResponse:
+        _record_tool_parse_event(state, event="openai_error_response")
+        request_id = uuid.uuid4().hex[:12]
         return JSONResponse(
             status_code=500,
-            content={"error": {"message": str(exc), "type": type(exc).__name__}},
+            content=_openai_error_content(
+                f"{type(exc).__name__}: {exc} (request_id={request_id})",
+                status_code=500,
+                code=type(exc).__name__,
+            ),
         )
 
     return app

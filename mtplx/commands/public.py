@@ -744,6 +744,72 @@ def _opencode_doctor_report(args: Any) -> dict[str, Any]:
     }
 
 
+def _android_studio_doctor_report(args: Any) -> dict[str, Any]:
+    host = str(getattr(args, "host", None) or "127.0.0.1")
+    port = int(getattr(args, "port", None) or 8008)
+    base_url = str(getattr(args, "base_url", None) or f"http://{host}:{port}/v1").rstrip("/")
+    models = _http_json(f"{base_url}/models", timeout=3.0)
+    model_id = DEFAULT_PUBLIC_MODEL_ID
+    data = models.get("data") if isinstance(models, dict) else None
+    if isinstance(data, list) and data:
+        first = data[0]
+        if isinstance(first, dict) and first.get("id"):
+            model_id = str(first["id"])
+    chat_payload = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_completion_tokens": 16,
+    }
+    stream_payload = {
+        **chat_payload,
+        "max_completion_tokens": 8,
+        "enable_thinking": False,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    tool_payload = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": "Say OK. Do not call tools."}],
+        "max_completion_tokens": 8,
+        "enable_thinking": False,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "android_studio_check",
+                    "description": "No-op compatibility check for Android Studio.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"ok": {"type": "string"}},
+                        "required": ["ok"],
+                    },
+                },
+            }
+        ],
+        "tool_choice": "auto",
+        "parallel_tool_calls": False,
+        "response_format": {"type": "text"},
+    }
+    return {
+        "base_url": base_url,
+        "paste_url": base_url,
+        "url_schema": "OpenAI-compatible",
+        "api_key": "blank for localhost unless MTPLX was started with --api-key",
+        "model": model_id,
+        "models": models,
+        "chat_nonstream": _http_post_json(
+            f"{base_url}/chat/completions", chat_payload, timeout=20.0
+        ),
+        "chat_stream": _http_post_text(
+            f"{base_url}/chat/completions", stream_payload, timeout=20.0
+        ),
+        "tool_request": _http_post_json(
+            f"{base_url}/chat/completions", tool_payload, timeout=30.0
+        ),
+        "expected_start_command": "mtplx start --port 8008",
+    }
+
+
 def _git_value(args: list[str], *, cwd: Path) -> str | None:
     try:
         proc = subprocess.run(
@@ -897,6 +963,8 @@ def cmd_doctor(args: Any) -> int:
     )
     if getattr(args, "topic", None) == "opencode":
         report["opencode"] = _opencode_doctor_report(args)
+    if getattr(args, "topic", None) in {"android-studio", "android_studio"}:
+        report["android_studio"] = _android_studio_doctor_report(args)
     if getattr(args, "deep", False):
         report = _deep_doctor_report(args, report)
     if getattr(args, "bundle", False):
@@ -949,6 +1017,17 @@ def cmd_doctor(args: Any) -> int:
             print(f"  base URL: {opencode.get('base_url') or 'missing'}")
             print(f"  reasoning field: {opencode.get('reasoning_field') or 'missing'}")
             print(f"  hidden maxTokens: {str(bool(opencode.get('has_hidden_max_tokens'))).lower()}")
+        if report.get("android_studio"):
+            android = report["android_studio"]
+            print("Android Studio:")
+            print(f"  URL: {android.get('paste_url')}")
+            print(f"  URL schema: {android.get('url_schema')}")
+            print(f"  model: {android.get('model')}")
+            print(f"  /v1/models: {'ok' if android.get('models', {}).get('data') else 'check failed'}")
+            print(
+                "  /v1/chat/completions: "
+                f"{'ok' if android.get('chat_nonstream', {}).get('ok') else 'check failed'}"
+            )
     return 0
 
 
@@ -2068,6 +2147,66 @@ def _http_json(url: str, *, timeout: float = 15.0) -> dict[str, Any]:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": str(exc), "url": url}
+
+
+def _http_post_json(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            text = response.read().decode("utf-8")
+            return {
+                "ok": 200 <= int(response.status) < 300,
+                "status": int(response.status),
+                "json": json.loads(text),
+            }
+    except urllib.error.HTTPError as exc:
+        text = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed: Any = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = text
+        return {"ok": False, "status": exc.code, "error": parsed, "url": url}
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": str(exc), "url": url}
+
+
+def _http_post_text(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            text = response.read().decode("utf-8", errors="replace")
+            return {
+                "ok": 200 <= int(response.status) < 300,
+                "status": int(response.status),
+                "preview": text[:1200],
+            }
+    except urllib.error.HTTPError as exc:
+        text = exc.read().decode("utf-8", errors="replace")
+        return {"ok": False, "status": exc.code, "error": text[:1200], "url": url}
+    except (urllib.error.URLError, TimeoutError) as exc:
         return {"ok": False, "error": str(exc), "url": url}
 
 

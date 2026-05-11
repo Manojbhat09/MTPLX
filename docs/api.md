@@ -20,6 +20,10 @@ Lists cached and active models.
 OpenAI-compatible chat completions. Streaming uses server-sent events.
 Use `--stream-interval N` to batch committed-token SSE chunks when a client prefers less frequent events.
 Requests may set `generation_mode` to `"mtp"` or `"ar"`. `"ar"` uses target-only AR generation and reports `mtp_depth: 0`; it does not unload MTP weights, so the server can switch back to MTP on a later request.
+When tools are active, Qwen XML tool calls are translated into OpenAI
+`delta.tool_calls` chunks as the function name and arguments stream. Unknown or
+malformed tool-shaped output falls back to assistant content rather than hanging
+or returning a server 500.
 
 ## `POST /v1/completions`
 

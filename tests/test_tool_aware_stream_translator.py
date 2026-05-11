@@ -2,16 +2,42 @@
 tool-only responses (the original v0.2.0 fix) and mixed text+tool responses
 (this fix - issue #20)."""
 
+import json
+
 from mtplx.server.openai import _ToolAwareContentStreamTranslator
 
 
 TOOL_SPECS = [{"function": {"name": "lookup", "parameters": {"type": "object"}}}]
+WRITE_FILE_TOOL_SPECS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "contents": {"type": "string"},
+                },
+                "required": ["path", "contents"],
+            },
+        },
+    }
+]
 
 
 def _make(*, tools=TOOL_SPECS):
     return _ToolAwareContentStreamTranslator(
         tools=tools,
         argument_chunk_chars=64,
+    )
+
+
+def _argument_text(deltas):
+    return "".join(
+        item.get("function", {}).get("arguments", "")
+        for delta in deltas
+        for item in delta.get("tool_calls", [])
     )
 
 
@@ -37,15 +63,15 @@ def test_pure_text_response():
 def test_pure_tool_call_response_streamed_in_pieces():
     """Tool-only response (the v0.2.0 happy path) still works after the patch."""
     t = _make()
+    deltas = []
     # Stream the marker in pieces so we exercise the prefix-hold path
     assert t.feed("content", "<tool_") == []
-    assert t.feed("content", "call>\n<function=lookup>\n") == []
-    assert t.feed("content", "<parameter=q>\nhello\n</parameter>\n") == []
-    assert t.feed("content", "</function>\n</tool_call>") == []
-    finish_deltas = t.finish()
+    deltas.extend(t.feed("content", "call>\n<function=lookup>\n"))
+    deltas.extend(t.feed("content", "<parameter=q>\nhello\n</parameter>\n"))
+    deltas.extend(t.feed("content", "</function>\n</tool_call>"))
+    deltas.extend(t.finish())
     assert t.has_tool_calls is True
-    # finish() should have emitted tool_calls deltas
-    assert any("tool_calls" in d for d in finish_deltas)
+    assert any("tool_calls" in d for d in deltas)
 
 
 # ---------- the NEW bug-fix coverage ----------
@@ -64,9 +90,10 @@ def test_mixed_text_then_tool_call_in_one_chunk():
     contents = [d["content"] for d in out if "content" in d]
     assert "Let me search.\n" in "".join(contents)
     finish_deltas = t.finish()
+    all_deltas = out + finish_deltas
     assert t.has_tool_calls is True
-    assert any("tool_calls" in d for d in finish_deltas), \
-        "tool_calls should be in deltas after finish()"
+    assert any("tool_calls" in d for d in all_deltas), \
+        "tool_calls should be emitted as soon as the XML function appears"
 
 
 def test_mixed_text_then_tool_call_streamed_in_pieces():
@@ -77,15 +104,16 @@ def test_mixed_text_then_tool_call_streamed_in_pieces():
     # Preamble emits as content
     assert any(d.get("content") == "I will investigate. " for d in deltas_a)
     # Now the marker arrives
-    t.feed(
+    all_deltas = list(deltas_a)
+    all_deltas.extend(t.feed(
         "content",
         "<tool_call>\n<function=lookup>\n"
         "<parameter=q>\ny\n</parameter>\n"
         "</function>\n</tool_call>",
-    )
-    finish_deltas = t.finish()
+    ))
+    all_deltas.extend(t.finish())
     assert t.has_tool_calls is True
-    assert any("tool_calls" in d for d in finish_deltas)
+    assert any("tool_calls" in d for d in all_deltas)
 
 
 def test_partial_marker_held_across_chunks_in_content_mode():
@@ -99,15 +127,16 @@ def test_partial_marker_held_across_chunks_in_content_mode():
     assert not any("<tool_ca" in c for c in contents_a)
 
     # Complete the marker
-    t.feed(
+    all_deltas = list(out_a)
+    all_deltas.extend(t.feed(
         "content",
         "ll>\n<function=lookup>\n"
         "<parameter=q>\ny\n</parameter>\n"
         "</function>\n</tool_call>",
-    )
-    finish_deltas = t.finish()
+    ))
+    all_deltas.extend(t.finish())
     assert t.has_tool_calls is True
-    assert any("tool_calls" in d for d in finish_deltas)
+    assert any("tool_calls" in d for d in all_deltas)
 
 
 def test_lookalike_marker_prefix_in_content_does_not_block_emission():
@@ -141,7 +170,7 @@ def test_marker_split_across_three_chunks_after_text():
     contents = [d["content"] for d in (a + b + c) if "content" in d]
     assert "hello " in "".join(contents)
     assert t.has_tool_calls is True
-    assert any("tool_calls" in d for d in finish_deltas)
+    assert any("tool_calls" in d for d in (a + b + c + finish_deltas))
 
 
 def test_leading_whitespace_before_marker_still_dropped():
@@ -159,7 +188,7 @@ def test_leading_whitespace_before_marker_still_dropped():
     assert all(c.strip() for c in contents) or contents == []
     finish_deltas = t.finish()
     assert t.has_tool_calls is True
-    assert any("tool_calls" in d for d in finish_deltas)
+    assert any("tool_calls" in d for d in (out + finish_deltas))
 
 
 def test_unknown_tool_name_falls_back_to_content():
@@ -169,8 +198,8 @@ def test_unknown_tool_name_falls_back_to_content():
         "<parameter=description>\nList files\n</parameter>\n"
         "</function>\n</tool_call>"
     )
-    assert t.feed("content", text) == []
-    assert t.finish() == [{"content": text}]
+    assert t.feed("content", text) == [{"content": text}]
+    assert t.finish() == []
     assert t.has_tool_calls is False
     assert t.fallback_reason == "unknown tool 'Agent'"
 
@@ -182,3 +211,37 @@ def test_unclosed_tool_call_falls_back_to_content():
     assert t.finish() == [{"content": text}]
     assert t.has_tool_calls is False
     assert t.fallback_reason == "unclosed <tool_call> block"
+
+
+def test_qwen_xml_tool_call_streams_name_before_long_arguments():
+    t = _make(tools=WRITE_FILE_TOOL_SPECS)
+    assert t.feed("content", "<tool_call>\n") == []
+    assert t.feed("content", "<function=write_file>\n") == []
+    name_deltas = t.feed("content", "<parameter=path>")
+    assert any(
+        item.get("function", {}).get("name") == "write_file"
+        for delta in name_deltas
+        for item in delta.get("tool_calls", [])
+    )
+    arg_deltas = []
+    arg_deltas.extend(t.feed("content", "app.js</parameter>\n"))
+    arg_deltas.extend(t.feed("content", "<parameter=contents>const label = 'he"))
+    arg_deltas.extend(t.feed("content", "llo 🌍';\n</parameter>\n"))
+    arg_deltas.extend(t.feed("content", "</function>\n</tool_call>"))
+    arg_deltas.extend(t.finish())
+
+    args = json.loads(_argument_text(name_deltas + arg_deltas))
+    assert args == {"path": "app.js", "contents": "const label = 'hello 🌍';"}
+    assert "\\ud83c" not in _argument_text(name_deltas + arg_deltas)
+    assert t.has_tool_calls is True
+    assert t.tool_parser_dialect == "qwen_xml"
+
+
+def test_existing_json_tool_call_final_parse_still_works():
+    t = _make()
+    text = '<tool_call>{"name":"lookup","arguments":{"q":"hello"}}</tool_call>'
+    assert t.feed("content", text) == []
+    deltas = t.finish()
+    assert t.has_tool_calls is True
+    assert json.loads(_argument_text(deltas)) == {"q": "hello"}
+    assert t.tool_parser_dialect == "buffered"

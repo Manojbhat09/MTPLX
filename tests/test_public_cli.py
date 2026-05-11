@@ -1724,6 +1724,7 @@ def test_product_helper_commands_parse():
     serve_start = parser.parse_args(["serve", "--port", "18012"])
     status = parser.parse_args(["status", "--deep"])
     doctor_opencode = parser.parse_args(["doctor", "opencode", "--json"])
+    doctor_android = parser.parse_args(["doctor", "android-studio", "--port", "8008", "--json"])
     connect = parser.parse_args(["connect", "openwebui", "--port", "18012"])
     connect_opencode = parser.parse_args(["connect", "opencode", "--port", "18012"])
     models = parser.parse_args(["models", "--json"])
@@ -1774,6 +1775,9 @@ def test_product_helper_commands_parse():
     assert status.deep is True
     assert doctor_opencode.command == "doctor"
     assert doctor_opencode.topic == "opencode"
+    assert doctor_android.command == "doctor"
+    assert doctor_android.topic == "android-studio"
+    assert doctor_android.port == 8008
     assert connect.command == "connect"
     assert connect.integration == "openwebui"
     assert connect_opencode.integration == "opencode"
@@ -1858,6 +1862,38 @@ def test_integrate_opencode_json_uses_raw_reasoning_contract(capsys):
     assert model["interleaved"] == {"field": "reasoning_content"}
     assert model["options"]["enable_thinking"] is True
     assert "reasoningSummary" not in model["options"]
+
+
+def test_doctor_android_studio_json_reports_openai_compatibility(monkeypatch, capsys):
+    monkeypatch.setattr(
+        public,
+        "_http_json",
+        lambda url, timeout=15.0: {
+            "object": "list",
+            "data": [{"id": "mtplx-qwen36-27b-optimized-speed"}],
+        },
+    )
+    monkeypatch.setattr(
+        public,
+        "_http_post_json",
+        lambda url, payload, timeout=15.0: {"ok": True, "status": 200, "json": {}},
+    )
+    monkeypatch.setattr(
+        public,
+        "_http_post_text",
+        lambda url, payload, timeout=15.0: {"ok": True, "status": 200, "preview": "data: [DONE]"},
+    )
+
+    code = main(["doctor", "android-studio", "--port", "8008", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    android = payload["android_studio"]
+    assert android["paste_url"] == "http://127.0.0.1:8008/v1"
+    assert android["url_schema"] == "OpenAI-compatible"
+    assert android["model"] == "mtplx-qwen36-27b-optimized-speed"
+    assert android["chat_nonstream"]["ok"] is True
+    assert android["chat_stream"]["ok"] is True
 
 
 def test_config_set_dry_run_uses_selected_path(tmp_path, capsys):

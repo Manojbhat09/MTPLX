@@ -1851,8 +1851,11 @@ def build_parser() -> argparse.ArgumentParser:
     env_p.set_defaults(func=_cmd_env)
 
     doctor_p = sub.add_parser("doctor", help="Check MTPLX CLI, model, thermal, and tool environment")
-    doctor_p.add_argument("topic", nargs="?", choices=["opencode"], help="Optional focused doctor target")
+    doctor_p.add_argument("topic", nargs="?", choices=["opencode", "android-studio"], help="Optional focused doctor target")
     doctor_p.add_argument("--project-root", default=".")
+    doctor_p.add_argument("--host", default="127.0.0.1")
+    doctor_p.add_argument("--port", type=int, default=8008)
+    doctor_p.add_argument("--base-url")
     doctor_p.add_argument("--smc-path", default=os.environ.get("MTPLX_SMC_PATH") or shutil.which("smc") or "")
     doctor_p.add_argument("--sovereign-path", default=os.environ.get("MTPLX_SOVEREIGN_PATH") or shutil.which("sovereign") or "")
     doctor_p.add_argument("--model-cache")

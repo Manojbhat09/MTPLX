@@ -356,7 +356,7 @@ def test_anthropic_messages_rejects_empty_request_before_generation():
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "messages must not be empty"
+    assert response.json()["error"]["message"] == "messages must not be empty"
 
 
 def test_chat_ui_uses_server_depth_default():
@@ -753,7 +753,66 @@ def test_invalid_generation_mode_returns_400():
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "generation_mode must be 'mtp' or 'ar'"
+    assert response.json()["error"]["message"] == "generation_mode must be 'mtp' or 'ar'"
+    assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_chat_accepts_max_completion_tokens_alias_and_benign_extras(monkeypatch):
+    state = _fake_state()
+    state.runtime.tokenizer = CaptureTokenizer()
+    client = TestClient(create_app(state))
+    seen_max_tokens: list[int | None] = []
+
+    def fake_run_generation(_state, _prompt_ids, **kwargs):
+        seen_max_tokens.append(kwargs.get("max_tokens"))
+        return _fake_generation("ok")
+
+    monkeypatch.setattr(openai, "_run_generation", fake_run_generation)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-mtplx-cache-mode": "bypass", "user-agent": "AndroidStudio"},
+        json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 7,
+            "stream_options": {"include_usage": True},
+            "response_format": {"type": "text"},
+            "parallel_tool_calls": False,
+            "metadata": {"client": "android-studio"},
+            "user": "local-user",
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen_max_tokens == [7]
+
+
+def test_android_studio_issue58_replay_fixture_is_accepted(monkeypatch):
+    state = _fake_state()
+    state.runtime.tokenizer = CaptureTokenizer()
+    client = TestClient(create_app(state))
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "android_studio_issue58_chat.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    fixture["stream"] = False
+    seen_max_tokens: list[int | None] = []
+
+    def fake_run_generation(_state, _prompt_ids, **kwargs):
+        seen_max_tokens.append(kwargs.get("max_tokens"))
+        return _fake_generation("ok")
+
+    monkeypatch.setattr(openai, "_run_generation", fake_run_generation)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-mtplx-cache-mode": "bypass", "user-agent": "AndroidStudio"},
+        json=fixture,
+    )
+
+    assert response.status_code == 200
+    assert seen_max_tokens == [64]
 
 
 class CaptureTokenizer:
@@ -769,6 +828,14 @@ class CaptureTokenizer:
 
     def decode(self, tokens, **_kwargs):
         return "".join(chr(int(token)) for token in tokens)
+
+
+class ToolSchemaRejectingTokenizer(CaptureTokenizer):
+    def apply_chat_template(self, messages, **kwargs):
+        self.calls.append((messages, kwargs))
+        if "tools" in kwargs:
+            raise RuntimeError("rich tool schemas are unsupported")
+        return [1, 2, 3]
 
 
 def _tool_schema():
@@ -930,6 +997,36 @@ def test_tool_contract_includes_exact_schema_keys_for_opencode_write(monkeypatch
     assert '"filePath":"<string>"' in contract
     assert '"content":"<string>"' in contract
     assert "exact argument keys/case" in contract
+
+
+def test_tool_template_schema_failure_retries_with_compact_contract(monkeypatch):
+    state = _fake_state()
+    state.runtime.tokenizer = ToolSchemaRejectingTokenizer()
+    state.args.stats_footer = False
+    client = TestClient(create_app(state))
+    monkeypatch.setattr(
+        openai, "_run_generation", lambda *_args, **_kwargs: _fake_generation("ok")
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-mtplx-cache-mode": "bypass"},
+        json={
+            "messages": [{"role": "user", "content": "Write a file."}],
+            "tools": [_write_tool_schema()],
+            "tool_choice": "auto",
+            "max_tokens": 8,
+        },
+    )
+
+    assert response.status_code == 200
+    first_messages, first_kwargs = state.runtime.tokenizer.calls[0]
+    second_messages, second_kwargs = state.runtime.tokenizer.calls[-1]
+    assert "tools" in first_kwargs
+    assert "tools" not in second_kwargs
+    assert first_messages == second_messages
+    assert "MTPLX tool contract:" in second_messages[0]["content"]
+    assert "write(filePath:string, content:string, createDirs?:boolean)" in second_messages[0]["content"]
 
 
 def test_chat_tools_honor_explicit_disable_thinking(monkeypatch):

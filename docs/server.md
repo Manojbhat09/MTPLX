@@ -43,6 +43,26 @@ same local server root:
 http://127.0.0.1:8000/v1
 ```
 
+## Android Studio
+
+Android Studio's external model provider should use the OpenAI-compatible URL
+schema and the MTPLX `/v1` base URL:
+
+```text
+URL: http://127.0.0.1:8008/v1
+URL schema: OpenAI-compatible
+API key: leave blank for localhost unless MTPLX was started with --api-key
+```
+
+Refresh the model list after the server starts. MTPLX supports the OpenAI chat,
+streaming, and tool-call request shape used by local coding clients; Gemini-only
+proprietary behavior is outside that compatibility contract. To verify a local
+setup, run:
+
+```bash
+mtplx doctor android-studio --port 8008
+```
+
 Use `--no-stats-footer` for Open WebUI, Claude Code, OpenCode, and other
 clients that treat assistant content as the only user-visible answer. Metrics
 remain available at `/metrics`.
