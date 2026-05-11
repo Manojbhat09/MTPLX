@@ -1,5 +1,11 @@
 # Prefill chunk-size split (dense=4096 / repage=2048) - 128k validation
 
+> Superseded 2026-05-11: the dense/repage split is no longer the sustained
+> product default. Follow-up OpenCode/Pi-shaped cold prefill QA showed 2048
+> wins the user-facing metrics at 32k/64k, so sustained mode now uses 2048 for
+> both dense and repage defaults and keeps the v0.2-style dense path through
+> 128k.
+
 **Status: COMPLETE.** Bench executed 2026-05-09 against the local M5 Max.
 
 ## Hypothesis (from PR #33 maintainer review)

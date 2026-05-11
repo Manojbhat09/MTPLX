@@ -440,7 +440,7 @@ def _prefill_chunk_size() -> int:
     if raw == "auto":
         layout = _sustained_prefill_layout()
         if layout == "contiguous_dense_decode":
-            return max(1, _env_int("MTPLX_PREFILL_CHUNK_SIZE_DENSE", 4096))
+            return max(1, _env_int("MTPLX_PREFILL_CHUNK_SIZE_DENSE", 2048))
         return max(1, _env_int("MTPLX_PREFILL_CHUNK_SIZE_REPAGE", 2048))
     try:
         return max(1, int(raw))
@@ -479,7 +479,7 @@ def _sustained_prefill_layout() -> str:
     if layout != "auto":
         return layout
     context_tokens = _env_int("MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS", 0)
-    dense_max = _env_int("MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT", 65536)
+    dense_max = _env_int("MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT", 131072)
     if context_tokens > 0 and context_tokens <= dense_max:
         return "contiguous_dense_decode"
     return "contiguous_then_repage"
@@ -489,7 +489,7 @@ def _defer_verify_hidden_eval_enabled() -> bool:
     raw = (os.environ.get("MTPLX_DEFER_VERIFY_HIDDEN_EVAL") or "").strip().lower()
     if raw == "auto":
         context_tokens = _env_int("MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS", 0)
-        dense_max = _env_int("MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT", 65536)
+        dense_max = _env_int("MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT", 131072)
         return context_tokens > 0 and context_tokens <= dense_max
     return _env_truthy("MTPLX_DEFER_VERIFY_HIDDEN_EVAL")
 

@@ -74,19 +74,15 @@ SUSTAINED_PREFILL_ENV = {
     **NATIVE_MTP_60_FAST_PATH_ENV,
     "MTPLX_SUSTAINED_PREFILL": "1",
     "MTPLX_SUSTAINED_PREFILL_LAYOUT": "auto",
-    # Dense decode cutoff locked at 64k; contexts above this fall through to
-    # the repage path which uses a smaller chunk size (see _REPAGE below).
-    "MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT": "65536",
+    # Keep the v0.2 sustained default through the 128k class: current release
+    # QA shows this is the better OpenCode/Pi user path for TTFT, prefill TPS,
+    # decode TPS, and memory than the short-lived dense/repage chunk split.
+    "MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT": "131072",
     # MTPLX_PREFILL_CHUNK_SIZE is retained as a legacy single-knob fallback:
-    # if set to a numeric value it overrides BOTH paths. "auto" routes to the
-    # split below based on the active prefill layout. New code should set the
-    # _DENSE / _REPAGE knobs instead.
+    # if set to a numeric value it overrides BOTH paths. "auto" resolves to
+    # the per-layout defaults below, which intentionally match in product mode.
     "MTPLX_PREFILL_CHUNK_SIZE": "auto",
-    # Dense path (contexts <= 64k): 4096 amortizes Python loop overhead during
-    # contiguous prefill and lifts decode mean ~+29% on the long-context bench.
-    "MTPLX_PREFILL_CHUNK_SIZE_DENSE": "4096",
-    # Repage path (contexts > 64k): 4096 regresses 128k TTFT on this layout, so
-    # the repage path stays at the prior 2048 chunk size.
+    "MTPLX_PREFILL_CHUNK_SIZE_DENSE": "2048",
     "MTPLX_PREFILL_CHUNK_SIZE_REPAGE": "2048",
     "MTPLX_PREFILL_CHUNK_CACHE_CLEANUP": "1",
     "MTPLX_PREFILL_CHUNK_CACHE_CLEANUP_EVERY": "auto",

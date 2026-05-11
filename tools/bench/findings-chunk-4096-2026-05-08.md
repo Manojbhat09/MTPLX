@@ -1,5 +1,11 @@
 # Prefill chunk-size 4096 vs 2048 (sustained profile, 2026-05-08)
 
+> Superseded 2026-05-11: this cached 40-pass growth benchmark is useful
+> historical evidence, but it is not the product default. A later
+> OpenCode/Pi-shaped cold prefill ladder showed 2048 is better for TTFT,
+> prompt TPS, decode TPS, and memory at 32k/64k, so sustained mode reverted to
+> 2048 for both dense and repage defaults.
+
 ## Headline
 
 Bumping `MTPLX_PREFILL_CHUNK_SIZE_DENSE` and `MTPLX_PREFILL_CHUNK_SIZE_REPAGE`
@@ -30,9 +36,11 @@ from 2048 -> 4096 yields a clean win on the 40-pass context-growth benchmark.
 - Memory peak slightly lower (37.9 GB vs 38.8 GB) - bigger chunks mean
   fewer cleanup/repage cycles at long ctx.
 
-## Action
+## Historical action
 
-Promoted to default in `mtplx/profiles.py` SUSTAINED_PREFILL_ENV.
+Initially promoted to default in `mtplx/profiles.py` SUSTAINED_PREFILL_ENV.
+This was later reverted because the user-facing cold long-context path
+regressed.
 
 ## Per-pass detail (chunk 4096)
 

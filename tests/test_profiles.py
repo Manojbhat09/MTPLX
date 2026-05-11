@@ -94,9 +94,9 @@ def test_sustained_profile_is_native_mtp_long_context_path() -> None:
     assert profile.draft_lm_head is not None
     assert profile.env_dict() == SUSTAINED_PREFILL_ENV
     assert profile.env_dict()["MTPLX_SUSTAINED_PREFILL_LAYOUT"] == "auto"
-    assert profile.env_dict()["MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT"] == "65536"
+    assert profile.env_dict()["MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT"] == "131072"
     assert profile.env_dict()["MTPLX_PREFILL_CHUNK_SIZE"] == "auto"
-    assert profile.env_dict()["MTPLX_PREFILL_CHUNK_SIZE_DENSE"] == "4096"
+    assert profile.env_dict()["MTPLX_PREFILL_CHUNK_SIZE_DENSE"] == "2048"
     assert profile.env_dict()["MTPLX_PREFILL_CHUNK_SIZE_REPAGE"] == "2048"
     assert profile.env_dict()["MTPLX_PREFILL_CHUNK_CACHE_CLEANUP"] == "1"
     assert profile.env_dict()["MTPLX_PREFILL_CHUNK_CACHE_CLEANUP_EVERY"] == "auto"
