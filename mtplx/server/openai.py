@@ -1902,6 +1902,7 @@ class _QwenXMLToolCallStreamParser(_ToolCallStreamParser):
     dialect = "qwen_xml"
     _PARAM_CLOSE = "</parameter>"
     _FUNCTION_CLOSE = "</function>"
+    _TOOL_CALL_CLOSE = "</tool_call>"
 
     def __init__(
         self,
@@ -1926,6 +1927,7 @@ class _QwenXMLToolCallStreamParser(_ToolCallStreamParser):
         self._fallback_reason: str | None = None
         self._started = False
         self._name_delta_emitted = False
+        self._remaining_text = ""
 
     @property
     def tool_calls(self) -> list[dict[str, Any]] | None:
@@ -1942,6 +1944,39 @@ class _QwenXMLToolCallStreamParser(_ToolCallStreamParser):
     @property
     def started(self) -> bool:
         return self._started
+
+    @property
+    def remaining_text(self) -> str:
+        return self._remaining_text
+
+    def _finish_call(self, deltas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not self._name_delta_emitted:
+            deltas.append(
+                _tool_delta(
+                    self._call_index,
+                    call_id=self._call_id,
+                    name=str(self._name or ""),
+                    arguments="",
+                )
+            )
+            self._name_delta_emitted = True
+        suffix = "}" if self._arg_open else "{}"
+        deltas.append(_tool_delta(self._call_index, arguments=suffix))
+        self._done = True
+        self._tool_calls = [
+            {
+                "id": self._call_id,
+                "type": "function",
+                "function": {
+                    "name": str(self._name or ""),
+                    "arguments": _json_object_string(
+                        self._params,
+                        context=f"tool_call[{self._call_index}]",
+                    ),
+                },
+            }
+        ]
+        return deltas
 
     def feed(self, text: str) -> list[dict[str, Any]]:
         if self._done or self._fallback_reason:
@@ -1978,36 +2013,11 @@ class _QwenXMLToolCallStreamParser(_ToolCallStreamParser):
                 if function_close >= 0 and (
                     param_start < 0 or function_close < param_start
                 ):
-                    self._buf = self._buf[function_close + len(self._FUNCTION_CLOSE) :]
-                    if not self._name_delta_emitted:
-                        deltas.append(
-                            _tool_delta(
-                                self._call_index,
-                                call_id=self._call_id,
-                                name=str(self._name or ""),
-                                arguments="",
-                            )
-                        )
-                        self._name_delta_emitted = True
-                    suffix = "}" if self._arg_open else "{}"
-                    deltas.append(
-                        _tool_delta(self._call_index, arguments=suffix)
-                    )
-                    self._done = True
-                    self._tool_calls = [
-                        {
-                            "id": self._call_id,
-                            "type": "function",
-                            "function": {
-                                "name": str(self._name or ""),
-                                "arguments": _json_object_string(
-                                    self._params,
-                                    context=f"tool_call[{self._call_index}]",
-                                ),
-                            },
-                        }
+                    self._buf = self._buf[
+                        function_close + len(self._FUNCTION_CLOSE) :
                     ]
-                    return deltas
+                    self._stage = "after_function"
+                    continue
                 if param_start < 0:
                     return deltas
                 param_end = self._buf.find(">", param_start)
@@ -2087,6 +2097,16 @@ class _QwenXMLToolCallStreamParser(_ToolCallStreamParser):
                 self._buf = self._buf[close_start + len(self._PARAM_CLOSE) :]
                 self._stage = "find_parameter"
                 continue
+
+            if self._stage == "after_function":
+                tool_close = _find_casefold(self._buf, self._TOOL_CALL_CLOSE)
+                if tool_close < 0:
+                    return deltas
+                self._remaining_text = self._buf[
+                    tool_close + len(self._TOOL_CALL_CLOSE) :
+                ]
+                self._buf = ""
+                return self._finish_call(deltas)
 
             return deltas
 
@@ -2185,6 +2205,12 @@ class _ToolAwareContentStreamTranslator:
             return [{field: text}]
         if self._mode == "done":
             self._trailing += text
+            idx = self._trailing.lower().find(self._START_MARKER)
+            if idx >= 0 and not self._trailing[:idx].strip():
+                self._pending = self._trailing[idx:]
+                self._trailing = ""
+                self._mode = "tool"
+                return self._tool_deltas_if_complete(final=False)
             return []
 
         self._pending += text
@@ -2298,53 +2324,97 @@ class _ToolAwareContentStreamTranslator:
 
     def _tool_deltas_if_complete(self, *, final: bool) -> list[dict[str, Any]]:
         if self._tool_parser is None:
-            self._tool_parser = _QwenXMLToolCallStreamParser(tools=self._tools)
+            self._tool_parser = _QwenXMLToolCallStreamParser(
+                tools=self._tools,
+                call_index=len(self.tool_calls or []),
+            )
             self.tool_parser_dialect = self._tool_parser.dialect
         chunk = self._pending
         self._pending = ""
-        deltas = self._tool_parser.feed(chunk)
-        if self._tool_parser.fallback_reason:
-            self.fallback_reason = self._tool_parser.fallback_reason
-            content = self._tool_parser.raw_text
+        deltas: list[dict[str, Any]] = []
+
+        while True:
+            assert self._tool_parser is not None
+            deltas.extend(self._tool_parser.feed(chunk))
+            chunk = ""
+            if self._tool_parser.fallback_reason:
+                self.fallback_reason = self._tool_parser.fallback_reason
+                content = self._tool_parser.raw_text
+                self._tool_parser = None
+                self._mode = "content"
+                return [{"content": content}]
+            if self._tool_parser.tool_calls:
+                self.tool_calls = (self.tool_calls or []) + self._tool_parser.tool_calls
+                remaining = getattr(self._tool_parser, "remaining_text", "")
+                self._tool_parser = None
+                if not remaining:
+                    self._mode = "done"
+                    return deltas
+                idx = remaining.lower().find(self._START_MARKER)
+                if idx >= 0 and not remaining[:idx].strip():
+                    self._tool_parser = _QwenXMLToolCallStreamParser(
+                        tools=self._tools,
+                        call_index=len(self.tool_calls or []),
+                    )
+                    self.tool_parser_dialect = self._tool_parser.dialect
+                    chunk = remaining[idx:]
+                    self._mode = "tool"
+                    continue
+                self._trailing += remaining
+                self._mode = "done"
+                return deltas
+            if not final:
+                return deltas
+
+            final_deltas = self._tool_parser.finish()
+            if final_deltas:
+                deltas.extend(final_deltas)
+            if self._tool_parser.tool_calls:
+                self.tool_calls = (self.tool_calls or []) + self._tool_parser.tool_calls
+                remaining = getattr(self._tool_parser, "remaining_text", "")
+                self._tool_parser = None
+                if not remaining:
+                    self._mode = "done"
+                    return deltas
+                idx = remaining.lower().find(self._START_MARKER)
+                if idx >= 0 and not remaining[:idx].strip():
+                    self._tool_parser = _QwenXMLToolCallStreamParser(
+                        tools=self._tools,
+                        call_index=len(self.tool_calls or []),
+                    )
+                    self.tool_parser_dialect = self._tool_parser.dialect
+                    chunk = remaining[idx:]
+                    self._mode = "tool"
+                    continue
+                self._trailing += remaining
+                self._mode = "done"
+                return deltas
+            if self._tool_parser.fallback_reason:
+                self.fallback_reason = self._tool_parser.fallback_reason
+                content = self._tool_parser.raw_text
+                self._tool_parser = None
+                self._mode = "content"
+                return [{"content": content}]
+            buffered = _BufferedFallbackToolCallParser(
+                tools=self._tools,
+                argument_chunk_chars=self._argument_chunk_chars,
+            )
+            self.tool_parser_dialect = buffered.dialect
+            buffered.feed(self._tool_parser.raw_text)
+            buffered_deltas = buffered.finish()
             self._tool_parser = None
-            self._mode = "content"
-            return [{"content": content}]
-        if self._tool_parser.tool_calls:
-            self.tool_calls = self._tool_parser.tool_calls
-            self._mode = "done"
-            return deltas
-        if not final:
-            return deltas
-        final_deltas = self._tool_parser.finish()
-        if self._tool_parser.tool_calls:
-            self.tool_calls = self._tool_parser.tool_calls
-            self._mode = "done"
-            return deltas + final_deltas
-        if self._tool_parser.fallback_reason:
-            self.fallback_reason = self._tool_parser.fallback_reason
-            content = self._tool_parser.raw_text
-            self._tool_parser = None
-            self._mode = "content"
-            return [{"content": content}]
-        buffered = _BufferedFallbackToolCallParser(
-            tools=self._tools,
-            argument_chunk_chars=self._argument_chunk_chars,
-        )
-        self.tool_parser_dialect = buffered.dialect
-        buffered.feed(self._tool_parser.raw_text)
-        buffered_deltas = buffered.finish()
-        if buffered.tool_calls:
-            self.tool_calls = buffered.tool_calls
-            self._mode = "done"
-            return buffered_deltas
-        if buffered.fallback_reason:
-            self.fallback_reason = buffered.fallback_reason
+            if buffered.tool_calls:
+                self.tool_calls = (self.tool_calls or []) + buffered.tool_calls
+                self._mode = "done"
+                return deltas + buffered_deltas
+            if buffered.fallback_reason:
+                self.fallback_reason = buffered.fallback_reason
+                content = buffered.raw_text
+                self._mode = "content"
+                return [{"content": content}]
             content = buffered.raw_text
             self._mode = "content"
             return [{"content": content}]
-        content = buffered.raw_text
-        self._mode = "content"
-        return [{"content": content}]
 
 
 def _template_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:

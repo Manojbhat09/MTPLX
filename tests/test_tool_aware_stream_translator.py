@@ -237,6 +237,52 @@ def test_qwen_xml_tool_call_streams_name_before_long_arguments():
     assert t.tool_parser_dialect == "qwen_xml"
 
 
+def test_consecutive_qwen_xml_tool_calls_do_not_leak_as_content():
+    t = _make()
+    text = (
+        "<tool_call>\n<function=lookup>\n"
+        "<parameter=q>\none\n</parameter>\n"
+        "</function>\n</tool_call>\n"
+        "<tool_call>\n<function=lookup>\n"
+        "<parameter=q>\ntwo\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    out = t.feed("content", text)
+    out.extend(t.finish())
+
+    assert not any("<tool_call" in d.get("content", "") for d in out)
+    assert t.tool_calls is not None
+    assert len(t.tool_calls) == 2
+    args = [
+        json.loads(call["function"]["arguments"])
+        for call in t.tool_calls
+    ]
+    assert args == [{"q": "one"}, {"q": "two"}]
+    indices = [
+        item.get("index")
+        for delta in out
+        for item in delta.get("tool_calls", [])
+        if item.get("function", {}).get("name") == "lookup"
+    ]
+    assert indices == [0, 1]
+
+
+def test_consecutive_qwen_xml_tool_call_close_split_does_not_leak_tail():
+    t = _make()
+    out = []
+    out.extend(t.feed("content", "<tool_call>\n<function=lookup>\n"))
+    out.extend(t.feed("content", "<parameter=q>\none\n</parameter>\n</function>\n</tool"))
+    out.extend(t.feed("content", "_call>\n<tool_call>\n<function=lookup>\n"))
+    out.extend(t.feed("content", "<parameter=q>\ntwo\n</parameter>\n</function>\n</tool_call>"))
+    out.extend(t.finish())
+
+    content = "".join(d.get("content", "") for d in out)
+    assert "_call>" not in content
+    assert "<tool_call" not in content
+    assert t.tool_calls is not None
+    assert len(t.tool_calls) == 2
+
+
 def test_existing_json_tool_call_final_parse_still_works():
     t = _make()
     text = '<tool_call>{"name":"lookup","arguments":{"q":"hello"}}</tool_call>'
