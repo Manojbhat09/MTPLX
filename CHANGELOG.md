@@ -4,6 +4,34 @@ All notable user-facing changes are recorded here.
 
 ## Unreleased
 
+## v0.3.3
+
+### Added
+
+- Added `mtplx doctor android-studio` diagnostics for OpenAI-compatible model
+  discovery, nonstream chat, streaming chat, and tool-bearing request smoke.
+- Added Android Studio/OpenAI-compatible request-shape tolerance for
+  `max_completion_tokens`, `stream_options`, `response_format`, `metadata`,
+  `parallel_tool_calls`, and other benign client metadata fields.
+
+### Changed
+
+- Qwen XML tool calls now stream OpenAI `delta.tool_calls` incrementally, so
+  long file-write/edit tool calls can mount in compatible clients before the
+  full argument body has finished generating.
+- Pi handoff no longer writes a hidden model-level `maxTokens` cap; the client
+  metadata still advertises the correct `max_tokens` field without silently
+  limiting responses.
+
+### Fixed
+
+- Fixed Android Studio issue #58 where `/v1/chat/completions` could fail as
+  `500: null` instead of returning either a valid response or a useful
+  OpenAI-shaped error envelope.
+- Hardened malformed, unknown, unclosed, or schema-invalid tool-call output so
+  it falls back safely instead of hanging, 500ing, or storing raw XML as a
+  successful assistant tool history item.
+
 ## v0.3.2
 
 ### Added
