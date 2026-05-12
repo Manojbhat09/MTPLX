@@ -1300,6 +1300,15 @@ class PromptState:
     restore_mode: str = "cold"
 
 
+class PostcommitAbort(RuntimeError):
+    """Raised when best-effort postcommit prefill yields to foreground work."""
+
+
+def _check_postcommit_abort(abort_check: Callable[[], bool] | None) -> None:
+    if abort_check is not None and bool(abort_check()):
+        raise PostcommitAbort("foreground_preempted_postcommit")
+
+
 @dataclass
 class GenerationFinalState:
     final_trunk_cache: list[Any]
@@ -1325,6 +1334,7 @@ def restore_or_prefill_prompt_state(
     template_hash: str | None = None,
     draft_head_identity: str | None = None,
     policy_fingerprint: str | None = None,
+    abort_check: Callable[[], bool] | None = None,
 ) -> PromptState:
     """Build the initial prompt state used by MTP-k decode.
 
@@ -1342,6 +1352,7 @@ def restore_or_prefill_prompt_state(
         if mtp_history_policy == "last_window"
         else 0
     )
+    _check_postcommit_abort(abort_check)
     if session_bank is not None:
         restored = session_bank.restore(
             rt,
@@ -1357,6 +1368,7 @@ def restore_or_prefill_prompt_state(
             not _mtp_history_uses_committed_cache(mtp_history_policy)
             or restored.mtp_history_cache is not None
         ):
+            _check_postcommit_abort(abort_check)
             suffix = list(prompt_ids[restored.entry.prefix_len :])
             if not suffix:
                 return PromptState(
@@ -1375,6 +1387,7 @@ def restore_or_prefill_prompt_state(
                 )
 
             started = time.perf_counter()
+            _check_postcommit_abort(abort_check)
             suffix_logits, suffix_hidden = rt.forward_ar(
                 mx.array([suffix]),
                 cache=restored.cache,
@@ -1384,6 +1397,7 @@ def restore_or_prefill_prompt_state(
                 logits_keep=1 if _final_logits_prefill_enabled() else None,
             )
             _eval(suffix_logits, suffix_hidden)
+            _check_postcommit_abort(abort_check)
             suffix_time = time.perf_counter() - started
             mtp_history_time = 0.0
             if _mtp_history_uses_committed_cache(mtp_history_policy):
@@ -1443,14 +1457,17 @@ def restore_or_prefill_prompt_state(
                     if mtp_history_policy == "last_window"
                     else None
                 ),
+                abort_check=abort_check,
             )
             prompt_eval_time = target_time + prompt_history_time
         else:
             _assert_safe_long_context_prefill(len(prompt_ids))
+            _check_postcommit_abort(abort_check)
             cache, logits, hidden, prompt_hidden, target_time = _prefill_with_hidden_sequence(
                 rt,
                 prompt_ids,
             )
+            _check_postcommit_abort(abort_check)
             prompt_eval_time = target_time
             mtp_history_cache = rt.make_mtp_cache()
             if len(prompt_ids) > 1:
@@ -1476,7 +1493,12 @@ def restore_or_prefill_prompt_state(
                 )
                 prompt_eval_time += prompt_history_time
     else:
-        cache, logits, hidden, target_time = _prefill(rt, prompt_ids, return_hidden=True)
+        cache, logits, hidden, target_time = _prefill(
+            rt,
+            prompt_ids,
+            return_hidden=True,
+            abort_check=abort_check,
+        )
         prompt_eval_time = target_time
     return PromptState(
         trunk_cache=cache,
@@ -1815,10 +1837,17 @@ def _top2_margin(logits: mx.array) -> float:
     return _draft_confidence_metrics(logits, topk=2)["top2_margin"]
 
 
-def _prefill(rt: MTPLXRuntime, prompt_ids: list[int], *, return_hidden: bool):
+def _prefill(
+    rt: MTPLXRuntime,
+    prompt_ids: list[int],
+    *,
+    return_hidden: bool,
+    abort_check: Callable[[], bool] | None = None,
+):
     if not prompt_ids:
         raise ValueError("prompt_ids must not be empty")
 
+    _check_postcommit_abort(abort_check)
     cache = _make_target_prefill_cache(rt)
     target_forward_time = 0.0
     final_logits_only = _final_logits_prefill_enabled()
@@ -1827,6 +1856,7 @@ def _prefill(rt: MTPLXRuntime, prompt_ids: list[int], *, return_hidden: bool):
         body = prompt_ids[:-1]
         body_array = mx.array([body])
         for start, end in _iter_prefill_chunk_spans(len(body)):
+            _check_postcommit_abort(abort_check)
             chunk_array = body_array[:, start:end]
             started = time.perf_counter()
             with attention_phase("prefill"):
@@ -1838,8 +1868,10 @@ def _prefill(rt: MTPLXRuntime, prompt_ids: list[int], *, return_hidden: bool):
             _runtime_count(rt, "prefill_chunks")
             target_forward_time += time.perf_counter() - started
             target_forward_time += _prefill_chunk_cache_cleanup(rt)
+            _check_postcommit_abort(abort_check)
 
     started = time.perf_counter()
+    _check_postcommit_abort(abort_check)
     with attention_phase("prefill"):
         result = rt.forward_ar(
             mx.array([[prompt_ids[-1]]]),
@@ -1858,6 +1890,7 @@ def _prefill(rt: MTPLXRuntime, prompt_ids: list[int], *, return_hidden: bool):
         _eval(logits)
     target_forward_time += time.perf_counter() - started
     target_forward_time += _maybe_repage_target_prefill_cache(cache)
+    _check_postcommit_abort(abort_check)
     return cache, logits[:, -1, :], hidden, target_forward_time
 
 
@@ -1867,10 +1900,12 @@ def _prefill_committed_mtp_history_streaming(
     *,
     mtp_hidden_variant: str,
     history_window_tokens: int | None = None,
+    abort_check: Callable[[], bool] | None = None,
 ):
     if not prompt_ids:
         raise ValueError("prompt_ids must not be empty")
 
+    _check_postcommit_abort(abort_check)
     cache = _make_target_prefill_cache(rt)
     mtp_history_cache = rt.make_mtp_cache()
     target_forward_time = 0.0
@@ -1887,6 +1922,7 @@ def _prefill_committed_mtp_history_streaming(
     cursor = 0
     body_array = mx.array([body]) if body else None
     for start, end in _iter_prefill_chunk_spans(len(body)):
+        _check_postcommit_abort(abort_check)
         chunk_array = body_array[:, start:end]
         chunk_len = end - start
         token_start_index = cursor + 1
@@ -1919,6 +1955,7 @@ def _prefill_committed_mtp_history_streaming(
             _eval(logits_chunk, hidden_chunk)
         target_forward_time += time.perf_counter() - started
         _runtime_count(rt, "prefill_chunks")
+        _check_postcommit_abort(abort_check)
 
         if hidden_chunk is not None:
             token_ids = prompt_ids[token_start_index : token_start_index + chunk_len]
@@ -1943,12 +1980,15 @@ def _prefill_committed_mtp_history_streaming(
                     ),
                     force_eval=True,
                 )
+                _check_postcommit_abort(abort_check)
         cursor += chunk_len
         del hidden_chunk
         del logits_chunk
         target_forward_time += _prefill_chunk_cache_cleanup(rt)
+        _check_postcommit_abort(abort_check)
 
     started = time.perf_counter()
+    _check_postcommit_abort(abort_check)
     with attention_phase("prefill"):
         logits, hidden = rt.forward_ar(
             mx.array([[prompt_ids[-1]]]),
@@ -1961,6 +2001,7 @@ def _prefill_committed_mtp_history_streaming(
     _eval(logits, hidden)
     target_forward_time += time.perf_counter() - started
     target_forward_time += _maybe_repage_target_prefill_cache(cache)
+    _check_postcommit_abort(abort_check)
     return (
         cache,
         logits[:, -1, :],

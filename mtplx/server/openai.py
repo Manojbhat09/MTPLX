@@ -62,6 +62,7 @@ from mtplx.server_urls import bind_label, is_wildcard_bind, local_url_for_bind
 
 try:
     from mtplx.generation import (
+        PostcommitAbort,
         generate_ar,
         generate_mtpk,
         restore_or_prefill_prompt_state,
@@ -90,6 +91,9 @@ except Exception as exc:
     generate_mtpk = _missing_runtime
     restore_or_prefill_prompt_state = _missing_runtime
     load = _missing_runtime
+
+    class PostcommitAbort(RuntimeError):
+        pass
 
     def native_mlp_stats() -> dict[str, Any]:
         return {"available": False, "error": repr(_RUNTIME_IMPORT_ERROR)}
@@ -893,6 +897,11 @@ def _submit_idle_postcommit_model_work(
 
 def _foreground_model_work_pending(state: Any) -> bool:
     scheduler = getattr(state, "model_scheduler", None)
+    if scheduler is not None and hasattr(scheduler, "foreground_pending_or_active"):
+        try:
+            return bool(scheduler.foreground_pending_or_active())
+        except BaseException:
+            pass
     if scheduler is not None and hasattr(scheduler, "has_foreground_pending"):
         return bool(scheduler.has_foreground_pending())
     return False
@@ -3372,9 +3381,31 @@ def _store_retokenized_history_snapshot(
     tool_specs: list[dict[str, Any]] | None = None,
     session: Any | None = None,
     expected_session_revision: int | None = None,
+    abort_check: Callable[[], bool] | None = None,
+    abort_reason: Callable[[], str] | None = None,
+    pending_record: Any | None = None,
 ) -> dict[str, Any]:
     if session_id is None:
         return {"stored": False, "reason": "no_session_id"}
+
+    def _abort_requested() -> bool:
+        if abort_check is None:
+            return False
+        try:
+            return bool(abort_check())
+        except BaseException:
+            return True
+
+    def _abort_reason() -> str:
+        if abort_reason is not None:
+            try:
+                reason = str(abort_reason() or "")
+                if reason:
+                    return reason
+            except BaseException:
+                pass
+        return "foreground_preempted_postcommit"
+
     history_ids = _history_ids_for_postcommit(
         state,
         messages=messages,
@@ -3385,6 +3416,31 @@ def _store_retokenized_history_snapshot(
     )
     if not history_ids:
         return {"stored": False, "reason": "empty_boundary_prefix"}
+    history_tokens = len(history_ids)
+    if pending_record is not None and hasattr(pending_record, "update_token_count"):
+        try:
+            pending_record.update_token_count(history_tokens)
+        except BaseException:
+            pass
+    best_prefix_len = 0
+    try:
+        best_prefix = state.sessions.bank.longest_prefix(history_ids)
+        if best_prefix is not None:
+            best_prefix_len = int(getattr(best_prefix, "prefix_len", 0) or 0)
+    except BaseException:
+        best_prefix_len = 0
+    prefix_probe = {
+        "best_prefix_len": int(best_prefix_len),
+        "history_tokens": int(history_tokens),
+        "suffix_tokens": max(0, int(history_tokens) - int(best_prefix_len)),
+    }
+    if _abort_requested():
+        return {
+            "stored": False,
+            "mode": "aborted",
+            "reason": _abort_reason(),
+            **prefix_probe,
+        }
     started = time.perf_counter()
     state.begin_foreground()
     acquired = state.lock.acquire(blocking=bool(acquire_model_lock_blocking))
@@ -3395,6 +3451,7 @@ def _store_retokenized_history_snapshot(
             "mode": "retokenized_history",
             "reason": "model_lock_busy_before_retokenized_commit",
             "elapsed_s": time.perf_counter() - started,
+            **prefix_probe,
         }
     # Pass `session_bank` (and the matching identity / policy fingerprints)
     # so the postcommit re-prefill reuses the longest matching prefix from
@@ -3412,39 +3469,55 @@ def _store_retokenized_history_snapshot(
     # tools), so `longest_prefix` matches and only the new user turn +
     # assistant turn need to be forward-AR'd.
     try:
-        with attention_phase("postcommit"):
-            prompt_state = restore_or_prefill_prompt_state(
-                state.runtime,
-                history_ids,
-                mtp_hidden_variant="post_norm",
-                mtp_history_policy="committed",
-                session_bank=state.sessions.bank,
+        try:
+            if _abort_requested():
+                raise PostcommitAbort(_abort_reason())
+            with attention_phase("postcommit"):
+                prompt_state = restore_or_prefill_prompt_state(
+                    state.runtime,
+                    history_ids,
+                    mtp_hidden_variant="post_norm",
+                    mtp_history_policy="committed",
+                    session_bank=state.sessions.bank,
+                    template_hash=state.template_hash,
+                    draft_head_identity=state.draft_head_identity,
+                    policy_fingerprint=policy_fingerprint,
+                    abort_check=abort_check,
+                )
+            if _abort_requested():
+                raise PostcommitAbort(_abort_reason())
+            mtp_snapshot = (
+                snapshot_cache(prompt_state.committed_mtp_cache)
+                if prompt_state.committed_mtp_cache is not None
+                else None
+            )
+            if _abort_requested():
+                raise PostcommitAbort(_abort_reason())
+            entry = state.sessions.bank.put(
+                runtime=state.runtime,
+                token_ids=history_ids,
+                cache=prompt_state.trunk_cache,
+                logits=prompt_state.logits,
+                hidden=prompt_state.hidden,
+                hidden_variant="post_norm",
+                keep_live_ref=True,
+                session_id=session_id,
                 template_hash=state.template_hash,
+                mtp_history_policy="committed",
                 draft_head_identity=state.draft_head_identity,
                 policy_fingerprint=policy_fingerprint,
+                mtp_history_snapshot=mtp_snapshot,
+                snapshot_epoch=len(history_ids),
+                mtp_snapshot_epoch=len(history_ids) if mtp_snapshot is not None else None,
             )
-        mtp_snapshot = (
-            snapshot_cache(prompt_state.committed_mtp_cache)
-            if prompt_state.committed_mtp_cache is not None
-            else None
-        )
-        entry = state.sessions.bank.put(
-            runtime=state.runtime,
-            token_ids=history_ids,
-            cache=prompt_state.trunk_cache,
-            logits=prompt_state.logits,
-            hidden=prompt_state.hidden,
-            hidden_variant="post_norm",
-            keep_live_ref=True,
-            session_id=session_id,
-            template_hash=state.template_hash,
-            mtp_history_policy="committed",
-            draft_head_identity=state.draft_head_identity,
-            policy_fingerprint=policy_fingerprint,
-            mtp_history_snapshot=mtp_snapshot,
-            snapshot_epoch=len(history_ids),
-            mtp_snapshot_epoch=len(history_ids) if mtp_snapshot is not None else None,
-        )
+        except PostcommitAbort:
+            return {
+                "stored": False,
+                "mode": "aborted",
+                "reason": _abort_reason(),
+                "elapsed_s": time.perf_counter() - started,
+                **prefix_probe,
+            }
     finally:
         state.lock.release()
         state.end_foreground()
@@ -3454,10 +3527,19 @@ def _store_retokenized_history_snapshot(
             "mode": "retokenized_history",
             "reason": "sessionbank_snapshot_skipped",
             "elapsed_s": time.perf_counter() - started,
+            **prefix_probe,
         }
     session_commit: dict[str, Any] | None = None
     if session is not None:
         try:
+            if _abort_requested():
+                return {
+                    "stored": False,
+                    "mode": "aborted",
+                    "reason": _abort_reason(),
+                    "elapsed_s": time.perf_counter() - started,
+                    **prefix_probe,
+                }
             commit = session.commit_retokenized_prefix(
                 token_ids=history_ids,
                 expected_revision=expected_session_revision,
@@ -3489,6 +3571,7 @@ def _store_retokenized_history_snapshot(
         # (e.g. policy mismatch, template mismatch, snapshot desync, or
         # genuine prefix divergence) is invisible in production logs - all
         # that surfaces is `elapsed_s` drifting back to ~30 s.
+        **prefix_probe,
         "cache_hit": bool(getattr(prompt_state, "cache_hit", False)),
         "cached_tokens": int(getattr(prompt_state, "cached_tokens", 0) or 0),
         "suffix_tokens": int(getattr(prompt_state, "suffix_tokens", 0) or 0),
@@ -3752,8 +3835,25 @@ def _schedule_idle_postcommit_snapshot(
         "mode": "async_pending",
         "reason": unsafe_reason,
     }
+    abort_event = Event()
+    pending_record_holder: dict[str, Any] = {}
 
     def _log(outcome: dict[str, Any]) -> None:
+        record = pending_record_holder.get("record")
+        if (
+            session is not None
+            and record is not None
+            and hasattr(session, "finish_pending_postcommit")
+        ):
+            try:
+                session.finish_pending_postcommit(record, outcome)
+            except BaseException:
+                pass
+        elif record is not None and hasattr(record, "mark_finished"):
+            try:
+                record.mark_finished(outcome)
+            except BaseException:
+                pass
         if _server_console_enabled(state):
             return
         try:
@@ -3774,18 +3874,49 @@ def _schedule_idle_postcommit_snapshot(
             # Logging must never bring down the executor; fail silently.
             pass
 
+    def _observed_session_revision() -> int | None:
+        observed = getattr(session, "revision", None) if session is not None else None
+        if observed is None:
+            return None
+        try:
+            return int(observed)
+        except (TypeError, ValueError):
+            return None
+
+    def _stale_session_revision() -> bool:
+        observed = _observed_session_revision()
+        return (
+            expected_session_revision is not None
+            and observed is not None
+            and int(observed) != int(expected_session_revision)
+        )
+
+    def _postcommit_abort_reason() -> str:
+        if _stale_session_revision():
+            return "stale_session_revision"
+        if abort_event.is_set() or _foreground_model_work_pending(state):
+            return "foreground_preempted_postcommit"
+        return "postcommit_abort_requested"
+
+    def _postcommit_abort_check() -> bool:
+        return bool(
+            abort_event.is_set()
+            or _stale_session_revision()
+            or _foreground_model_work_pending(state)
+        )
+
     def async_postcommit() -> None:
         deadline = time.monotonic() + _IDLE_POSTCOMMIT_MAX_WAIT_S
+        record = pending_record_holder.get("record")
+        if record is not None and hasattr(record, "mark_started"):
+            try:
+                record.mark_started()
+            except BaseException:
+                pass
         try:
             while True:
-                observed_revision = (
-                    getattr(session, "revision", None) if session is not None else None
-                )
-                if (
-                    expected_session_revision is not None
-                    and observed_revision is not None
-                    and int(observed_revision) != int(expected_session_revision)
-                ):
+                if _stale_session_revision():
+                    observed_revision = _observed_session_revision()
                     _log(
                         {
                             "stored": False,
@@ -3794,16 +3925,18 @@ def _schedule_idle_postcommit_snapshot(
                             "expected_session_revision": int(
                                 expected_session_revision
                             ),
-                            "observed_session_revision": int(observed_revision),
+                            "observed_session_revision": int(
+                                observed_revision or -1
+                            ),
                         }
                     )
                     return
-                if _foreground_model_work_pending(state):
+                if abort_event.is_set() or _foreground_model_work_pending(state):
                     _log(
                         {
                             "stored": False,
                             "mode": "abandoned_foreground_busy",
-                            "reason": "foreground_pending_before_postcommit",
+                            "reason": _postcommit_abort_reason(),
                         }
                     )
                     return
@@ -3819,6 +3952,9 @@ def _schedule_idle_postcommit_snapshot(
                     tool_specs=tool_specs,
                     session=session,
                     expected_session_revision=expected_session_revision,
+                    abort_check=_postcommit_abort_check,
+                    abort_reason=_postcommit_abort_reason,
+                    pending_record=record,
                 )
                 if postcommit.get("stored"):
                     _log(postcommit)
@@ -3859,7 +3995,12 @@ def _schedule_idle_postcommit_snapshot(
     # times out the next request just falls through to a cold prefill.
     if session is not None:
         try:
-            session.set_pending_postcommit(future)
+            record = session.set_pending_postcommit(
+                future,
+                abort_event=abort_event,
+                reason=unsafe_reason,
+            )
+            pending_record_holder["record"] = record
         except BaseException:
             # Telemetry plumbing must never break the request path.
             pass
@@ -7020,6 +7161,19 @@ def create_app(state: ServerState) -> FastAPI:
                         or _server_console_enabled(state)
                     ):
                         return
+                    scheduler_stats: dict[str, Any] = {}
+                    scheduler = getattr(state, "model_scheduler", None)
+                    if scheduler is not None and hasattr(scheduler, "stats"):
+                        try:
+                            scheduler_stats = dict(scheduler.stats())
+                        except BaseException:
+                            scheduler_stats = {}
+                    pending_postcommit_detail = None
+                    if session is not None and hasattr(session, "pending_postcommit_admin"):
+                        try:
+                            pending_postcommit_detail = session.pending_postcommit_admin()
+                        except BaseException:
+                            pending_postcommit_detail = None
                     print(
                         json.dumps(
                             {
@@ -7032,6 +7186,14 @@ def create_app(state: ServerState) -> FastAPI:
                                     seconds_since_last_token,
                                     6,
                                 ),
+                                "scheduler_active_kind": scheduler_stats.get("active_kind"),
+                                "scheduler_foreground_pending": scheduler_stats.get("foreground_pending"),
+                                "scheduler_idle_pending": scheduler_stats.get("idle_pending"),
+                                "postcommit_active": bool(
+                                    pending_postcommit_detail
+                                    and pending_postcommit_detail.get("active")
+                                ),
+                                "pending_postcommit": pending_postcommit_detail,
                             },
                             ensure_ascii=False,
                         ),

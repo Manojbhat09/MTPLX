@@ -210,6 +210,7 @@ def test_wait_times_out_when_postcommit_hangs(monkeypatch: pytest.MonkeyPatch) -
 
     assert outcome["outcome"] == "timeout"
     assert outcome["waited"] is True
+    assert outcome["abort_reason"] == "foreground_preempted_postcommit"
     assert elapsed < 0.5, "wait must be bounded by the timeout"
     # Future stays referenced by the executor but is removed from the
     # session - the request can now proceed cold without re-blocking.
@@ -217,6 +218,113 @@ def test_wait_times_out_when_postcommit_hangs(monkeypatch: pytest.MonkeyPatch) -
 
     block_forever.set()
     state.generation_executor.shutdown(wait=True)
+
+
+def test_running_idle_postcommit_yields_to_queued_foreground(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = openai.ModelWorkScheduler(name="postcommit-yield-test", idle_grace_s=0.0)
+    state = SimpleNamespace(
+        lock=threading.Lock(),
+        has_foreground=lambda: False,
+        generation_executor=scheduler,
+        postcommit_executor=None,
+        model_scheduler=scheduler,
+        args=SimpleNamespace(server_console=True),
+    )
+    session = EngineSession("sess-yield")
+    started = threading.Event()
+    outcomes: list[dict] = []
+
+    def fake_store(*_args, **kwargs):
+        started.set()
+        abort_check = kwargs["abort_check"]
+        abort_reason = kwargs["abort_reason"]
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if abort_check():
+                outcome = {
+                    "stored": False,
+                    "mode": "aborted",
+                    "reason": abort_reason(),
+                }
+                outcomes.append(outcome)
+                return outcome
+            time.sleep(0.01)
+        outcome = {"stored": True, "mode": "retokenized_history"}
+        outcomes.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(openai, "_store_retokenized_history_snapshot", fake_store)
+    monkeypatch.setattr(openai, "_server_console_enabled", lambda _state: True)
+
+    try:
+        openai._schedule_idle_postcommit_snapshot(state, **_kwargs(session=session))
+        assert started.wait(timeout=2.0)
+
+        foreground_ran = threading.Event()
+        foreground = scheduler.submit_foreground(lambda: foreground_ran.set())
+        foreground.result(timeout=2.0)
+
+        assert foreground_ran.is_set()
+        assert outcomes
+        assert outcomes[-1]["reason"] == "foreground_preempted_postcommit"
+    finally:
+        scheduler.shutdown(wait=True, cancel_futures=True)
+
+
+def test_running_idle_postcommit_aborts_when_revision_advances_mid_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = openai.ModelWorkScheduler(name="postcommit-stale-test", idle_grace_s=0.0)
+    state = SimpleNamespace(
+        lock=threading.Lock(),
+        has_foreground=lambda: False,
+        generation_executor=scheduler,
+        postcommit_executor=None,
+        model_scheduler=scheduler,
+        args=SimpleNamespace(server_console=True),
+    )
+    session = EngineSession("sess-stale-mid")
+    started = threading.Event()
+    outcomes: list[dict] = []
+
+    def fake_store(*_args, **kwargs):
+        started.set()
+        abort_check = kwargs["abort_check"]
+        abort_reason = kwargs["abort_reason"]
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if abort_check():
+                outcome = {
+                    "stored": False,
+                    "mode": "aborted",
+                    "reason": abort_reason(),
+                }
+                outcomes.append(outcome)
+                return outcome
+            time.sleep(0.01)
+        outcome = {"stored": True, "mode": "retokenized_history"}
+        outcomes.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(openai, "_store_retokenized_history_snapshot", fake_store)
+    monkeypatch.setattr(openai, "_server_console_enabled", lambda _state: True)
+
+    try:
+        future_info = openai._schedule_idle_postcommit_snapshot(
+            state,
+            **_kwargs(session=session),
+        )
+        assert future_info["mode"] == "async_pending"
+        assert started.wait(timeout=2.0)
+        session.revision += 1
+        session.pending_postcommit.result(timeout=2.0)
+
+        assert outcomes
+        assert outcomes[-1]["reason"] == "stale_session_revision"
+    finally:
+        scheduler.shutdown(wait=True, cancel_futures=True)
 
 
 def test_wait_metrics_attach_to_request_observability_shape() -> None:

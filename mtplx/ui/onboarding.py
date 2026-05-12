@@ -747,7 +747,7 @@ def _print_welcome() -> None:
     body.append("Three quick questions to get you set up:\n", style="")
     body.append("  1. Which model?\n", style="dim")
     body.append("  2. Which runtime mode?\n", style="dim")
-    body.append("  3. Browser chat, terminal chat, Pi, or OpenCode?\n\n", style="dim")
+    body.append("  3. Browser chat, terminal chat, Pi, OpenCode, or Swival?\n\n", style="dim")
     body.append("For each step, type the number of your choice and press Enter.", style="italic")
     panel = Panel(
         body,
@@ -1080,7 +1080,7 @@ def screen_mode() -> tuple[str, bool]:
 
 
 def screen_interface() -> str:
-    """Return the target string (``openwebui``, ``terminal``, ``pi``, or ``opencode``)."""
+    """Return the target string (``openwebui``, ``terminal``, ``pi``, ``opencode``, or ``swival``)."""
 
     _step_panel(
         step=3,
@@ -1107,16 +1107,23 @@ def screen_interface() -> str:
                 "Connect to OpenCode Desktop [coding agent]",
                 "Writes OpenCode's MTPLX provider config with raw reasoning and starts the server.",
             ),
+            (
+                "5",
+                "Connect to Swival [coding agent]",
+                "Prints the Swival generic-provider command and starts the server.",
+            ),
         ],
     )
-    choice = _prompt_choice("Select", ["1", "2", "3", "4"], default="1")
+    choice = _prompt_choice("Select", ["1", "2", "3", "4", "5"], default="1")
     if choice == "1":
         return "openwebui"
     if choice == "2":
         return "terminal"
     if choice == "3":
         return "pi"
-    return "opencode"
+    if choice == "4":
+        return "opencode"
+    return "swival"
 
 
 def screen_server_surface(
@@ -1358,6 +1365,8 @@ def _quickstart_state_is_reusable(last: dict) -> bool:
         "opencode",
         "open-code",
         "oc",
+        "swival",
+        "sv",
     }:
         return False
     if not model or "\n" in model or "\r" in model:
@@ -1589,4 +1598,6 @@ def interface_label(target: str | None) -> str:
         return "Pi  ·  coding agent"
     if target in ("opencode", "open-code", "oc"):
         return "OpenCode Desktop  ·  coding agent"
+    if target in ("swival", "sv"):
+        return "Swival  ·  coding agent"
     return target or "?"

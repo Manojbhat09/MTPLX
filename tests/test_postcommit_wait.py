@@ -83,6 +83,8 @@ def test_wait_times_out_without_raising_and_request_can_proceed_cold() -> None:
 
     assert outcome["outcome"] == "timeout"
     assert outcome["waited"] is True
+    assert outcome["abort_requested"] is True
+    assert outcome["abort_reason"] == "foreground_preempted_postcommit"
     # Bounded: should not exceed ~3x the timeout under load.
     assert elapsed < 0.5
     # The future is dropped even on timeout so we do not re-wait next turn.
@@ -380,7 +382,17 @@ def test_wait_for_pending_postcommit_concurrent_same_session() -> None:
     for outcome in timeout_outcomes.values():
         assert outcome["waited"] is True
         assert outcome["timeout_s"] == 0.1
-        assert set(outcome.keys()) == {"waited", "elapsed_s", "outcome", "timeout_s"}
+        assert outcome["abort_requested"] is True
+        assert outcome["abort_reason"] == "foreground_preempted_postcommit"
+        assert set(outcome.keys()) == {
+            "waited",
+            "elapsed_s",
+            "outcome",
+            "timeout_s",
+            "abort_requested",
+            "future_cancelled",
+            "abort_reason",
+        }
     # Bounded: both waiters must finish within a small multiple of the
     # timeout - if either had observed "no_pending" early it would have
     # returned ~immediately, but more importantly neither must hang past

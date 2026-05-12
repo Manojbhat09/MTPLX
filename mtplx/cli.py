@@ -61,7 +61,7 @@ NATIVE_MTP_60_MODEL = DEFAULT_MODEL_ID
 
 
 PUBLIC_COMMANDS = (
-    ("start", "Interactive setup → chat (model · mode · web/CLI/Pi/OpenCode)"),
+    ("start", "Interactive setup → chat (model · mode · web/CLI/Pi/OpenCode/Swival)"),
     ("help", "Detailed help; `help commands` / `help flags` / `help <name>`"),
     ("setup", "Prepare config and the model cache"),
     ("quickstart", "Run the local OpenAI/Anthropic server"),
@@ -178,6 +178,7 @@ def _format_public_help() -> str:
   mtplx start --max --port 8000       Sustained Max browser chat with fan boost
   mtplx start pi --port 8000           Configure Pi, then start the local server
   mtplx start opencode --port 18083    Configure OpenCode Desktop with raw reasoning
+  mtplx start swival --port 18084      Print Swival generic-provider command
   mtplx quickstart --profile sustained --port 8000  API server only, no chat
 
   {footer}
@@ -214,19 +215,20 @@ def _format_start_help() -> str:
     return f"""{_heading("MTPLX start")}
 
 Interactive end-to-end setup. On first run MTPLX walks you through three
-quick choices: model, runtime mode, and where to chat (browser, terminal, Pi, or OpenCode).
+quick choices: model, runtime mode, and where to chat (browser, terminal, Pi, OpenCode, or Swival).
 On later runs it offers "same as last time?" so the chat is one keypress away.
 
 What gets asked:
   1. Model — your configured model, the verified default, custom HF, or local
   2. Mode  — Sustained, Sustained Max, or Burst (Stable remains available via --profile safe)
-  3. Where — Web UI (default), terminal CLI, Pi, or OpenCode Desktop
+  3. Where — Web UI (default), terminal CLI, Pi, OpenCode Desktop, or Swival
 
 Power-user shortcuts (any of these skip the onboarding wizard):
   mtplx start --fresh                 Walk the onboarding again from scratch
   mtplx start cli                     Skip onboarding; terminal chat directly
   mtplx start pi                      Configure Pi, then serve MTPLX for Pi
   mtplx start opencode --port 18083   Configure OpenCode Desktop with raw reasoning
+  mtplx start swival --port 18084     Serve MTPLX and print the Swival command
   mtplx start --max                   Sustained Max: long-context mode with ThermalForge fan boost
   mtplx start --profile performance-cold --max
                                       Burst: old max-fan lane, max 8K context
@@ -261,6 +263,7 @@ Aliases:
   `terminal`            -> terminal chat (same as `cli`)
   `pi`                  -> Pi coding-agent connection
   `opencode`, `oc`      -> OpenCode Desktop coding-agent connection
+  `swival`, `sv`        -> Swival generic-provider connection
 """
 
 
@@ -878,6 +881,11 @@ def _cmd_connect(args: argparse.Namespace) -> int:
                     "command": "mtplx connect opencode",
                     "purpose": "Use MTPLX in OpenCode with raw reasoning_content streaming.",
                 },
+                {
+                    "name": "swival",
+                    "command": "mtplx connect swival",
+                    "purpose": "Use MTPLX through Swival's generic OpenAI-compatible provider.",
+                },
             ],
             "server": server_command,
         }
@@ -890,6 +898,7 @@ def _cmd_connect(args: argparse.Namespace) -> int:
             print("   mtplx connect openwebui")
             print("   mtplx connect claude-code")
             print("   mtplx connect opencode")
+            print("   mtplx connect swival")
         return 0
     return cmd_integrate_public(args)
 
@@ -1616,9 +1625,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     start_flow_p = sub.add_parser(
         "start",
-        help="Interactive setup → chat (model · mode · web/CLI/Pi/OpenCode)",
-        usage="mtplx start [cli|web|pi|opencode] [--fresh] [--max] [--profile sustained] [--model PATH_OR_REPO] [--prompt TEXT]",
-        description="Walk through model / mode / surface in three quick steps, then chat. Returning users get a 'same as last time?' prompt. Use --fresh to redo the onboarding, or pass any of --model / --profile / --max / cli|web|pi|opencode to skip it entirely.",
+        help="Interactive setup → chat (model · mode · web/CLI/Pi/OpenCode/Swival)",
+        usage="mtplx start [cli|web|pi|opencode|swival] [--fresh] [--max] [--profile sustained] [--model PATH_OR_REPO] [--prompt TEXT]",
+        description="Walk through model / mode / surface in three quick steps, then chat. Returning users get a 'same as last time?' prompt. Use --fresh to redo the onboarding, or pass any of --model / --profile / --max / cli|web|pi|opencode|swival to skip it entirely.",
     )
     start_flow_p.add_argument(
         "target",
@@ -1634,9 +1643,11 @@ def build_parser() -> argparse.ArgumentParser:
             "opencode",
             "open-code",
             "oc",
+            "swival",
+            "sv",
         ],
         default=None,
-        help="Web chat, terminal chat, Pi, or OpenCode Desktop coding-agent connection. Without this argument, MTPLX runs an interactive onboarding (or the 'same as last time?' prompt) on first run.",
+        help="Web chat, terminal chat, Pi, OpenCode Desktop, or Swival coding-agent connection. Without this argument, MTPLX runs an interactive onboarding (or the 'same as last time?' prompt) on first run.",
     )
     start_flow_p.add_argument(
         "--fresh",
@@ -1816,8 +1827,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     quickstart_server_p.set_defaults(func=cmd_serve_public)
 
-    connect_p = sub.add_parser("connect", help="Show client setup for Open WebUI, Claude Code, or OpenCode")
-    connect_p.add_argument("integration", nargs="?", choices=["openwebui", "claude-code", "opencode"])
+    connect_p = sub.add_parser("connect", help="Show client setup for Open WebUI, Claude Code, OpenCode, or Swival")
+    connect_p.add_argument("integration", nargs="?", choices=["openwebui", "claude-code", "opencode", "swival"])
     connect_p.add_argument("--host", default="127.0.0.1")
     connect_p.add_argument("--port", type=int, default=8000)
     connect_p.add_argument("--model-id", default=DEFAULT_PUBLIC_MODEL_ID)
@@ -1828,6 +1839,7 @@ def build_parser() -> argparse.ArgumentParser:
     connect_p.add_argument("--api-key", default="mtplx-local", help="OpenAI-compatible API key value for generated Docker command")
     connect_p.add_argument("--smoke", action="store_true")
     connect_p.add_argument("--timeout", type=float, default=5.0)
+    connect_p.add_argument("--context-window", type=int, default=262144)
     connect_p.add_argument("--json", action="store_true")
     connect_p.set_defaults(func=_cmd_connect)
 
@@ -2547,7 +2559,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     integrate_p = sub.add_parser("integrate", help="Print client integration settings")
     integrate_sub = integrate_p.add_subparsers(dest="integration", required=True)
-    for integration_name in ("openwebui", "claude-code", "opencode"):
+    for integration_name in ("openwebui", "claude-code", "opencode", "swival"):
         integration_p = integrate_sub.add_parser(integration_name)
         integration_p.add_argument("--host", default="127.0.0.1")
         integration_p.add_argument("--port", type=int, default=8000)
@@ -2559,6 +2571,7 @@ def build_parser() -> argparse.ArgumentParser:
         integration_p.add_argument("--api-key", default="mtplx-local")
         integration_p.add_argument("--smoke", action="store_true")
         integration_p.add_argument("--timeout", type=float, default=5.0)
+        integration_p.add_argument("--context-window", type=int, default=262144)
         integration_p.add_argument("--json", action="store_true")
         integration_p.set_defaults(func=cmd_integrate_public)
 

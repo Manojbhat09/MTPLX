@@ -13,7 +13,7 @@ import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from threading import Lock
+from threading import Event, Lock
 from typing import Any, Iterator, Mapping
 
 from .session_bank import (
@@ -197,13 +197,13 @@ def is_background_request(
     )
 
 
-_DEFAULT_POSTCOMMIT_WAIT_TIMEOUT_S = 30.0
+_DEFAULT_POSTCOMMIT_WAIT_TIMEOUT_S = 2.0
 
 
 def _postcommit_wait_timeout_s() -> float:
     """Read MTPLX_POSTCOMMIT_WAIT_TIMEOUT_S from the environment.
 
-    Defaults to 30s. Values <= 0 disable the wait (returns 0.0). Bad values
+    Defaults to 2s. Values <= 0 disable the wait (returns 0.0). Bad values
     fall back to the default so a typo does not leave the server hanging.
     """
     raw = os.environ.get("MTPLX_POSTCOMMIT_WAIT_TIMEOUT_S")
@@ -216,6 +216,67 @@ def _postcommit_wait_timeout_s() -> float:
     if value < 0:
         return 0.0
     return value
+
+
+@dataclass
+class PendingPostcommit:
+    """Best-effort SessionBank maintenance currently tied to a session.
+
+    The future remains the compatibility surface; this record adds the
+    information needed to make idle maintenance cancellable and observable.
+    """
+
+    future: Any
+    abort_event: Event = field(default_factory=Event)
+    reason: str = "postcommit"
+    token_count: int = 0
+    created_at_s: float = field(default_factory=time.time)
+    started_at_s: float | None = None
+    finished_at_s: float | None = None
+    last_outcome: dict[str, Any] | None = None
+    last_abort_reason: str | None = None
+
+    def mark_started(self) -> None:
+        if self.started_at_s is None:
+            self.started_at_s = time.time()
+
+    def mark_finished(self, outcome: dict[str, Any] | None = None) -> None:
+        self.finished_at_s = time.time()
+        if outcome is not None:
+            self.last_outcome = outcome
+
+    def abort(self, reason: str) -> bool:
+        self.last_abort_reason = str(reason)
+        self.abort_event.set()
+        cancel = getattr(self.future, "cancel", None)
+        if callable(cancel):
+            try:
+                return bool(cancel())
+            except BaseException:
+                return False
+        return False
+
+    def update_token_count(self, token_count: int) -> None:
+        try:
+            self.token_count = max(0, int(token_count))
+        except (TypeError, ValueError):
+            self.token_count = 0
+
+    def to_admin_dict(self) -> dict[str, Any]:
+        now = time.time()
+        future = self.future
+        return {
+            "active": bool(future is not None and not getattr(future, "done", lambda: False)()),
+            "reason": self.reason,
+            "token_count": int(self.token_count),
+            "age_s": max(0.0, now - float(self.created_at_s)),
+            "created_at_s": self.created_at_s,
+            "started_at_s": self.started_at_s,
+            "finished_at_s": self.finished_at_s,
+            "abort_requested": self.abort_event.is_set(),
+            "last_abort_reason": self.last_abort_reason,
+            "last_outcome": self.last_outcome,
+        }
 
 
 class EngineSession:
@@ -242,7 +303,7 @@ class EngineSession:
         # cascade documented in PR #34. Always written/read while NOT holding
         # the session lock to preserve the no-deadlock ordering. Type kept as
         # Any to avoid pulling concurrent.futures into hot import paths.
-        self.pending_postcommit: Any = None
+        self._pending_postcommit: PendingPostcommit | None = None
         # Per-session lock guarding `pending_postcommit` reads/writes. This is
         # SEPARATE from `_lock` (which guards `in_flight_generation`) so that
         # `wait_for_pending_postcommit` can serialize access to the future
@@ -253,6 +314,21 @@ class EngineSession:
         self._postcommit_lock = Lock()
         # Last wait outcome, exposed via to_admin_dict for the metrics endpoint.
         self.last_postcommit_wait: dict[str, Any] | None = None
+        self.last_postcommit_outcome: dict[str, Any] | None = None
+
+    @property
+    def pending_postcommit(self) -> Any:
+        record = self._pending_postcommit
+        return None if record is None else record.future
+
+    @pending_postcommit.setter
+    def pending_postcommit(self, future: Any) -> None:
+        if future is None:
+            self._pending_postcommit = None
+        elif isinstance(future, PendingPostcommit):
+            self._pending_postcommit = future
+        else:
+            self._pending_postcommit = PendingPostcommit(future=future)
 
     @property
     def prefix_len(self) -> int:
@@ -265,7 +341,14 @@ class EngineSession:
         now = time.time() if now_s is None else float(now_s)
         return now - self.last_access_s > self.idle_ttl_s
 
-    def set_pending_postcommit(self, future: Any) -> None:
+    def set_pending_postcommit(
+        self,
+        future: Any,
+        *,
+        abort_event: Event | None = None,
+        reason: str = "postcommit",
+        token_count: int = 0,
+    ) -> PendingPostcommit:
         """Record a reference to in-flight postcommit work for this session.
 
         The next request in this session calls wait_for_pending_postcommit()
@@ -276,12 +359,56 @@ class EngineSession:
         The write is guarded by `_postcommit_lock` so it cannot race with a
         concurrent `wait_for_pending_postcommit` reading the field.
         """
+        record = (
+            future
+            if isinstance(future, PendingPostcommit)
+            else PendingPostcommit(
+                future=future,
+                abort_event=abort_event or Event(),
+                reason=str(reason or "postcommit"),
+                token_count=max(0, int(token_count or 0)),
+            )
+        )
         with self._postcommit_lock:
-            self.pending_postcommit = future
+            self._pending_postcommit = record
+        return record
 
     def has_pending_postcommit(self) -> bool:
         with self._postcommit_lock:
-            return self.pending_postcommit is not None
+            return self._pending_postcommit is not None
+
+    def pending_postcommit_admin(self) -> dict[str, Any] | None:
+        with self._postcommit_lock:
+            record = self._pending_postcommit
+            if record is None:
+                return None
+            return record.to_admin_dict()
+
+    def abort_pending_postcommit(self, reason: str) -> dict[str, Any]:
+        with self._postcommit_lock:
+            record = self._pending_postcommit
+        if record is None:
+            return {"aborted": False, "reason": "no_pending"}
+        cancelled = record.abort(reason)
+        return {
+            "aborted": True,
+            "reason": str(reason),
+            "future_cancelled": bool(cancelled),
+        }
+
+    def finish_pending_postcommit(
+        self,
+        record: PendingPostcommit,
+        outcome: dict[str, Any] | None = None,
+    ) -> None:
+        if record is None:
+            return
+        record.mark_finished(outcome)
+        if outcome is not None:
+            self.last_postcommit_outcome = outcome
+        with self._postcommit_lock:
+            if self._pending_postcommit is record:
+                self._pending_postcommit = None
 
     def wait_for_pending_postcommit(
         self,
@@ -337,8 +464,8 @@ class EngineSession:
         # leaving it visible on the session is the whole point: a second
         # same-session waiter must observe the same future, not "no_pending".
         with self._postcommit_lock:
-            future = self.pending_postcommit
-        if future is None:
+            record = self._pending_postcommit
+        if record is None:
             outcome = {
                 "waited": False,
                 "elapsed_s": 0.0,
@@ -347,6 +474,7 @@ class EngineSession:
             }
             self.last_postcommit_wait = outcome
             return outcome
+        future = record.future
         if not hasattr(future, "result"):
             # Defensive: anything stashed on the session that does not look
             # like a future is treated as "nothing to wait on". We do NOT
@@ -372,6 +500,7 @@ class EngineSession:
                 "timeout_s": timeout_s,
             }
             self.last_postcommit_wait = outcome
+            record.last_outcome = outcome
             return outcome
         t0 = time.monotonic()
         # We catch BaseException because any failure in the postcommit must
@@ -388,12 +517,30 @@ class EngineSession:
                 "timeout_s": timeout_s,
             }
         except BaseException as exc:
-            label = "timeout" if type(exc).__name__ == "TimeoutError" else f"error:{type(exc).__name__}"
+            exc_name = type(exc).__name__
+            preempted_cancel = (
+                exc_name == "CancelledError"
+                and record.abort_event.is_set()
+                and record.last_abort_reason == "foreground_preempted_postcommit"
+            )
+            label = (
+                "timeout"
+                if exc_name == "TimeoutError" or preempted_cancel
+                else f"error:{exc_name}"
+            )
+            future_cancelled = False
+            if label == "timeout":
+                future_cancelled = record.abort("foreground_preempted_postcommit")
             outcome = {
                 "waited": True,
                 "elapsed_s": time.monotonic() - t0,
                 "outcome": label,
                 "timeout_s": timeout_s,
+                "abort_requested": label == "timeout",
+                "future_cancelled": bool(future_cancelled),
+                "abort_reason": (
+                    "foreground_preempted_postcommit" if label == "timeout" else None
+                ),
             }
         # Clear the reference ONLY if it is still the same future we
         # observed. A concurrent same-session commit may have superseded it
@@ -402,9 +549,11 @@ class EngineSession:
         # is required: equality could collapse two distinct futures with
         # the same result.
         with self._postcommit_lock:
-            if self.pending_postcommit is future:
-                self.pending_postcommit = None
+            if self._pending_postcommit is record:
+                self._pending_postcommit = None
         self.last_postcommit_wait = outcome
+        self.last_postcommit_outcome = outcome
+        record.mark_finished(outcome)
         return outcome
 
     @contextmanager
@@ -588,7 +737,9 @@ class EngineSession:
             "last_cache_miss_reason": self.last_cache_miss_reason,
             "last_restore_mode": self.last_restore_mode,
             "last_postcommit_wait": self.last_postcommit_wait,
+            "last_postcommit_outcome": self.last_postcommit_outcome,
             "pending_postcommit": bool(self.pending_postcommit is not None),
+            "pending_postcommit_detail": self.pending_postcommit_admin(),
             "boundaries": [
                 {
                     "kind": boundary.kind,

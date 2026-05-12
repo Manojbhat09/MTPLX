@@ -83,7 +83,7 @@ QUICKSTART_SPEED_PROMPT = (
     "Create a compact single-file HTML5 Canvas Flappy Bird game. "
     "Draw visuals procedurally, include physics, score, restart, and no prose."
 )
-QUICKSTART_TARGETS = {"terminal", "openwebui", "open-webui", "pi", "opencode"}
+QUICKSTART_TARGETS = {"terminal", "openwebui", "open-webui", "pi", "opencode", "swival"}
 LONG_RESPONSE_DIRECT_PROFILE = (
     "vllm_metal_paged_attn_partitioned_block_16_blocks_1024_"
     "partition_threshold_2048_impl_mlx_vector_paged"
@@ -3455,6 +3455,26 @@ def cmd_serve_public(args: Any) -> int:
                 _quickstart_launch_opencode_now()
                 _print_serve_start_line("Use the existing server, or stop that terminal with Ctrl-C to restart.")
                 return 0
+        if bool(getattr(args, "quickstart_swival", False)):
+            base = _server_url(str(getattr(args, "host", "127.0.0.1")), int(getattr(args, "port", 8000)))
+            health = _http_json(base + "/health", timeout=1.5)
+            if health.get("ok"):
+                from mtplx.swival import shell_swival_command
+
+                model_id = health.get("model") or getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
+                context_window = int(health.get("context_window") or 262144)
+                _print_serve_start_line("MTPLX is already running.")
+                _print_serve_start_line(f"OpenAI API Base URL: {base}/v1")
+                _print_serve_start_line(
+                    "Swival command: "
+                    + shell_swival_command(
+                        base_url=base,
+                        model_id=str(model_id),
+                        context_window=context_window,
+                    )
+                )
+                _print_serve_start_line("Use the existing server, or stop that terminal with Ctrl-C to restart.")
+                return 0
         _print_serve_start_line(f"error: port {int(args.port)} is already in use")
         _print_serve_start_line("try: mtplx status")
         server_command = _server_command_name(args)
@@ -3627,6 +3647,8 @@ def cmd_serve_public(args: Any) -> int:
         )
     if bool(getattr(args, "quickstart_opencode", False)):
         cmd.extend(["--launch-opencode", "--server-console"])
+    if bool(getattr(args, "quickstart_swival", False)):
+        cmd.append("--server-console")
     if bool(getattr(args, "stock_ar", False)):
         cmd.append("--stock-ar")
     if relax_mlx_fork_assert:
@@ -4936,6 +4958,66 @@ def _quickstart_opencode_payload(
     return payload
 
 
+def _quickstart_swival_payload(
+    args: Any,
+    *,
+    inspection: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from mtplx.swival import (
+        build_swival_command,
+        detect_swival_cli,
+        shell_swival_command,
+    )
+
+    host = str(getattr(args, "host", "127.0.0.1"))
+    port = int(getattr(args, "port", 8000))
+    model_id = _public_model_id_for_args(args, str(getattr(args, "model", "")))
+    server_url = f"http://{_connect_host_for_bind(host)}:{port}"
+    context_window = _inspection_context_window(inspection)
+    command_argv = build_swival_command(
+        base_url=server_url,
+        model_id=model_id,
+        context_window=context_window,
+    )
+    launch_command = shell_swival_command(
+        base_url=server_url,
+        model_id=model_id,
+        context_window=context_window,
+    )
+    return {
+        "integration": "swival",
+        "server_url": server_url,
+        "base_url": server_url,
+        "api_base_url": server_url.rstrip("/") + "/v1",
+        "model_id": model_id,
+        "context_window": context_window,
+        "detected": detect_swival_cli(),
+        "launch_command": launch_command,
+        "command_argv": command_argv,
+        "no_hidden_max_tokens": True,
+        "server_console": True,
+        "server_controls": [
+            "/reasoning on|off|auto|status",
+            "/mtp on|off|status",
+            "/stats",
+            "/help",
+        ],
+        "server_command": (
+            f"mtplx start swival --host {host} --port {port} "
+            f"--model {shlex.quote(str(getattr(args, 'model', DEFAULT_RUNTIME_MODEL_DIR)))} "
+            f"--profile {str(getattr(args, 'profile', None) or DEFAULT_PROFILE_NAME)} "
+            f"{'--max ' if bool(getattr(args, 'max', False)) else ''}"
+            f"{'--no-mtp ' if _generation_mode_from_args(args) == GENERATION_MODE_AR else ''}"
+            "--no-stats"
+        ),
+        "swival_steps": [
+            f"Start MTPLX server: {server_url}",
+            f"Run Swival: {launch_command}",
+            "Provider: generic",
+        ],
+    }
+
+
 def _quickstart_print_openwebui_handoff(args: Any, *, runtime_model: str) -> None:
     # The full banner + status panel are rendered by `_print_serve_start_banner`
     # inside `cmd_serve_public`, so this hand-off only emits a brief progress
@@ -5012,6 +5094,24 @@ def _quickstart_launch_opencode_now() -> None:
     else:
         _print_serve_start_line(f"Could not open OpenCode automatically: {result.get('error')}")
         _print_serve_start_line("Open OpenCode manually and select the MTPLX model.")
+
+
+def _quickstart_print_swival_handoff(
+    args: Any,
+    *,
+    runtime_model: str,
+    swival: dict[str, Any],
+) -> None:
+    _quickstart_line("[2/3] Preparing Swival generic provider command...")
+    _quickstart_line(f"      MTPLX server: {swival.get('server_url')}")
+    _quickstart_line(f"      Swival model: {swival.get('model_id')}")
+    _quickstart_line(f"      Context window: {swival.get('context_window')} tokens")
+    _quickstart_line("      Provider: generic")
+    _quickstart_line("      Response cap: none hidden by MTPLX")
+    _quickstart_line(f"      Loading model: {runtime_model}")
+    _quickstart_line("      Keep this terminal open for the MTPLX server.")
+    _quickstart_line(f"      Run Swival in another terminal: {swival.get('launch_command')}")
+    _quickstart_line()
 
 
 def _quickstart_require_pi_cli(args: Any) -> bool:
@@ -5186,6 +5286,48 @@ def _quickstart_run_opencode(args: Any, *, runtime_model: str, inspection: dict[
         quickstart_openwebui=False,
         quickstart_pi=False,
         quickstart_opencode=True,
+        open_browser=False,
+        max=bool(getattr(args, "max", False)),
+        max_idle_min=int(getattr(args, "max_idle_min", 15)),
+    )
+    return cmd_serve_public(serve_args)
+
+
+def _quickstart_run_swival(args: Any, *, runtime_model: str, inspection: dict[str, Any]) -> int:
+    swival = _quickstart_swival_payload(args, inspection=inspection)
+    _quickstart_print_swival_handoff(
+        args,
+        runtime_model=runtime_model,
+        swival=swival,
+    )
+    serve_args = SimpleNamespace(
+        model=runtime_model,
+        cache_dir=getattr(args, "cache_dir", None),
+        profile=getattr(args, "profile", None) or DEFAULT_PROFILE_NAME,
+        model_id=getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID,
+        unsafe_force_unverified=bool(getattr(args, "unsafe_force_unverified", False)),
+        yes=True,
+        host=str(getattr(args, "host", "127.0.0.1")),
+        port=int(getattr(args, "port", 8000)),
+        api_key=getattr(args, "api_key", None),
+        depth=int(getattr(args, "depth", 3)),
+        no_mtp=bool(getattr(args, "no_mtp", False)),
+        rate_limit=int(getattr(args, "rate_limit", 0)),
+        stream_interval=int(getattr(args, "stream_interval", 1)),
+        warmup_tokens=int(getattr(args, "warmup_tokens", 16)),
+        max_response_tokens=getattr(args, "max_response_tokens", None),
+        temperature=float(getattr(args, "temperature", 0.6)),
+        top_p=float(getattr(args, "top_p", 0.95)),
+        reasoning=getattr(args, "reasoning", None),
+        preserve_thinking=_preserve_thinking_policy(args),
+        reasoning_parser=getattr(args, "reasoning_parser", "qwen3"),
+        stats_footer=False,
+        strict_warmup=bool(getattr(args, "strict_warmup", False)),
+        strict_fast_path=bool(getattr(args, "strict_fast_path", False)),
+        quickstart_openwebui=False,
+        quickstart_pi=False,
+        quickstart_opencode=False,
+        quickstart_swival=True,
         open_browser=False,
         max=bool(getattr(args, "max", False)),
         max_idle_min=int(getattr(args, "max_idle_min", 15)),
@@ -5524,6 +5666,8 @@ def cmd_quickstart_public(args: Any) -> int:
         target = "pi"
     elif raw_target in {"opencode", "open-code", "oc"}:
         target = "opencode"
+    elif raw_target in {"swival", "sv"}:
+        target = "swival"
     else:
         target = raw_target
     if target not in QUICKSTART_TARGETS:
@@ -5533,6 +5677,8 @@ def cmd_quickstart_public(args: Any) -> int:
         return 2
     if target == "opencode" and "port" not in cli_flags:
         args.port = 18083
+    if target == "swival" and "port" not in cli_flags:
+        args.port = 18084
     depth_error = _validate_public_depth(args, printer=_quickstart_line)
     if depth_error is not None:
         return depth_error
@@ -5545,6 +5691,7 @@ def cmd_quickstart_public(args: Any) -> int:
         openwebui = _quickstart_openwebui_payload(args) if target == "openwebui" else None
         pi = _quickstart_pi_payload(args) if target == "pi" else None
         opencode = _quickstart_opencode_payload(args) if target == "opencode" else None
+        swival = _quickstart_swival_payload(args) if target == "swival" else None
         payload = {
             "action": _start_command_name(args),
             "target": target,
@@ -5559,10 +5706,13 @@ def cmd_quickstart_public(args: Any) -> int:
             "openwebui": openwebui,
             "pi": pi,
             "opencode": opencode,
+            "swival": swival,
             "stats_visible": bool(getattr(args, "show_stats", True)),
             "next": (
                 _start_invocation(args)
                 if target == "openwebui"
+                else _start_invocation(args, " swival")
+                if target == "swival"
                 else _start_invocation(args, " opencode")
                 if target == "opencode"
                 else _start_invocation(args, " pi")
@@ -5597,6 +5747,10 @@ def cmd_quickstart_public(args: Any) -> int:
             elif target == "opencode":
                 _quickstart_line(
                     f"then: write OpenCode config -> start local server -> open {opencode['model_ref']}"
+                )
+            elif target == "swival":
+                _quickstart_line(
+                    f"then: start local server -> run {swival['launch_command']}"
                 )
             elif target == "pi":
                 _quickstart_line(
@@ -5716,6 +5870,9 @@ def cmd_quickstart_public(args: Any) -> int:
             if target == "opencode":
                 args.model = runtime_model
                 return _quickstart_run_opencode(args, runtime_model=runtime_model, inspection=inspection)
+            if target == "swival":
+                args.model = runtime_model
+                return _quickstart_run_swival(args, runtime_model=runtime_model, inspection=inspection)
             return _quickstart_run_terminal_chat(args, runtime_model=runtime_model, inspection=inspection)
         detail = (resolution.get("error") or {}).get("detail") if isinstance(resolution.get("error"), dict) else None
         _quickstart_line("model is not available locally")
@@ -5755,6 +5912,9 @@ def cmd_quickstart_public(args: Any) -> int:
     if target == "opencode":
         args.model = runtime_model
         return _quickstart_run_opencode(args, runtime_model=runtime_model, inspection=inspection)
+    if target == "swival":
+        args.model = runtime_model
+        return _quickstart_run_swival(args, runtime_model=runtime_model, inspection=inspection)
     return _quickstart_run_terminal_chat(args, runtime_model=runtime_model, inspection=inspection)
 
 
@@ -5915,6 +6075,38 @@ def cmd_integrate_public(args: Any) -> int:
                 "MTPLX now defaults reasoning on, and this config also sends enable_thinking=true explicitly for tool-active requests.",
             ],
         }
+    elif action == "swival":
+        from mtplx.swival import build_swival_command, detect_swival_cli, shell_swival_command
+
+        context_window = int(getattr(args, "context_window", None) or 262144)
+        payload = {
+            "integration": "swival",
+            "server_url": server_url,
+            "base_url": server_url,
+            "api_base_url": api_base_url,
+            "model_id": model_id,
+            "context_window": context_window,
+            "detected": detect_swival_cli(),
+            "launch_command": shell_swival_command(
+                base_url=server_url,
+                model_id=model_id,
+                context_window=context_window,
+            ),
+            "command_argv": build_swival_command(
+                base_url=server_url,
+                model_id=model_id,
+                context_window=context_window,
+            ),
+            "server_command": (
+                f"mtplx quickstart --profile sustained --host {args.host} --port {args.port} "
+                "--no-stats-footer"
+            ),
+            "notes": [
+                "Swival generic provider receives the root server URL; Swival handles the OpenAI-compatible /v1 path.",
+                "No MTPLX config file is written for Swival.",
+                "No hidden output cap is added.",
+            ],
+        }
     else:
         raise SystemExit(f"unknown integration: {action}")
     if getattr(args, "smoke", False):
@@ -5942,6 +6134,9 @@ def cmd_integrate_public(args: Any) -> int:
             print("  Config path: ~/.config/opencode/opencode.json")
             print("  Provider: mtplx")
             print("  Reasoning: raw reasoning_content stream, enable_thinking=true")
+        elif action == "swival":
+            print("Swival:")
+            print(f"  {payload.get('launch_command')}")
         else:
             env = payload.get("environment") or {}
             print("Claude Code environment:")
