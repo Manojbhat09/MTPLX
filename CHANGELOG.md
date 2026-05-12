@@ -4,6 +4,15 @@ All notable user-facing changes are recorded here.
 
 ## Unreleased
 
+## v0.3.4
+
+### Security
+
+- Updated the locked indirect `urllib3` dependency from 2.6.3 to 2.7.0 for
+  upstream high-severity streaming/decompression and proxy redirect security
+  fixes. This is present on `main` only until a `v0.3.4` release is explicitly
+  published.
+
 ## v0.3.3
 
 ### Added
