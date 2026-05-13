@@ -25,6 +25,7 @@ from .cache_state import (
     detach_cache_state,
     owned_recurrent_state_stats,
     rollback_after_verify,
+    snapshot_cache,
     snapshot_untrimmable_cache,
     tail_owned_attention_kv_stats,
 )
@@ -1160,6 +1161,7 @@ class GenerationStats:
     decode_partitioned_paged_calls: int = 0
     sessionbank_snapshot_bytes: int = 0
     sessionbank_skipped_oversized_snapshot: bool = False
+    session_prompt_prefix_bank_commit: dict[str, object] = field(default_factory=dict)
     accepted_drafts: int = 0
     rejected_drafts: int = 0
     drafted_tokens: int = 0
@@ -2944,11 +2946,13 @@ def generate_mtpk(
     mtp_topk_reranker: Any | None = None,
     token_callback: Callable[[list[int]], None] | None = None,
     session_bank: Any | None = None,
+    session_id: str | None = None,
     session_restore_mode: str = "clone",
     session_template_hash: str | None = None,
     session_draft_head_identity: str | None = None,
     session_policy_fingerprint: str | None = None,
     capture_final_state: bool = False,
+    commit_prompt_state_to_bank: bool = False,
     trace_label: str | None = None,
     trace_metadata: dict[str, Any] | None = None,
 ) -> GenerationOutput:
@@ -3049,6 +3053,59 @@ def generate_mtpk(
         draft_head_identity=session_draft_head_identity,
         policy_fingerprint=session_policy_fingerprint,
     )
+    prompt_prefix_bank_commit: dict[str, object] = {}
+    if (
+        commit_prompt_state_to_bank
+        and session_bank is not None
+        and session_id is not None
+        and prompt_ids
+        and int(prompt_state.suffix_tokens) > 0
+    ):
+        commit_started = time.perf_counter()
+        try:
+            mtp_snapshot = (
+                snapshot_cache(prompt_state.committed_mtp_cache)
+                if prompt_state.committed_mtp_cache is not None
+                else None
+            )
+            entry = session_bank.put(
+                runtime=rt,
+                token_ids=prompt_ids,
+                cache=prompt_state.trunk_cache,
+                logits=prompt_state.logits,
+                hidden=prompt_state.hidden,
+                hidden_variant=mtp_hidden_variant,
+                keep_live_ref=False,
+                session_id=session_id,
+                template_hash=session_template_hash,
+                mtp_history_policy=prompt_state.mtp_history_policy,
+                draft_head_identity=session_draft_head_identity,
+                policy_fingerprint=session_policy_fingerprint,
+                mtp_history_snapshot=mtp_snapshot,
+                snapshot_epoch=len(prompt_ids),
+                mtp_snapshot_epoch=len(prompt_ids) if mtp_snapshot is not None else None,
+            )
+            prompt_prefix_bank_commit = {
+                "stored": entry is not None,
+                "mode": "prompt_prefix",
+                "reason": (
+                    "committed_prompt_prefix"
+                    if entry is not None
+                    else "sessionbank_snapshot_skipped"
+                ),
+                "prefix_len": int(entry.prefix_len if entry is not None else len(prompt_ids)),
+                "nbytes": int(entry.nbytes if entry is not None else 0),
+                "elapsed_s": time.perf_counter() - commit_started,
+                "cached_tokens": int(prompt_state.cached_tokens),
+                "suffix_tokens": int(prompt_state.suffix_tokens),
+            }
+        except BaseException as exc:
+            prompt_prefix_bank_commit = {
+                "stored": False,
+                "mode": "prompt_prefix",
+                "reason": f"prompt_prefix_commit_error:{type(exc).__name__}",
+                "elapsed_s": time.perf_counter() - commit_started,
+            }
     cache = prompt_state.trunk_cache
     logits = prompt_state.logits
     hidden = prompt_state.hidden
@@ -4695,6 +4752,7 @@ def generate_mtpk(
         session_cache_hit=prompt_state.cache_hit,
         cache_miss_reason=prompt_state.cache_miss_reason,
         session_restore_mode=prompt_state.restore_mode,
+        session_prompt_prefix_bank_commit=prompt_prefix_bank_commit,
         snapshot_time_s=snapshot_time,
         accept_time_s=accept_time,
         rollback_time_s=rollback_time,

@@ -2516,6 +2516,150 @@ def _encode_plain_text(tokenizer: Any, text: str) -> list[int]:
     return _coerce_token_ids(tokenizer.encode(text))
 
 
+_QWEN_ASSISTANT_THINK_PROMPT = "<|im_start|>assistant\n<think>\n"
+_QWEN_IM_END = "<|im_end|>"
+
+
+def _render_messages_with_chat_template(
+    tokenizer: Any,
+    normalized: list[dict[str, Any]],
+    *,
+    add_generation_prompt: bool,
+    enable_thinking: bool,
+    preserve_thinking: bool,
+    tools: list[dict[str, Any]] | None,
+    template_observability: dict[str, Any] | None = None,
+) -> str | None:
+    template_kwargs: dict[str, Any] = {
+        "tokenize": False,
+        "add_generation_prompt": add_generation_prompt,
+        "enable_thinking": enable_thinking,
+        "preserve_thinking": preserve_thinking,
+    }
+    if tools:
+        template_kwargs["tools"] = tools
+    try:
+        rendered = tokenizer.apply_chat_template(normalized, **template_kwargs)
+    except TypeError:
+        fallback_kwargs: dict[str, Any] = {
+            "tokenize": False,
+            "add_generation_prompt": add_generation_prompt,
+        }
+        if tools:
+            fallback_kwargs["tools"] = tools
+        try:
+            rendered = tokenizer.apply_chat_template(normalized, **fallback_kwargs)
+        except Exception:
+            if not tools:
+                return None
+            try:
+                if template_observability is not None:
+                    template_observability["tool_template_fallback"] = True
+                rendered = tokenizer.apply_chat_template(
+                    normalized,
+                    tokenize=False,
+                    add_generation_prompt=add_generation_prompt,
+                )
+            except Exception:
+                return None
+    except Exception:
+        if not tools:
+            return None
+        try:
+            if template_observability is not None:
+                template_observability["tool_template_fallback"] = True
+            rendered = tokenizer.apply_chat_template(
+                normalized,
+                tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+            )
+        except Exception:
+            return None
+    return rendered if isinstance(rendered, str) else None
+
+
+def _tool_history_generation_boundaries(rendered: str) -> list[int]:
+    """Find assistant tool-call history boundaries that must not be retokenized.
+
+    Qwen's generation prompt ends with ``<think>\n``. On the next tool-result
+    turn the structured assistant ``tool_calls`` history renders as the same
+    visible text, but tokenizing the whole transcript can merge the newline
+    after ``<think>`` with the generated ``</think>``/tool XML that follows.
+    That one-token boundary drift is enough to make SessionBank miss and force
+    OpenCode/Pi-style agents to cold-prefill the full tool schema again.
+
+    Splitting exactly after the assistant generation prompt preserves the
+    generation-time token boundary while keeping the rendered prompt text
+    unchanged.
+    """
+
+    boundaries: list[int] = []
+    marker = _QWEN_ASSISTANT_THINK_PROMPT
+    marker_len = len(marker)
+    search_from = 0
+    while True:
+        marker_at = rendered.find(marker, search_from)
+        if marker_at < 0:
+            break
+        boundary = marker_at + marker_len
+        block_end = rendered.find(_QWEN_IM_END, boundary)
+        search_end = block_end if block_end >= 0 else len(rendered)
+        if rendered.find("<tool_call>", boundary, search_end) >= 0:
+            boundaries.append(boundary)
+        search_from = boundary
+    return boundaries
+
+
+def _encode_rendered_chat_text_segmented(
+    tokenizer: Any,
+    rendered: str,
+    boundaries: list[int],
+) -> list[int]:
+    if not boundaries:
+        return _encode_rendered_chat_text(tokenizer, rendered)
+    token_ids: list[int] = []
+    start = 0
+    for boundary in sorted(set(int(boundary) for boundary in boundaries)):
+        if boundary <= start or boundary >= len(rendered):
+            continue
+        token_ids.extend(_encode_rendered_chat_text(tokenizer, rendered[start:boundary]))
+        start = boundary
+    if start < len(rendered):
+        token_ids.extend(_encode_rendered_chat_text(tokenizer, rendered[start:]))
+    return token_ids
+
+
+def _encode_generation_compatible_tool_history(
+    tokenizer: Any,
+    normalized: list[dict[str, Any]],
+    *,
+    add_generation_prompt: bool,
+    enable_thinking: bool,
+    preserve_thinking: bool,
+    tools: list[dict[str, Any]] | None,
+    template_observability: dict[str, Any] | None = None,
+) -> list[int] | None:
+    if not tools or not add_generation_prompt:
+        return None
+    if not any(message.get("tool_calls") for message in normalized):
+        return None
+    rendered = _render_messages_with_chat_template(
+        tokenizer,
+        normalized,
+        add_generation_prompt=add_generation_prompt,
+        enable_thinking=enable_thinking,
+        preserve_thinking=preserve_thinking,
+        tools=tools,
+        template_observability=template_observability,
+    )
+    if not rendered:
+        return None
+    boundaries = _tool_history_generation_boundaries(rendered)
+    if not boundaries:
+        return None
+    return _encode_rendered_chat_text_segmented(tokenizer, rendered, boundaries)
+
+
 def _encode_messages(
     tokenizer: Any,
     messages: list[ChatMessage],
@@ -2537,6 +2681,17 @@ def _encode_messages(
     if not normalized:
         normalized = [{"role": "user", "content": ""}]
     normalized = _with_mtplx_tool_contract(normalized, tools=tools)
+    segmented_tool_history = _encode_generation_compatible_tool_history(
+        tokenizer,
+        normalized,
+        add_generation_prompt=add_generation_prompt,
+        enable_thinking=enable_thinking,
+        preserve_thinking=not strip_assistant_reasoning_history,
+        tools=tools,
+        template_observability=template_observability,
+    )
+    if segmented_tool_history is not None:
+        return segmented_tool_history
     template_kwargs: dict[str, Any] = {
         "tokenize": True,
         "add_generation_prompt": add_generation_prompt,
@@ -2566,7 +2721,7 @@ def _encode_messages(
                     **fallback_kwargs,
                 )
             )
-        except (TypeError, Exception) as exc:
+        except (TypeError, Exception):
             if tools:
                 try:
                     if template_observability is not None:
@@ -2587,7 +2742,7 @@ def _encode_messages(
                         ),
                     ) from schema_free_exc
             pass
-    except Exception as exc:
+    except Exception:
         if tools:
             try:
                 if template_observability is not None:
@@ -2623,30 +2778,14 @@ def _render_messages_for_postcommit(
     tools: list[dict[str, Any]] | None,
 ) -> str | None:
     normalized = _with_mtplx_tool_contract(normalized, tools=tools)
-    template_kwargs: dict[str, Any] = {
-        "tokenize": False,
-        "add_generation_prompt": False,
-        "enable_thinking": enable_thinking,
-        "preserve_thinking": preserve_thinking,
-    }
-    if tools:
-        template_kwargs["tools"] = tools
-    try:
-        rendered = tokenizer.apply_chat_template(normalized, **template_kwargs)
-    except TypeError:
-        fallback_kwargs: dict[str, Any] = {
-            "tokenize": False,
-            "add_generation_prompt": False,
-        }
-        if tools:
-            fallback_kwargs["tools"] = tools
-        try:
-            rendered = tokenizer.apply_chat_template(normalized, **fallback_kwargs)
-        except Exception:
-            return None
-    except Exception:
-        return None
-    return rendered if isinstance(rendered, str) else None
+    return _render_messages_with_chat_template(
+        tokenizer,
+        normalized,
+        add_generation_prompt=False,
+        enable_thinking=enable_thinking,
+        preserve_thinking=preserve_thinking,
+        tools=tools,
+    )
 
 
 _POSTCOMMIT_SENTINEL_CONTENT = "__MTPLX_POSTCOMMIT_SENTINEL_4f02c7d2__"
@@ -2816,6 +2955,141 @@ def _request_max_tokens(request: BaseModel) -> int | None:
         return int(value)
     alias = getattr(request, "max_completion_tokens", None)
     return None if alias is None else int(alias)
+
+
+def _is_opencode_title_request(request: ChatCompletionRequest) -> bool:
+    """Detect OpenCode's auxiliary thread-title call.
+
+    OpenCode sends this beside the real coding request. Letting the 27B model
+    spend seconds on a cosmetic title blocks the single model-owner lane and
+    makes users stare at "Thinking..." before their actual request starts.
+    This fast path only handles the exact title-generator prompt shape and
+    never touches normal user chat/tool requests.
+    """
+    if request.tools or len(request.messages) < 2:
+        return False
+    first = request.messages[0]
+    if str(first.role).lower() != "system":
+        return False
+    system_text = _content_to_text(first.content)
+    return (
+        "You are a title generator" in system_text
+        and "Generate a brief title" in system_text
+        and "Never use tools" in system_text
+    )
+
+
+def _opencode_fast_title(request: ChatCompletionRequest) -> str:
+    user_text = ""
+    for message in reversed(request.messages):
+        if str(message.role).lower() != "user":
+            continue
+        text = _content_to_text(message.content).strip()
+        if not text or text.lower().startswith("generate a title"):
+            continue
+        user_text = text
+        break
+    cleaned = re.sub(r"\s+", " ", user_text).strip(" `\"'")
+    lowered = cleaned.lower().strip()
+    if lowered in {"hi", "hello", "hey", "yo", "howdy", "sup", "what's up", "whats up"}:
+        return "Greeting"
+    if not cleaned:
+        return "Quick chat"
+    words = cleaned.split()
+    title = " ".join(words[:8])
+    if len(title) > 50:
+        title = title[:50].rstrip(" ,.;:-")
+    return title or "Quick chat"
+
+
+def _opencode_title_response(
+    state: ServerState,
+    request: ChatCompletionRequest,
+    *,
+    model: str,
+    response_id: str,
+    created: int,
+    request_max_tokens: int | None,
+) -> Response:
+    title = _opencode_fast_title(request)
+    stats = {
+        "opencode_title_fast_path": True,
+        "prompt_tokens": 0,
+        "cached_tokens": 0,
+        "new_prefill_tokens": 0,
+        "completion_tokens": len(title.split()),
+        "ttft_s": 0.0,
+        "prompt_tps": 0.0,
+        "decode_tok_s": 0.0,
+        "request_max_tokens": request_max_tokens,
+        "server_max_response_tokens": getattr(state.args, "max_response_tokens", None),
+        "effective_max_tokens": request_max_tokens,
+        "request_message_count": len(request.messages),
+        "request_message_roles": [message.role for message in request.messages],
+        "request_tool_count": 0,
+        "request_client_hint": "opencode_title",
+    }
+    state.last_metrics.append(stats)
+    state.requests_completed = int(getattr(state, "requests_completed", 0) or 0) + 1
+    state.last_request_at = time.time()
+    usage = {
+        "prompt_tokens": 0,
+        "completion_tokens": stats["completion_tokens"],
+        "total_tokens": stats["completion_tokens"],
+    }
+    if request.stream:
+        def stream():
+            first = {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+                ],
+            }
+            content = {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {"index": 0, "delta": {"content": title}, "finish_reason": None}
+                ],
+            }
+            done = {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"}
+                ],
+                "usage": usage,
+                "mtplx_stats": stats,
+            }
+            for payload in (first, content, done):
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+    return JSONResponse(
+        {
+            "id": response_id,
+            "object": "chat.completion",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": title},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": usage,
+            "mtplx_stats": stats,
+        }
+    )
 
 
 def _normalize_generation_mode(value: Any, *, default: str = "mtp") -> str:
@@ -3170,6 +3444,7 @@ PUBLIC_MTPLX_STATS_KEYS = (
     "accept_time_s",
     "repair_time_s",
     "session_cache_hit",
+    "session_prompt_prefix_bank_commit",
     "cached_tokens",
     "new_prefill_tokens",
     "cache_miss_reason",
@@ -4169,6 +4444,7 @@ def _run_generation(
     session_policy_fingerprint: str | None = None,
     background_request: bool = False,
     commit_final_state_to_bank: bool = True,
+    commit_prompt_prefix_to_bank: bool = False,
     request_observability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     response_max, sampler, generation_limits = _generation_params(
@@ -4278,6 +4554,7 @@ def _run_generation(
                         verify_core=state.args.verify_core,
                         token_callback=record_tokens,
                         session_bank=session_bank,
+                        session_id=session_id,
                         session_restore_mode=_session_bank_restore_mode(
                             session_restore_mode
                         ),
@@ -4285,6 +4562,11 @@ def _run_generation(
                         session_draft_head_identity=session_draft_head_identity,
                         session_policy_fingerprint=session_policy_fingerprint,
                         capture_final_state=session_bank is not None,
+                        commit_prompt_state_to_bank=(
+                            commit_prompt_prefix_to_bank
+                            and session_bank is not None
+                            and session_id is not None
+                        ),
                         trace_label=trace_label,
                         trace_metadata=trace_metadata,
                         adaptive_policy=adaptive_policy,
@@ -6680,6 +6962,18 @@ def create_app(state: ServerState) -> FastAPI:
         headers = dict(raw_request.headers)
         metadata = _request_metadata(request)
         request_max_tokens = _request_max_tokens(request)
+        model = request.model or state.model_id
+        response_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+        if _is_opencode_title_request(request):
+            return _opencode_title_response(
+                state,
+                request,
+                model=model,
+                response_id=response_id,
+                created=created,
+                request_max_tokens=request_max_tokens,
+            )
         cache_bypass = headers.get("x-mtplx-cache-mode", "").lower() in {
             "bypass",
             "stateless",
@@ -6789,10 +7083,6 @@ def create_app(state: ServerState) -> FastAPI:
         prefix_diagnostic = getattr(state.sessions, "last_prefix_diagnostic", None)
         if isinstance(prefix_diagnostic, dict):
             request_observability["request_session_prefix_diagnostic"] = prefix_diagnostic
-        model = request.model or state.model_id
-        response_id = f"chatcmpl-{uuid.uuid4().hex}"
-        created = int(time.time())
-
         def run_generation_for_response() -> dict[str, Any]:
             if session is None:
                 return _run_generation(
@@ -6815,6 +7105,7 @@ def create_app(state: ServerState) -> FastAPI:
                     session_draft_head_identity=state.draft_head_identity,
                     session_policy_fingerprint=policy_fingerprint,
                     background_request=background,
+                    commit_prompt_prefix_to_bank=tools_active,
                     request_observability=request_observability,
                 )
             with session.in_flight_generation():
@@ -6835,6 +7126,7 @@ def create_app(state: ServerState) -> FastAPI:
                     session_template_hash=state.template_hash,
                     session_draft_head_identity=state.draft_head_identity,
                     session_policy_fingerprint=policy_fingerprint,
+                    commit_prompt_prefix_to_bank=tools_active,
                     request_observability=request_observability,
                 )
                 session.commit(
@@ -7039,6 +7331,7 @@ def create_app(state: ServerState) -> FastAPI:
                                 session_draft_head_identity=state.draft_head_identity,
                                 session_policy_fingerprint=policy_fingerprint,
                                 background_request=background,
+                                commit_prompt_prefix_to_bank=tools_active,
                                 request_observability=request_observability,
                             )
                         else:
@@ -7062,6 +7355,7 @@ def create_app(state: ServerState) -> FastAPI:
                                     session_draft_head_identity=state.draft_head_identity,
                                     session_policy_fingerprint=policy_fingerprint,
                                     commit_final_state_to_bank=False,
+                                    commit_prompt_prefix_to_bank=tools_active,
                                     request_observability=request_observability,
                                 )
                                 queue.put(("done", generated))

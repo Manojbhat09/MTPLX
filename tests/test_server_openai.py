@@ -838,6 +838,72 @@ class ToolSchemaRejectingTokenizer(CaptureTokenizer):
         return [1, 2, 3]
 
 
+class QwenToolHistoryBoundaryTokenizer:
+    """Tiny Qwen-like tokenizer that exposes the OpenCode cache-boundary bug.
+
+    It deliberately merges ``\n\n</think>`` when a full rendered transcript is
+    tokenized at once. Segmenting after ``<think>\n`` preserves the same token
+    boundary produced by the previous generation prompt.
+    """
+
+    merged = 900_001
+
+    def apply_chat_template(self, messages, **kwargs):
+        rendered = self._render(messages, add_generation_prompt=bool(kwargs.get("add_generation_prompt")))
+        if kwargs.get("tokenize"):
+            return self.encode(rendered, add_special_tokens=False)
+        return rendered
+
+    def encode(self, text, **_kwargs):
+        text = str(text)
+        needle = "\n\n</think>"
+        ids: list[int] = []
+        i = 0
+        while i < len(text):
+            if text.startswith(needle, i):
+                ids.append(self.merged)
+                i += len(needle)
+            else:
+                ids.append(ord(text[i]))
+                i += 1
+        return ids
+
+    def decode(self, tokens, **_kwargs):
+        parts: list[str] = []
+        for token in tokens:
+            parts.append("\n\n</think>" if int(token) == self.merged else chr(int(token)))
+        return "".join(parts)
+
+    def _render(self, messages, *, add_generation_prompt: bool) -> str:
+        chunks: list[str] = []
+        for message in messages:
+            role = message["role"]
+            content = str(message.get("content") or "")
+            if role == "system":
+                chunks.append(f"<|im_start|>system\n{content}<|im_end|>\n")
+            elif role == "user":
+                chunks.append(f"<|im_start|>user\n{content}<|im_end|>\n")
+            elif role == "assistant":
+                chunks.append("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+                if content:
+                    chunks.append(content + "\n\n")
+                for tool_call in message.get("tool_calls") or []:
+                    function = tool_call["function"]
+                    chunks.append(f"<tool_call>\n<function={function['name']}>\n")
+                    for key, value in function.get("arguments", {}).items():
+                        chunks.append(f"<parameter={key}>\n{value}\n</parameter>\n")
+                    chunks.append("</function>\n</tool_call>")
+                chunks.append("<|im_end|>\n")
+            elif role == "tool":
+                chunks.append(
+                    f"<|im_start|>user\n<tool_response>\n{content}\n"
+                    "</tool_response><|im_end|>\n"
+                )
+        if add_generation_prompt:
+            chunks.append("<|im_start|>assistant\n<think>\n")
+        return "".join(chunks)
+
+
 def _tool_schema():
     return {
         "type": "function",
@@ -999,6 +1065,91 @@ def test_tool_contract_includes_exact_schema_keys_for_opencode_write(monkeypatch
     assert "exact argument keys/case" in contract
 
 
+def test_opencode_title_request_fast_path_does_not_enter_model(monkeypatch):
+    state = _fake_state()
+    client = TestClient(create_app(state))
+
+    def fail_generation(*_args, **_kwargs):
+        raise AssertionError("OpenCode title request should not enter generation")
+
+    monkeypatch.setattr(openai, "_run_generation", fail_generation)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "mtplx-test-model",
+            "stream": True,
+            "max_tokens": 32000,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a title generator. You output ONLY a thread title. "
+                        "Generate a brief title. Never use tools."
+                    ),
+                },
+                {"role": "user", "content": "Generate a title for this conversation:"},
+                {"role": "user", "content": "hi"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payloads = _stream_payloads(response.text)
+    assert any(
+        choice["delta"].get("content") == "Greeting"
+        for payload in payloads
+        for choice in payload["choices"]
+    )
+    assert state.last_metrics[-1]["opencode_title_fast_path"] is True
+    assert state.last_metrics[-1]["request_max_tokens"] == 32000
+
+
+def test_tool_requests_enable_prompt_prefix_bank_commit(monkeypatch):
+    state = _fake_streaming_session_state()
+    state.draft_sampler = None
+    state.requests_completed = 0
+    captured: dict[str, object] = {}
+
+    def fake_generate_mtpk(*_args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            tokens=[],
+            text="",
+            stats=SimpleNamespace(
+                to_dict=lambda: {
+                    "prompt_eval_time_s": 0.0,
+                    "generated_tokens": 0,
+                    "elapsed_s": 0.0,
+                    "tok_s": 0.0,
+                }
+            ),
+            final_state=None,
+        )
+
+    monkeypatch.setattr(openai, "generate_mtpk", fake_generate_mtpk)
+
+    openai._run_generation(
+        state,
+        [1, 2, 3],
+        max_tokens=1,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        seed=None,
+        generation_mode="mtp",
+        depth=3,
+        session_id="sess-tool",
+        session_bank=state.sessions.bank,
+        session_template_hash=state.template_hash,
+        session_draft_head_identity=state.draft_head_identity,
+        session_policy_fingerprint="policy",
+        commit_prompt_prefix_to_bank=True,
+    )
+
+    assert captured["commit_prompt_state_to_bank"] is True
+
+
 def test_tool_template_schema_failure_retries_with_compact_contract(monkeypatch):
     state = _fake_state()
     state.runtime.tokenizer = ToolSchemaRejectingTokenizer()
@@ -1130,6 +1281,51 @@ def test_chat_template_preserves_assistant_tool_calls_and_tool_results():
     assert messages[0]["tool_calls"][0]["function"]["arguments"] == {}
     assert messages[1]["role"] == "tool"
     assert messages[1]["tool_call_id"] == "call_test"
+
+
+def test_tool_result_history_encoding_keeps_generation_prompt_prefix():
+    tokenizer = QwenToolHistoryBoundaryTokenizer()
+    tools = [_tool_schema()]
+    initial_messages = [
+        openai.ChatMessage(role="system", content="You are opencode."),
+        openai.ChatMessage(role="user", content="write hello.py"),
+    ]
+    tool_call = {
+        "id": "call_write",
+        "type": "function",
+        "function": {
+            "name": "session_status",
+            "arguments": "{}",
+        },
+    }
+    resumed_messages = [
+        *initial_messages,
+        openai.ChatMessage(role="assistant", content="", tool_calls=[tool_call]),
+        openai.ChatMessage(
+            role="tool",
+            tool_call_id="call_write",
+            content='{"status":"ok"}',
+        ),
+    ]
+
+    first_prompt = openai._encode_messages(
+        tokenizer,
+        initial_messages,
+        enable_thinking=True,
+        tools=tools,
+    )
+    resumed_prompt = openai._encode_messages(
+        tokenizer,
+        resumed_messages,
+        enable_thinking=True,
+        tools=tools,
+    )
+
+    assert resumed_prompt[: len(first_prompt)] == first_prompt
+    assert tokenizer.merged not in resumed_prompt[: len(first_prompt)]
+    rendered = tokenizer.decode(resumed_prompt)
+    assert "<function=session_status>" in rendered
+    assert "<tool_response>" in rendered
 
 
 def test_chat_tool_xml_returns_openai_tool_calls_nonstream(monkeypatch):
