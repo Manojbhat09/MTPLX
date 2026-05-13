@@ -3480,6 +3480,7 @@ PUBLIC_MTPLX_STATS_KEYS = (
     "tool_parser_dialect",
     "request_session_source",
     "request_session_prefix_diagnostic",
+    "session_prompt_prefix_commit",
 )
 PUBLIC_POSTCOMMIT_KEYS = (
     "stored",
@@ -7807,26 +7808,30 @@ def create_app(state: ServerState) -> FastAPI:
                                     )
                                     generated = release.get("generated") or generated
                                     postcommit = release.get("postcommit") or {}
-                                    if assistant_tool_calls:
-                                        prompt_prefix_commit = session.commit_prompt_prefix(
-                                            prompt_ids=prompt_ids,
-                                            finish_reason=str(
-                                                generated.get("finish_reason")
-                                                or "tool_calls"
-                                            ),
-                                            boundary_kind="tool_call_prompt_prefix",
-                                        )
-                                        generated["stats"][
-                                            "session_prompt_prefix_commit"
-                                        ] = {
-                                            "committed": bool(
-                                                prompt_prefix_commit.committed
-                                            ),
-                                            "reason": prompt_prefix_commit.reason,
-                                            "prefix_len": int(
-                                                prompt_prefix_commit.prefix_len
-                                            ),
-                                        }
+                                    prompt_prefix_boundary_kind = (
+                                        "tool_call_prompt_prefix"
+                                        if assistant_tool_calls
+                                        else "postcommit_prompt_prefix"
+                                    )
+                                    prompt_prefix_commit = session.commit_prompt_prefix(
+                                        prompt_ids=prompt_ids,
+                                        finish_reason=str(
+                                            generated.get("finish_reason") or "stop"
+                                        ),
+                                        boundary_kind=prompt_prefix_boundary_kind,
+                                    )
+                                    generated["stats"][
+                                        "session_prompt_prefix_commit"
+                                    ] = {
+                                        "committed": bool(
+                                            prompt_prefix_commit.committed
+                                        ),
+                                        "reason": prompt_prefix_commit.reason,
+                                        "prefix_len": int(
+                                            prompt_prefix_commit.prefix_len
+                                        ),
+                                        "boundary_kind": prompt_prefix_boundary_kind,
+                                    }
                                     generated["stats"][
                                         "session_postcommit_snapshot"
                                     ] = _schedule_idle_postcommit_snapshot(

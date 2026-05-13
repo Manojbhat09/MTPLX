@@ -621,6 +621,8 @@ def test_streaming_unsafe_postcommit_releases_without_blocking_second_request(
     assert response.status_code == 200
     assert '"mode": "async_pending"' in response.text
     assert '"reason": "retokenized_history_mismatch"' in response.text
+    assert '"session_prompt_prefix_commit"' in response.text
+    assert '"postcommit_prompt_prefix"' in response.text
     assert scheduled
     assert second.status_code == 200
     assert "already in flight" not in second.text
