@@ -6,12 +6,34 @@ All notable user-facing changes are recorded here.
 
 ## v0.3.4
 
+### Added
+
+- Added first-class Swival handoff support through `mtplx start swival`,
+  `mtplx start sv`, and `mtplx integrate swival`, including generic-provider
+  command generation with the served model id, base URL, and context window.
+
+### Changed
+
+- Made idle SessionBank postcommit cooperative and preemptible. Foreground
+  Pi/OpenCode/agent requests can now interrupt long background cache-building
+  work instead of sitting silently behind it, while successful idle periods
+  still keep the cache-reuse path.
+- Reduced the default postcommit wait budget so coding-agent turns prioritize
+  first-token latency over background maintenance perfection.
+
+### Fixed
+
+- Fixed consecutive Qwen XML tool-call streaming so multiple back-to-back tool
+  calls remain structured OpenAI `delta.tool_calls` instead of collapsing into
+  raw assistant text or blocking until the end of generation.
+- Improved postcommit/admin observability for preempted maintenance work,
+  including clearer `foreground_preempted_postcommit` outcomes.
+
 ### Security
 
 - Updated the locked indirect `urllib3` dependency from 2.6.3 to 2.7.0 for
   upstream high-severity streaming/decompression and proxy redirect security
-  fixes. This is present on `main` only until a `v0.3.4` release is explicitly
-  published.
+  fixes.
 
 ## v0.3.3
 

@@ -29,12 +29,12 @@ Install:
 
 ```bash
 brew install youssofal/mtplx/mtplx
-mtplx start            # interactive: pick model → mode → web/CLI/Pi, then chat
+mtplx start            # interactive: pick model → mode → web/CLI/Pi/OpenCode/Swival, then chat
 ```
 
 The Homebrew installer sets up the `mtplx` command in `/opt/homebrew/bin` and bootstraps the Python runtime under `/opt/homebrew/var/mtplx`. Python users can also run `python3 -m pip install -U mtplx`.
 
-That's it. The wizard handles the default speed model (`Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed`), runtime mode (Sustained / Sustained Max / Burst), and surface (browser chat at `127.0.0.1:8000/`, terminal chat, or a Pi coding-agent connection) on first run. On every subsequent run it asks "same as last time?" so you're one keypress from chatting.
+That's it. The wizard handles the default speed model (`Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed`), runtime mode (Sustained / Sustained Max / Burst), and surface (browser chat at `127.0.0.1:8000/`, terminal chat, Pi, OpenCode, or Swival) on first run. On every subsequent run it asks "same as last time?" so you're one keypress from chatting.
 
 ---
 
@@ -58,7 +58,7 @@ That's it. The wizard handles the default speed model (`Youssofal/Qwen3.6-27B-MT
 - **Idle-aware fan-backed modes.** Server tracks request activity; after 15 minutes of no chat, fans drop to auto, then ramp back up on the next message.
 - **Four-tier model compatibility contract.** `mtplx inspect <model>` reports: verified / arch-compatible-unverified / incompatible-architecture / no-MTP. No silent garbage runs.
 - **Lazy imports.** `mtplx --help`, `doctor`, `inspect`, `init`, `setup` work on a fresh venv *without MLX installed*. Generation and serving pull in MLX only when needed.
-- **v0.3.4 status: pending main-branch dependency patch**, preserving the v0.3.3 compatibility fixes while updating the locked `urllib3` dependency to 2.7.0 for upstream security fixes.
+- **v0.3.4 agent UX fixes.** Idle SessionBank postcommit now yields to foreground coding-agent turns, consecutive XML tool calls stay structured while streaming, Swival handoff is built into the start flow, and the locked `urllib3` dependency is updated to 2.7.0.
 
 > **Release honesty.** Burst is the old fan-backed headline lane and is capped in the UI at short contexts only. Sustained is the explicit long-context memory-safety lane; it is not an AR downgrade. Long no-fan decode decay remains a future runtime track; see [Roadmap](#roadmap).
 
@@ -84,6 +84,8 @@ Power-user shortcuts (any of these skip the wizard):
 mtplx start --fresh                         # re-run the wizard from scratch
 mtplx start cli                             # terminal chat directly
 mtplx start pi                              # configure Pi and start MTPLX for Pi
+mtplx start opencode                        # configure OpenCode Desktop
+mtplx start swival                          # print the Swival generic-provider handoff
 mtplx start cli --no-mtp                    # target-only AR generation
 mtplx start --profile sustained             # long-context native-MTP mode
 mtplx start --max                           # Sustained Max browser chat with fan boost
