@@ -202,16 +202,29 @@ def _public_model_id_from_metadata(path: Path) -> str | None:
         inferred = _artifact_role_model_id(role)
         if inferred:
             return inferred
+    verified_on = runtime.get("verified_on")
+    if isinstance(verified_on, dict):
+        verified_model = verified_on.get("model")
+        if isinstance(verified_model, str):
+            inferred = _artifact_role_model_id(verified_model)
+            if inferred:
+                return inferred
 
     config = _read_json(path / "config.json")
     quantization = config.get("quantization") or config.get("quantization_config")
     if isinstance(quantization, dict):
-        text = json.dumps(quantization, sort_keys=True).lower()
-        if "bits\": 8" in text and "language_model" in text:
-            return QUALITY_PUBLIC_MODEL_ID
         bits = quantization.get("bits")
         if bits == 4:
+            child_bits = [
+                value.get("bits")
+                for value in quantization.values()
+                if isinstance(value, dict) and "bits" in value
+            ]
+            if child_bits and all(bit == 8 for bit in child_bits):
+                return QUALITY_PUBLIC_MODEL_ID
             return DEFAULT_PUBLIC_MODEL_ID
+        if bits == 8:
+            return QUALITY_PUBLIC_MODEL_ID
     return None
 
 

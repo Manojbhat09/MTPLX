@@ -1479,6 +1479,66 @@ def test_tune_state_round_trip(tmp_path, monkeypatch):
     assert record["payload"]["best"]["depth"] == 2
 
 
+def test_tune_candidate_outputs_are_absolute_from_non_repo_cwd(tmp_path, monkeypatch):
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+    progress: list[str] = []
+
+    def fake_run(command, *, cwd, env, text, stdout, stderr, check):
+        output_arg = command[command.index("--_candidate-output") + 1]
+        output = Path(output_arg)
+        assert output.is_absolute()
+        assert str(output).startswith(str(caller))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps({"ar_rows": [{"tok_s": 12.0, "generated_tokens": 2}]}),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="candidate ok")
+
+    monkeypatch.setattr(public.subprocess, "run", fake_run)
+
+    rows = public._run_tune_candidates(
+        SimpleNamespace(cache_dir=None, unsafe_force_unverified=False),
+        runtime_model="/tmp/model",
+        run_id="run",
+        output_root=Path("outputs/cli/tune/run"),
+        depths=[],
+        settings={
+            "max_tokens": 8,
+            "limit": 1,
+            "seed": 0,
+            "depths": "",
+        },
+        progress=progress.append,
+    )
+
+    assert rows[0]["mode"] == "AR"
+    assert rows[0]["tok_s"] == 12.0
+    assert any("AR (1/1) starting" in line for line in progress)
+    assert any("AR finished" in line for line in progress)
+
+
+def test_tune_human_reports_candidate_errors_instead_of_false_no_win(capsys):
+    payload = {
+        "results": [
+            {"mode": "AR", "depth": None, "tok_s": None, "multiplier_vs_ar": None, "error": "candidate did not write an artifact", "stdout": "/tmp/ar.log"},
+            {"mode": "D1", "depth": 1, "tok_s": None, "multiplier_vs_ar": None, "error": "candidate did not write an artifact", "stdout": "/tmp/d1.log"},
+        ],
+        "best": None,
+        "saved": False,
+        "save_skipped_reason": "tune failed; no candidate produced usable tokens",
+    }
+
+    public._print_tune_human(payload)
+
+    out = capsys.readouterr().out
+    assert "Tune failed for one or more candidates" in out
+    assert "No MTP depth beat AR" not in out
+    assert "/tmp/ar.log" in out
+
+
 def test_public_bench_run_dry_run_records_external_kernel_env(monkeypatch, capsys):
     monkeypatch.setenv("MTPLX_VERIFY_OUTPUT_DEPENDS", "recurrent")
     monkeypatch.setenv("MTPLX_VERIFY_OUTPUT_DEPENDS_AFTER_TOKENS", "1024")

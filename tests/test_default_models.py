@@ -240,6 +240,44 @@ def test_public_model_id_for_ref_uses_runtime_metadata_before_folder_name(tmp_pa
     assert public_model_id_for_ref(model) == QUALITY_PUBLIC_MODEL_ID
 
 
+def test_public_model_id_for_ref_maps_mixed_q4_speed_metadata_to_speed(tmp_path):
+    model = tmp_path / "Qwen3.6-27B-MTPLX-Optimized"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "quantization": {
+                    "bits": 4,
+                    "language_model.model.layers.0.mlp.down_proj": {"bits": 4},
+                    "language_model.model.layers.0.linear_attn.in_proj_qkv": {"bits": 8},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert public_model_id_for_ref(model) == DEFAULT_PUBLIC_MODEL_ID
+
+
+def test_public_model_id_for_ref_maps_flat8_metadata_to_quality(tmp_path):
+    model = tmp_path / "Qwen3.6-27B-MTPLX-Optimized"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "quantization": {
+                    "bits": 4,
+                    "language_model.model.layers.0.mlp.down_proj": {"bits": 8},
+                    "language_model.model.layers.0.linear_attn.in_proj_qkv": {"bits": 8},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert public_model_id_for_ref(model) == QUALITY_PUBLIC_MODEL_ID
+
+
 def test_public_model_id_for_ref_maps_unknown_local_name_to_sanitized_id():
     assert (
         public_model_id_for_ref("/tmp/My Custom Local Model!")

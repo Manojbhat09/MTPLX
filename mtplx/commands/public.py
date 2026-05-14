@@ -23,7 +23,7 @@ import importlib.util
 import webbrowser
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 from mtplx.artifacts import inspect_model
 from mtplx.benchmarks.validators.basic import (
@@ -126,6 +126,13 @@ TUNE_STATE_PATH = Path("~/.mtplx/tuning.json").expanduser()
 GENERATION_MODE_MTP = "mtp"
 GENERATION_MODE_AR = "ar"
 GENERATION_MODES = {GENERATION_MODE_MTP, GENERATION_MODE_AR}
+
+
+def _absolute_user_path(path: str | Path) -> Path:
+    expanded = Path(path).expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return (Path.cwd() / expanded).resolve()
 
 
 def _print(value: Any) -> None:
@@ -1183,8 +1190,9 @@ def _cmd_tune(
     model = getattr(args, "model", None) or DEFAULT_CHAMPION
     settings = _tune_settings(args, depths=depths)
     run_id = getattr(args, "run_id", None) or f"tune-{time.strftime('%Y%m%d-%H%M%S')}"
-    output_root = Path(getattr(args, "output_dir", None) or "outputs/cli/tune") / run_id
-    output_path = Path(getattr(args, "output", None)) if getattr(args, "output", None) else output_root / "tune.json"
+    output_dir = _absolute_user_path(getattr(args, "output_dir", None) or "outputs/cli/tune")
+    output_root = output_dir / run_id
+    output_path = _absolute_user_path(getattr(args, "output")) if getattr(args, "output", None) else output_root / "tune.json"
     json_output = bool(getattr(args, "json", False))
     verbose = bool(getattr(args, "verbose", verbose_default) or verbose_default)
 
@@ -1256,6 +1264,9 @@ def _cmd_tune(
         )
 
     try:
+        if not json_output:
+            _emit(f"[tune] artifacts: {output_root}")
+            _emit("[tune] running isolated candidates: AR, " + ", ".join(f"D{depth}" for depth in depths))
         candidate_rows = _run_tune_candidates(
             args,
             runtime_model=runtime_model,
@@ -1263,6 +1274,7 @@ def _cmd_tune(
             output_root=output_root,
             depths=depths,
             settings=settings,
+            progress=_emit if not json_output else None,
         )
     finally:
         max_session.stop()
@@ -1292,7 +1304,9 @@ def _cmd_tune(
     else:
         payload["saved"] = False
         payload["state_path"] = str(_tune_state_path())
-        if not payload.get("best"):
+        if not any(isinstance(row.get("tok_s"), (int, float)) for row in candidate_rows):
+            payload["save_skipped_reason"] = "tune failed; no candidate produced usable tokens"
+        elif not payload.get("best"):
             payload["save_skipped_reason"] = "no MTP depth beat AR"
         elif bool(getattr(args, "no_save", False)) or not save_default:
             payload["save_skipped_reason"] = "save disabled"
@@ -1515,9 +1529,12 @@ def _run_tune_candidates(
     output_root: Path,
     depths: list[int],
     settings: dict[str, Any],
+    progress: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
+    output_root = _absolute_user_path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
+    total = 1 + len(depths)
     for candidate in ["ar", *[str(depth) for depth in depths]]:
         label = _tune_candidate_label(candidate)
         candidate_output = output_root / f"{label.lower()}.json"
@@ -1529,6 +1546,9 @@ def _run_tune_candidates(
             output=candidate_output,
             settings=settings,
         )
+        if progress is not None:
+            progress(f"[tune] {label} ({len(rows) + 1}/{total}) starting; log: {stdout_path}")
+        started = time.monotonic()
         proc = subprocess.run(
             command,
             cwd=repo_root(),
@@ -1538,16 +1558,21 @@ def _run_tune_candidates(
             stderr=subprocess.STDOUT,
             check=False,
         )
+        elapsed_s = time.monotonic() - started
         stdout_path.write_text(proc.stdout, encoding="utf-8")
-        rows.append(
-            _tune_candidate_summary(
-                candidate,
-                candidate_output,
-                returncode=proc.returncode,
-                stdout_path=stdout_path,
-                command=command,
-            )
+        row = _tune_candidate_summary(
+            candidate,
+            candidate_output,
+            returncode=proc.returncode,
+            stdout_path=stdout_path,
+            command=command,
         )
+        rows.append(row)
+        if progress is not None:
+            if isinstance(row.get("tok_s"), (int, float)):
+                progress(f"[tune] {label} finished in {elapsed_s:.1f}s: {float(row['tok_s']):.2f} tok/s")
+            else:
+                progress(f"[tune] {label} failed in {elapsed_s:.1f}s: {row.get('error') or 'no token rate'}")
     return rows
 
 
@@ -1729,6 +1754,13 @@ def _annotate_multipliers(results: list[dict[str, Any]]) -> list[dict[str, Any]]
 def _best_multiplier_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     annotated = _annotate_multipliers(results)
     ar = next((row for row in annotated if row.get("mode") == "AR"), None)
+    if not ar or not isinstance(ar.get("tok_s"), (int, float)):
+        return {
+            "available": False,
+            "ar_tok_s": None,
+            "winner": None,
+            "verdict": "tune_failed_no_ar_result",
+        }
     candidates = [
         row
         for row in annotated
@@ -1782,7 +1814,12 @@ def _print_tune_human(payload: dict[str, Any], *, verbose: bool = False) -> None
         marker = "  BEST" if best.get("mode") == mode else ""
         print(f"{mode:<4} {tok_s:>6} tok/s   {multiplier}x{marker}")
     print()
-    if best:
+    errors = [row for row in payload.get("results", []) if row.get("error")]
+    if errors:
+        print("Tune failed for one or more candidates:")
+        for row in errors:
+            print(f"  {row.get('mode')}: {row.get('error')} (log: {row.get('stdout')})")
+    elif best:
         print(
             f"Best for this Mac: {best.get('mode')}, "
             f"{_fmt_metric(best.get('multiplier_vs_ar'), digits=2)}x AR"
@@ -6481,7 +6518,7 @@ def _quickstart_apply_tuned_depth(
         verbose_default=False,
     )
     if code != 0:
-        _quickstart_line("tuning did not finish; using default depth")
+        _quickstart_line("tuning failed; using default depth")
         return
     record = _load_tune_record(state_key)
     payload = record.get("payload") if isinstance(record, dict) else None

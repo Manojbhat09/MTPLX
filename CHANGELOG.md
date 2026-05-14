@@ -37,6 +37,12 @@ All notable user-facing changes are recorded here.
   the current speed artifact is labeled as Q4 target + Q4 MTP, and an already
   installed local verified artifact is preferred over prompting to download the
   Hugging Face mirror again.
+- Fixed first-run Tune from `mtplx start` when launched outside the repo:
+  candidate artifacts now use absolute paths, Tune prints per-candidate
+  progress, and candidate failures are reported as failures instead of a false
+  "no MTP depth beat AR" result.
+- Fixed served model-id detection for the installed Optimized Speed artifact so
+  mixed Q4/Q8 speed configs do not get mislabeled as Optimized Quality.
 
 ## v0.3.5
 

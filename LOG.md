@@ -43,6 +43,51 @@ mtplx start cli --dry-run --json -> model=/Users/youssof/.mtplx/hf-upload/Qwen3.
 global pseudo-tty mtplx start --fresh -> Step 1 shows Q4 target + Q4 MTP, no BF16, no missing/download prompt, CLI selected, Step 4 Tune prompt appears before model chat starts
 ```
 
+## 2026-05-14 23:55 BST - v0.3.6 Tune UX And Served Model-Id Regression Fix
+
+Scope:
+
+```text
+worktree=/Users/youssof/Documents/MTPLX-release/mtplx-v0.3.6
+branch=codex/release-v0.3.6
+trigger=user-tested mtplx start from home directory; Tune appeared to hang silently after fan ramp, then printed n/a for every candidate and "tuning did not finish"; server banner mislabeled the installed speed artifact as mtplx-qwen36-27b-optimized-quality
+public_release_done=false
+```
+
+Root cause:
+
+```text
+tune_artifacts=_cmd_tune built output_root as a relative path from the caller cwd, but _run_tune_candidates launched subprocesses with cwd=repo_root; child candidate outputs were therefore addressed relative to a different directory, so the parent could not see the artifacts
+tune_ux=_run_tune_candidates captured child stdout and printed no per-candidate progress, making isolated model-load/timing work look frozen after fan ramp
+tune_error_copy=all-missing candidate artifacts were summarized as "No MTP depth beat AR" instead of an actual Tune failure with log paths
+served_model_id=_public_model_id_from_metadata treated any 8-bit layer inside the quantization config as Optimized Quality; the installed speed artifact is mixed Q4/Q8, so the server banner incorrectly said optimized-quality
+```
+
+Fix:
+
+```text
+tune_paths=normalize Tune output_dir/output/candidate paths to absolute user paths before spawning candidate subprocesses
+tune_progress=print artifacts path and AR/D1/D2/D3 per-candidate start/finish/fail lines to stderr during Tune
+tune_errors=report candidate artifact failures as Tune failures with log paths; quickstart now says "tuning failed; using default depth"
+served_model_id=classify mixed Q4/Q8 metadata as Optimized Speed and all-INT8/Flat8 metadata as Optimized Quality; verified_on.model speed metadata also maps to Optimized Speed
+```
+
+Validation:
+
+```text
+python3 -m py_compile mtplx/default_models.py mtplx/commands/public.py tests/test_default_models.py tests/test_public_cli.py -> pass
+uv run --extra dev python -m ruff check mtplx/default_models.py mtplx/commands/public.py tests/test_default_models.py tests/test_public_cli.py -> pass
+uv run --extra dev python -m pytest tests/test_default_models.py tests/test_public_cli.py::test_tune_candidate_outputs_are_absolute_from_non_repo_cwd tests/test_public_cli.py::test_tune_human_reports_candidate_errors_instead_of_false_no_win tests/test_public_cli.py::test_serve_uses_quality_public_model_id_for_quality_local_path tests/test_public_cli.py::test_serve_uses_legacy_public_model_id_for_legacy_optimized_local_path -q -> pass
+uv run --extra dev python -m pytest tests/test_onboarding.py tests/test_public_cli.py -q -> pass
+uv run python -m mtplx.cli start web --dry-run --json --model /Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized --yes -> openwebui.model_id=mtplx-qwen36-27b-optimized-speed
+uv run --extra dev python -m build -> pass; rebuilt dist/mtplx-0.3.6.tar.gz and dist/mtplx-0.3.6-py3-none-any.whl
+uv run --extra dev python -m twine check dist/* -> pass
+/opt/homebrew/opt/python@3.14/bin/python3.14 -m pip install --force-reinstall --no-deps dist/mtplx-0.3.6-py3-none-any.whl -> pass
+from_home_global_dry_run=mtplx tune --model /Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized --dry-run --run-id smoke-path --output-dir /tmp/mtplx-tune-from-home-check -> candidate --_candidate-output paths are absolute under /tmp/mtplx-tune-from-home-check/smoke-path
+from_home_real_short_tune=MTPLX_TUNE_STATE=/tmp/mtplx-tune-home-real-state.json mtplx tune --model /Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized --limit 1 --max-tokens 32 --depths 1 --seed 0 --retune --no-save --run-id home-real-smoke --output-dir /tmp/mtplx-tune-home-real --yes -> AR=20.25 tok/s, D1=30.31 tok/s, best=D1 1.50x, artifacts written under /tmp/mtplx-tune-home-real/home-real-smoke, no n/a rows
+thermalforge post-run status -> fans mode=auto actual=0 target=0
+```
+
 ## 2026-05-14 22:05 BST - v0.3.6 Release Candidate Assembly
 
 Scope:
