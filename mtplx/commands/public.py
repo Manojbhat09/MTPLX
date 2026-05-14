@@ -126,6 +126,9 @@ TUNE_DEFAULT_SEED = 0
 TUNE_STATE_PATH = Path("~/.mtplx/tuning.json").expanduser()
 TUNE_TELEMETRY_SAMPLE_INTERVAL_S = 0.75
 TUNE_POWERMETRICS_SAMPLE_INTERVAL_S = 1.5
+TUNE_CANDIDATE_SETTLE_S = 5.0
+TUNE_TIE_PREFER_DEEPER_WITHIN_PCT = 2.0
+TUNE_TELEMETRY_ENV = "MTPLX_BENCH_TUNE_TELEMETRY"
 GENERATION_MODE_MTP = "mtp"
 GENERATION_MODE_AR = "ar"
 GENERATION_MODES = {GENERATION_MODE_MTP, GENERATION_MODE_AR}
@@ -1198,8 +1201,10 @@ def _cmd_tune(
     output_path = _absolute_user_path(getattr(args, "output")) if getattr(args, "output", None) else output_root / "tune.json"
     json_output = bool(getattr(args, "json", False))
     verbose = bool(getattr(args, "verbose", verbose_default) or verbose_default)
+    collect_telemetry = _tune_collect_telemetry(args, action=action)
 
     if bool(getattr(args, "dry_run", False)):
+        model_source_notes = _tune_model_source_notes(args, runtime_model=model)
         payload = _tune_dry_run_payload(
             args,
             action=action,
@@ -1210,6 +1215,8 @@ def _cmd_tune(
             settings=settings,
             depths=depths,
             save_default=save_default,
+            collect_telemetry=collect_telemetry,
+            model_source_notes=model_source_notes,
         )
         if json_output or action == "bench tune":
             _print(payload)
@@ -1227,6 +1234,7 @@ def _cmd_tune(
             detail=resolve_error.get("detail"),
             json_output=json_output,
         )
+    model_source_notes = _tune_model_source_notes(args, runtime_model=runtime_model)
 
     profile = get_profile("performance-cold")
     hardware = _apple_hardware_context()
@@ -1256,6 +1264,14 @@ def _cmd_tune(
         print(line, file=sys.stderr, flush=True)
 
     if not json_output:
+        _emit(f"[tune] model: {runtime_model}")
+        for note in model_source_notes:
+            _emit(note)
+        if action == "bench tune":
+            if collect_telemetry:
+                _emit("[tune] diagnostic telemetry active; use --no-telemetry for clean speed comparison")
+            else:
+                _emit("[tune] diagnostic telemetry disabled; speed comparison is cleaner")
         _emit("[tune] close heavy apps now for cleaner results before measurements start")
         _emit("[tune] fans may get loud during tuning and will be restored afterward")
     max_session = MaxSession(log=_emit)
@@ -1281,7 +1297,7 @@ def _cmd_tune(
             depths=depths,
             settings=settings,
             progress=_emit if not json_output else None,
-            collect_telemetry=action == "bench tune",
+            collect_telemetry=collect_telemetry,
         )
     finally:
         max_session.stop()
@@ -1299,6 +1315,11 @@ def _cmd_tune(
         backend=backend,
         thermal=max_session.thermal,
         state_key=state_key,
+        diagnostics={
+            "telemetry_enabled": collect_telemetry,
+            "telemetry_env": TUNE_TELEMETRY_ENV,
+            "model_source_notes": model_source_notes,
+        },
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_json(output_path, payload)
@@ -1392,6 +1413,79 @@ def _parse_tune_depths(raw: Any) -> list[int]:
     return depths
 
 
+def _tune_env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    text = str(raw).strip().lower()
+    if text in {"0", "off", "false", "none", "no"}:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return default
+
+
+def _tune_env_bool(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled", "none"}:
+        return False
+    return default
+
+
+def _tune_collect_telemetry(args: Any, *, action: str) -> bool:
+    return (
+        action == "bench tune"
+        and not bool(getattr(args, "no_telemetry", False))
+        and _tune_env_bool(TUNE_TELEMETRY_ENV, default=True)
+    )
+
+
+def _normalize_model_ref_for_compare(value: str | Path | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith(("~", "/", "./", "../")):
+        path = Path(text).expanduser()
+        try:
+            return str(path.resolve())
+        except OSError:
+            return str(path)
+    return text
+
+
+def _same_model_ref(left: str | Path | None, right: str | Path | None) -> bool:
+    return _normalize_model_ref_for_compare(left) == _normalize_model_ref_for_compare(right)
+
+
+def _tune_model_source_notes(args: Any, *, runtime_model: str) -> list[str]:
+    cli_flags = getattr(args, "_cli_flags", set()) or set()
+    if "model" in cli_flags:
+        return []
+    config = getattr(args, "mtplx_config", None)
+    config_model = config.get("model") if isinstance(config, dict) else None
+    if not config_model or not _same_model_ref(runtime_model, config_model):
+        return []
+    try:
+        default_selection = select_default_model()
+    except Exception:
+        return []
+    default_model = default_selection.model
+    if _same_model_ref(runtime_model, default_model):
+        return []
+    config_path = config.get("path") if isinstance(config, dict) else "~/.mtplx/config.toml"
+    return [
+        f"[tune] using configured model from {config_path}: {runtime_model}",
+        f"[tune] verified default for this Mac is: {default_model}",
+        "[tune] pass --model <path> to benchmark a different artifact explicitly",
+    ]
+
+
 def _tune_settings(args: Any, *, depths: list[int]) -> dict[str, Any]:
     return {
         "profile": "performance-cold",
@@ -1401,6 +1495,17 @@ def _tune_settings(args: Any, *, depths: list[int]) -> dict[str, Any]:
         "limit": int(getattr(args, "limit", TUNE_DEFAULT_LIMIT) or TUNE_DEFAULT_LIMIT),
         "seed": int(getattr(args, "seed", TUNE_DEFAULT_SEED) or TUNE_DEFAULT_SEED),
         "thinking": "disabled",
+        "candidate_settle_s": max(
+            0.0,
+            _tune_env_float("MTPLX_TUNE_CANDIDATE_SETTLE_S", TUNE_CANDIDATE_SETTLE_S),
+        ),
+        "tie_prefer_deeper_within_pct": max(
+            0.0,
+            _tune_env_float(
+                "MTPLX_TUNE_TIE_PREFER_DEEPER_WITHIN_PCT",
+                TUNE_TIE_PREFER_DEEPER_WITHIN_PCT,
+            ),
+        ),
     }
 
 
@@ -1497,6 +1602,8 @@ def _tune_dry_run_payload(
     settings: dict[str, Any],
     depths: list[int],
     save_default: bool,
+    collect_telemetry: bool,
+    model_source_notes: list[str] | None = None,
 ) -> dict[str, Any]:
     commands = []
     for candidate in ["ar", *[str(depth) for depth in depths]]:
@@ -1525,12 +1632,21 @@ def _tune_dry_run_payload(
         "state_path": str(_tune_state_path()),
         "save_default": save_default,
         "fan_control": "verified max-fan required before model load",
-        "diagnostics": (
-            "bench tune records per-candidate power, frequency, temperature, "
-            "utilization, and fan telemetry when not in dry-run"
-            if action == "bench tune"
-            else None
-        ),
+        "diagnostics": {
+            "telemetry_enabled": collect_telemetry,
+            "telemetry_env": TUNE_TELEMETRY_ENV,
+            "model_source_notes": model_source_notes or [],
+            "description": (
+                "bench tune records per-candidate power, frequency, temperature, "
+                "utilization, and fan telemetry when not in dry-run"
+                if action == "bench tune" and collect_telemetry
+                else (
+                    "bench tune telemetry disabled; candidate commands match clean tune timing more closely"
+                    if action == "bench tune"
+                    else None
+                )
+            ),
+        },
     }
 
 
@@ -1987,6 +2103,7 @@ def _run_tune_candidates(
     output_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     total = 1 + len(depths)
+    settle_s = float(settings.get("candidate_settle_s") or 0.0)
     for candidate in ["ar", *[str(depth) for depth in depths]]:
         label = _tune_candidate_label(candidate)
         candidate_output = output_root / f"{label.lower()}.json"
@@ -1998,6 +2115,10 @@ def _run_tune_candidates(
             output=candidate_output,
             settings=settings,
         )
+        if rows and settle_s > 0.0:
+            if progress is not None:
+                progress(f"[tune] settling {settle_s:.1f}s before {label}")
+            time.sleep(settle_s)
         if progress is not None:
             progress(f"[tune] {label} ({len(rows) + 1}/{total}) starting; log: {stdout_path}")
         started = time.monotonic()
@@ -2171,6 +2292,7 @@ def _tune_payload(
     backend: dict[str, Any],
     thermal: dict[str, Any],
     state_key: str,
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rows = _annotate_multipliers(rows)
     best = _best_multiplier_summary(rows)
@@ -2188,6 +2310,7 @@ def _tune_payload(
         "software": software,
         "backend": backend,
         "thermal": thermal,
+        "diagnostics": diagnostics or {},
         "state_key": state_key,
         "artifacts": {
             "root": str(output_root),
@@ -2230,7 +2353,33 @@ def _best_multiplier_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         and isinstance(row.get("multiplier_vs_ar"), (int, float))
         and float(row["multiplier_vs_ar"]) > 1.0
     ]
-    winner = max(candidates, key=lambda row: float(row["multiplier_vs_ar"]), default=None)
+    raw_winner = max(candidates, key=lambda row: float(row["multiplier_vs_ar"]), default=None)
+    winner = raw_winner
+    tie_margin_pct = max(
+        0.0,
+        _tune_env_float(
+            "MTPLX_TUNE_TIE_PREFER_DEEPER_WITHIN_PCT",
+            TUNE_TIE_PREFER_DEEPER_WITHIN_PCT,
+        ),
+    )
+    if raw_winner is not None and tie_margin_pct > 0.0:
+        raw_tok_s = raw_winner.get("tok_s")
+        if isinstance(raw_tok_s, (int, float)) and float(raw_tok_s) > 0.0:
+            floor = float(raw_tok_s) * (1.0 - tie_margin_pct / 100.0)
+            tied = [
+                row
+                for row in candidates
+                if isinstance(row.get("tok_s"), (int, float))
+                and float(row["tok_s"]) >= floor
+            ]
+            winner = max(
+                tied,
+                key=lambda row: (
+                    int(row.get("depth") or 0),
+                    float(row.get("tok_s") or 0.0),
+                ),
+                default=raw_winner,
+            )
     if winner is None:
         return {
             "available": bool(ar and isinstance(ar.get("tok_s"), (int, float))),
@@ -2238,6 +2387,10 @@ def _best_multiplier_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
             "winner": None,
             "verdict": "no_mtp_depth_beat_ar",
         }
+    raw_winner_changed = (
+        raw_winner is not None
+        and raw_winner.get("mode") != winner.get("mode")
+    )
     return {
         "available": True,
         "ar_tok_s": ar.get("tok_s") if ar else None,
@@ -2246,6 +2399,18 @@ def _best_multiplier_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
             "depth": winner.get("depth"),
             "tok_s": winner.get("tok_s"),
             "multiplier_vs_ar": winner.get("multiplier_vs_ar"),
+        },
+        "raw_winner": {
+            "mode": raw_winner.get("mode"),
+            "depth": raw_winner.get("depth"),
+            "tok_s": raw_winner.get("tok_s"),
+            "multiplier_vs_ar": raw_winner.get("multiplier_vs_ar"),
+        }
+        if raw_winner is not None
+        else None,
+        "tie_breaker": {
+            "applied": raw_winner_changed,
+            "prefer_deeper_within_pct": tie_margin_pct,
         },
         "verdict": "mtp_depth_wins",
     }
@@ -2357,6 +2522,15 @@ def _print_tune_human(payload: dict[str, Any], *, verbose: bool = False) -> None
             f"Best for this Mac: {best.get('mode')}, "
             f"{_fmt_metric(best.get('multiplier_vs_ar'), digits=2)}x AR"
         )
+        best_multiplier = payload.get("best_multiplier") or {}
+        tie_breaker = best_multiplier.get("tie_breaker") or {}
+        raw_winner = best_multiplier.get("raw_winner") or {}
+        if tie_breaker.get("applied") and raw_winner.get("mode"):
+            print(
+                f"Tie-break: {best.get('mode')} was within "
+                f"{_fmt_metric(tie_breaker.get('prefer_deeper_within_pct'), digits=1)}% "
+                f"of raw fastest {raw_winner.get('mode')}; preferred the deeper depth."
+            )
     else:
         print("No MTP depth beat AR on this run")
     if payload.get("saved") and best:

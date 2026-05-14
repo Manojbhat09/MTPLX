@@ -1430,7 +1430,50 @@ def test_bench_tune_dry_run_is_json_support_payload(capsys):
     assert payload["settings"]["depths"] == "1,2,3"
     assert payload["settings"]["max_tokens"] == 192
     assert [row["candidate"] for row in payload["candidates"]] == ["AR", "D1", "D2", "D3"]
-    assert "power" in payload["diagnostics"]
+    assert payload["diagnostics"]["telemetry_enabled"] is True
+    assert payload["diagnostics"]["model_source_notes"] == []
+    assert "power" in payload["diagnostics"]["description"]
+
+
+def test_bench_tune_dry_run_can_disable_telemetry(capsys):
+    code = main(
+        [
+            "bench",
+            "tune",
+            "--model",
+            "models/not-loaded-in-dry-run",
+            "--dry-run",
+            "--no-telemetry",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["diagnostics"]["telemetry_enabled"] is False
+    assert "telemetry disabled" in payload["diagnostics"]["description"]
+
+
+def test_bench_tune_dry_run_warns_when_config_model_differs_from_default(tmp_path, monkeypatch, capsys):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        'model = "/Users/youssof/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Speed"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MTPLX_CONFIG", str(config))
+    monkeypatch.setattr(
+        public,
+        "select_default_model",
+        lambda: SimpleNamespace(model="/Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized"),
+    )
+
+    code = main(["bench", "tune", "--dry-run", "--json", "--no-telemetry"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["model"] == "/Users/youssof/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Speed"
+    notes = payload["diagnostics"]["model_source_notes"]
+    assert any("using configured model" in note for note in notes)
+    assert any("verified default for this Mac" in note for note in notes)
 
 
 def test_bench_tune_powermetrics_parser_extracts_power_frequency_and_utilization():
@@ -1515,6 +1558,23 @@ def test_tune_no_mtp_win_has_no_saved_recommendation():
     assert best["verdict"] == "no_mtp_depth_beat_ar"
 
 
+def test_tune_tie_breaker_prefers_deeper_depth_within_noise_band():
+    best = public._best_multiplier_summary(
+        public._annotate_multipliers(
+            [
+                {"mode": "AR", "depth": None, "tok_s": 29.57},
+                {"mode": "D1", "depth": 1, "tok_s": 49.14},
+                {"mode": "D2", "depth": 2, "tok_s": 54.67},
+                {"mode": "D3", "depth": 3, "tok_s": 54.34},
+            ]
+        )
+    )
+
+    assert best["raw_winner"]["mode"] == "D2"
+    assert best["winner"]["mode"] == "D3"
+    assert best["tie_breaker"]["applied"] is True
+
+
 def test_tune_state_round_trip(tmp_path, monkeypatch):
     monkeypatch.setenv("MTPLX_TUNE_STATE", str(tmp_path / "tuning.json"))
     payload = {
@@ -1527,6 +1587,29 @@ def test_tune_state_round_trip(tmp_path, monkeypatch):
 
     assert record is not None
     assert record["payload"]["best"]["depth"] == 2
+
+
+def test_tune_model_source_notes_warn_when_config_model_differs_from_default(monkeypatch):
+    monkeypatch.setattr(
+        public,
+        "select_default_model",
+        lambda: SimpleNamespace(model="/Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized"),
+    )
+    args = SimpleNamespace(
+        _cli_flags=set(),
+        mtplx_config={
+            "path": "/Users/youssof/.mtplx/config.toml",
+            "model": "/Users/youssof/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Speed",
+        },
+    )
+
+    notes = public._tune_model_source_notes(
+        args,
+        runtime_model="/Users/youssof/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Speed",
+    )
+
+    assert any("using configured model" in note for note in notes)
+    assert any("verified default for this Mac" in note for note in notes)
 
 
 def test_tune_candidate_outputs_are_absolute_from_non_repo_cwd(tmp_path, monkeypatch):
@@ -1568,6 +1651,59 @@ def test_tune_candidate_outputs_are_absolute_from_non_repo_cwd(tmp_path, monkeyp
     assert rows[0]["tok_s"] == 12.0
     assert any("AR (1/1) starting" in line for line in progress)
     assert any("AR finished" in line for line in progress)
+
+
+def test_tune_candidates_settle_between_depth_runs(tmp_path, monkeypatch):
+    sleeps: list[float] = []
+    progress: list[str] = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    def fake_run(command, *, cwd, env, text, stdout, stderr, check):
+        output_arg = command[command.index("--_candidate-output") + 1]
+        candidate = command[command.index("--_candidate") + 1]
+        output = Path(output_arg)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if candidate == "ar":
+            payload = {"ar_rows": [{"tok_s": 12.0, "generated_tokens": 2}]}
+        else:
+            payload = {
+                "depths": [
+                    {
+                        "summary": {
+                            "mean_tok_s": 13.0,
+                            "generated_tokens": 2,
+                            "verify_calls": 1,
+                        }
+                    }
+                ]
+            }
+        output.write_text(json.dumps(payload), encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="candidate ok")
+
+    monkeypatch.setattr(public.time, "sleep", fake_sleep)
+    monkeypatch.setattr(public.subprocess, "run", fake_run)
+
+    rows = public._run_tune_candidates(
+        SimpleNamespace(cache_dir=None, unsafe_force_unverified=False),
+        runtime_model="/tmp/model",
+        run_id="run",
+        output_root=tmp_path / "run",
+        depths=[1],
+        settings={
+            "max_tokens": 8,
+            "limit": 1,
+            "seed": 0,
+            "depths": "1",
+            "candidate_settle_s": 5.0,
+        },
+        progress=progress.append,
+    )
+
+    assert [row["mode"] for row in rows] == ["AR", "D1"]
+    assert sleeps == [5.0]
+    assert any("settling 5.0s before D1" in line for line in progress)
 
 
 def test_bench_tune_candidate_rows_include_hardware_telemetry(tmp_path, monkeypatch):

@@ -2246,6 +2246,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench_p.add_argument("--verbose", action="store_true", help="Show detailed tuner diagnostics where supported")
     bench_p.add_argument("--no-save", action="store_true", help="Do not save tuner recommendations")
     bench_p.add_argument("--retune", action="store_true", help="Ignore saved tuner results where supported")
+    bench_p.add_argument("--no-telemetry", action="store_true", help="Disable bench tune power telemetry for cleaner speed comparison")
     bench_p.add_argument("--before", help="Baseline envelope or nightly summary for bench compare")
     bench_p.add_argument("--after", help="Candidate envelope or nightly summary for bench compare")
     bench_p.add_argument("--strict-exactness", action="store_true", help="Require exactness gate pass in envelope compare mode")

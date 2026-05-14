@@ -315,3 +315,67 @@ m3_ultra_512gb_target_gate=not run on this machine; still required before public
 before_v0.3.5_comparison=not rerun locally in this pass; candidate evidence is local after/fix evidence plus production-path behavior
 mlx_fast_fork=not active in this venv (stock MLX 0.31.2 observed), so local speed numbers are QA evidence, not public headline-speed proof
 ```
+
+## 2026-05-15 00:20 BST - Bench Tune Model/Telemetry UX Fix, No Public Release
+
+Scope:
+
+```text
+worktree=/Users/youssof/Documents/MTPLX-release/mtplx-v0.3.6
+branch=codex/release-v0.3.6
+user_gate=no merge, tag, GitHub release, PyPI, or Homebrew publish until user approves
+problem=mtplx bench tune looked less efficient than mtplx start/tune and reported a near-tie D2 win over D3
+```
+
+Diagnosis:
+
+```text
+no_args_bench_tune_model=/Users/youssof/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Speed
+source=~/.mtplx/config.toml
+start_verified_default_model=/Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized
+result=the confusing run was not an explicit same-artifact comparison with the start path
+user_reported_d2_vs_d3_gap=54.67 vs 54.34 tok/s, about 0.6 percent
+interpretation=within short-run noise, not a meaningful architectural D2 win
+overlap_check=candidates still run as blocking isolated subprocesses; no candidate overlap evidence
+```
+
+Fix:
+
+```text
+mtplx bench tune now prints the exact model path before model load
+no-arg bench tune warns when ~/.mtplx/config.toml selects a path different from the verified default shown by start
+mtplx bench tune --no-telemetry added for clean speed comparison without power sampler diagnostics
+bench tune dry-run JSON includes telemetry mode and model-source notes
+5.0s settle delay added between AR/D1/D2/D3 candidate subprocesses
+near-tie policy added: if a deeper MTP depth is within 2.0 percent of raw fastest, prefer the deeper depth and report the tie-break
+```
+
+Real same-artifact checks on `/Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized`:
+
+```text
+clean_tune_run=outputs/cli/tune-comparison/clean-tune-20260515-001540
+clean_tune=D3 best, AR 23.53 tok/s, D1 41.83, D2 48.42, D3 54.55, 2.32x AR
+
+bench_no_telemetry_run=outputs/cli/tune-comparison/bench-no-telemetry-20260515-001633
+bench_no_telemetry=D3 best, AR 24.62 tok/s, D1 41.61, D2 48.58, D3 54.52, 2.21x AR
+
+bench_telemetry_run=outputs/cli/tune-comparison/bench-telemetry-20260515-001729
+bench_telemetry=D3 best, AR 24.44 tok/s, D1 41.85, D2 48.25, D3 54.48, 2.23x AR
+
+conclusion=bench wrapper is not materially slower when telemetry is disabled; telemetry run also stayed effectively identical on this short check
+fan_restore=thermalforge status after runs showed both fans in auto mode
+```
+
+Validation:
+
+```text
+python3 -m compileall -q mtplx tests -> pass
+uv run --extra dev python -m pytest tests/test_public_cli.py -q -> pass
+uv run --extra dev python -m ruff check mtplx/commands/public.py mtplx/cli.py tests/test_public_cli.py -> pass
+git diff --check -> pass
+uv run --extra dev python -m build -> pass
+uv run --extra dev python -m twine check dist/* -> pass
+global install=/opt/homebrew/opt/python@3.14/bin/python3.14 -m pip install --force-reinstall --no-deps dist/mtplx-0.3.6-py3-none-any.whl
+global smoke=mtplx --version -> mtplx 0.3.6 (0.3.6)
+global dry-run=mtplx bench tune --dry-run --no-telemetry --json shows configured model path, telemetry-disabled description, and verified-default mismatch note
+```
