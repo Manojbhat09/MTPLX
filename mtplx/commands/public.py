@@ -1674,6 +1674,19 @@ def _series_stats(values: list[Any]) -> dict[str, Any] | None:
     }
 
 
+def _generation_windows_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, float]]:
+    windows: list[dict[str, float]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        start = _float_or_none(row.get("generation_started_at"))
+        end = _float_or_none(row.get("generation_ended_at"))
+        if start is None or end is None or end <= start:
+            continue
+        windows.append({"start": start, "end": end, "duration_s": end - start})
+    return windows
+
+
 def _convert_power_to_watts(value: str, unit: str | None) -> float:
     watts = float(value)
     if (unit or "").lower() == "mw":
@@ -1924,12 +1937,14 @@ def _summarize_tune_telemetry_samples(
 
     summary: dict[str, Any] = {
         "enabled": True,
+        "scope": "candidate_process",
         "sample_count": len(samples),
         "duration_s": (
             float(ended_at - started_at)
             if started_at is not None and ended_at is not None
             else None
         ),
+        "samples": samples,
         "sources": {
             "thermalforge": any(sample.get("thermalforge_ok") for sample in samples),
             "powermetrics": any(sample.get("powermetrics_ok") for sample in samples),
@@ -2016,6 +2031,61 @@ def _summarize_tune_telemetry_samples(
     return summary
 
 
+def _sample_in_any_window(sample: dict[str, Any], windows: list[dict[str, float]]) -> bool:
+    timestamp = _float_or_none(sample.get("timestamp"))
+    if timestamp is None:
+        return False
+    return any(window["start"] <= timestamp <= window["end"] for window in windows)
+
+
+def _attach_generation_telemetry(
+    telemetry: dict[str, Any] | None,
+    row: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(telemetry, dict):
+        return telemetry
+    windows = [
+        window
+        for window in row.get("generation_windows", [])
+        if isinstance(window, dict)
+        and isinstance(window.get("start"), (int, float))
+        and isinstance(window.get("end"), (int, float))
+        and float(window["end"]) > float(window["start"])
+    ]
+    if not windows:
+        telemetry["generation"] = {
+            "enabled": True,
+            "scope": "generation_window",
+            "sample_count": 0,
+            "note": "candidate artifact did not include generation timing windows",
+        }
+        return telemetry
+    samples = [
+        sample
+        for sample in telemetry.get("samples", [])
+        if isinstance(sample, dict) and _sample_in_any_window(sample, windows)
+    ]
+    started_at = min(float(window["start"]) for window in windows)
+    ended_at = max(float(window["end"]) for window in windows)
+    generation = _summarize_tune_telemetry_samples(
+        samples,
+        errors=telemetry.get("errors") or [],
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+    generation["scope"] = "generation_window"
+    generation["windows"] = windows
+    generation["window_count"] = len(windows)
+    generation["window_duration_s"] = sum(
+        float(window["end"]) - float(window["start"])
+        for window in windows
+    )
+    if not samples:
+        generation["note"] = "no powermetrics/thermalforge sample landed inside the generation window"
+    telemetry["generation"] = generation
+    return telemetry
+
+
 class _TuneTelemetrySampler:
     def __init__(self, *, enabled: bool) -> None:
         self.enabled = enabled
@@ -2055,7 +2125,8 @@ class _TuneTelemetrySampler:
         next_powermetrics = 0.0
         while not self._stop.is_set():
             now = time.monotonic()
-            sample: dict[str, Any] = {"timestamp": time.time()}
+            sample_started_at = time.time()
+            sample: dict[str, Any] = {}
             thermal = _sample_thermalforge_status()
             if thermal.get("error"):
                 self._add_error(f"thermalforge: {thermal.get('error')}")
@@ -2078,6 +2149,10 @@ class _TuneTelemetrySampler:
                     ):
                         if key in power:
                             sample[key] = power[key]
+            sample_ended_at = time.time()
+            sample["sample_started_at"] = sample_started_at
+            sample["sample_ended_at"] = sample_ended_at
+            sample["timestamp"] = (sample_started_at + sample_ended_at) / 2.0
             with self._lock:
                 self._samples.append(sample)
             self._stop.wait(TUNE_TELEMETRY_SAMPLE_INTERVAL_S)
@@ -2146,7 +2221,7 @@ def _run_tune_candidates(
             command=command,
         )
         if telemetry is not None:
-            row["telemetry"] = telemetry
+            row["telemetry"] = _attach_generation_telemetry(telemetry, row)
         rows.append(row)
         if progress is not None:
             if isinstance(row.get("tok_s"), (int, float)):
@@ -2231,16 +2306,26 @@ def _tune_candidate_summary(
             for row in ar_rows
             if isinstance(row.get("tok_s"), (int, float))
         ]
+        generation_windows = _generation_windows_from_rows(ar_rows)
         return {
             **base,
             "tok_s": (sum(tok_values) / len(tok_values)) if tok_values else None,
             "generated_tokens": sum(int(row.get("generated_tokens") or 0) for row in ar_rows),
+            "generation_windows": generation_windows,
+            "generation_window_s": sum(window["duration_s"] for window in generation_windows),
             "verify_ms_per_call": None,
             "quality_passed": True if ar_rows else None,
         }
     depth_rows = data.get("depths") or data.get("depth_results") or []
     row = depth_rows[0] if depth_rows else {}
     summary = row.get("summary") or {}
+    generation_rows = [
+        result_row
+        for depth_row in depth_rows
+        for result_row in depth_row.get("rows", [])
+        if isinstance(result_row, dict)
+    ]
+    generation_windows = _generation_windows_from_rows(generation_rows)
     verify_calls = int(summary.get("verify_calls") or 0)
     validations = [
         validation
@@ -2259,6 +2344,8 @@ def _tune_candidate_summary(
         "tok_s": summary.get("mean_tok_s"),
         "generated_tokens": summary.get("generated_tokens"),
         "elapsed_s": summary.get("elapsed_s"),
+        "generation_windows": generation_windows,
+        "generation_window_s": sum(window["duration_s"] for window in generation_windows),
         "verify_time_s": summary.get("verify_time_s"),
         "verify_calls": verify_calls,
         "verify_ms_per_call": _ms_per_call(summary.get("verify_time_s"), verify_calls),
@@ -2435,8 +2522,14 @@ def _stat_avg(stats: Any) -> float | None:
 def _format_tune_telemetry_inline(telemetry: Any) -> str | None:
     if not isinstance(telemetry, dict) or not telemetry.get("enabled"):
         return None
+    display = telemetry
+    scope = "candidate"
+    generation = telemetry.get("generation")
+    if isinstance(generation, dict) and generation.get("sample_count"):
+        display = generation
+        scope = "generation"
     parts: list[str] = []
-    power = telemetry.get("power_w") or {}
+    power = display.get("power_w") or {}
     power_parts = []
     for label, key in (("pkg", "package"), ("cpu", "cpu"), ("ane", "ane"), ("gpu", "gpu")):
         value = _stat_avg(power.get(key))
@@ -2445,7 +2538,7 @@ def _format_tune_telemetry_inline(telemetry: Any) -> str | None:
     if power_parts:
         parts.append("power " + " ".join(power_parts))
 
-    frequency = telemetry.get("frequency_ghz") or {}
+    frequency = display.get("frequency_ghz") or {}
     frequency_parts = []
     for label, key in (("P", "p_cluster"), ("M", "m_cluster"), ("GPU", "gpu")):
         value = _stat_avg(frequency.get(key))
@@ -2454,7 +2547,7 @@ def _format_tune_telemetry_inline(telemetry: Any) -> str | None:
     if frequency_parts:
         parts.append("freq " + " ".join(frequency_parts))
 
-    temperature = telemetry.get("temperature_c") or {}
+    temperature = display.get("temperature_c") or {}
     temp_parts = []
     core_avg = _stat_avg(temperature.get("core_avg"))
     core_max = _stat_avg(temperature.get("core_max"))
@@ -2468,7 +2561,7 @@ def _format_tune_telemetry_inline(telemetry: Any) -> str | None:
     if temp_parts:
         parts.append("temp " + " ".join(temp_parts))
 
-    utilization = telemetry.get("utilization_pct") or {}
+    utilization = display.get("utilization_pct") or {}
     utilization_parts = []
     for label, key in (("P", "p_core"), ("M", "m_core"), ("GPU", "gpu")):
         value = _stat_avg(utilization.get(key))
@@ -2477,21 +2570,25 @@ def _format_tune_telemetry_inline(telemetry: Any) -> str | None:
     if utilization_parts:
         parts.append("util " + " ".join(utilization_parts))
 
-    fans = telemetry.get("fans_rpm") or {}
+    fans = display.get("fans_rpm") or {}
     fan_avg = _stat_avg(fans.get("avg"))
     if fan_avg is not None:
         parts.append(f"fans={fan_avg:.0f}rpm")
 
-    sample_count = telemetry.get("sample_count")
+    sample_count = display.get("sample_count")
     if isinstance(sample_count, int):
         parts.append(f"samples={sample_count}")
-    errors = telemetry.get("errors") or []
+    window_duration = display.get("window_duration_s")
+    if scope == "generation" and isinstance(window_duration, (int, float)):
+        parts.append(f"window={float(window_duration):.1f}s")
+    errors = display.get("errors") or telemetry.get("errors") or []
     if parts and errors:
         parts.append("notes=" + "; ".join(str(error) for error in errors[:2]))
     if not parts:
         if errors:
             return f"unavailable ({'; '.join(str(error) for error in errors[:2])})"
         return None
+    parts.insert(0, f"scope={scope}")
     return " | ".join(parts)
 
 

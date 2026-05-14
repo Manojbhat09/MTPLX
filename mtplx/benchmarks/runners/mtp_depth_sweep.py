@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import statistics
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -157,6 +158,7 @@ def run_mtp_depth_sweep(
     ar_rows: list[dict[str, Any]] = []
     if compare_ar:
         for index, (case, ids) in enumerate(encoded):
+            generation_started_at = time.time()
             ar = generate_ar(
                 rt,
                 ids,
@@ -164,10 +166,14 @@ def run_mtp_depth_sweep(
                 sampler=sampler,
                 seed=seed + index,
             )
+            generation_ended_at = time.time()
             ar_rows.append(
                 {
                     "prompt_id": case.id,
                     "category": case.category,
+                    "generation_started_at": generation_started_at,
+                    "generation_ended_at": generation_ended_at,
+                    "generation_window_s": generation_ended_at - generation_started_at,
                     "generated_tokens": ar.stats.generated_tokens,
                     "tok_s": ar.stats.tok_s,
                     "tokens": ar.tokens,
@@ -179,6 +185,7 @@ def run_mtp_depth_sweep(
     for depth in depth_values:
         rows = []
         for index, (case, ids) in enumerate(encoded):
+            generation_started_at = time.time()
             out = generate_mtpk(
                 rt,
                 ids,
@@ -211,6 +218,7 @@ def run_mtp_depth_sweep(
                 adapter_ensemble_min_depth=adapter_ensemble_min_depth,
                 mtp_topk_reranker=mtp_topk_reranker,
             )
+            generation_ended_at = time.time()
             validations = [
                 asdict(validation)
                 for validation in validate_benchmark_output(
@@ -225,6 +233,9 @@ def run_mtp_depth_sweep(
                     "prompt_id": case.id,
                     "category": case.category,
                     "prompt_sha256": case.prompt_sha256,
+                    "generation_started_at": generation_started_at,
+                    "generation_ended_at": generation_ended_at,
+                    "generation_window_s": generation_ended_at - generation_started_at,
                     "generated_tokens": out.stats.generated_tokens,
                     "elapsed_s": out.stats.elapsed_s,
                     "tok_s": out.stats.tok_s,

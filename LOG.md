@@ -379,3 +379,44 @@ global install=/opt/homebrew/opt/python@3.14/bin/python3.14 -m pip install --for
 global smoke=mtplx --version -> mtplx 0.3.6 (0.3.6)
 global dry-run=mtplx bench tune --dry-run --no-telemetry --json shows configured model path, telemetry-disabled description, and verified-default mismatch note
 ```
+
+## 2026-05-15 00:34 BST - Bench Tune Generation-Window Telemetry Fix, No Public Release
+
+Scope:
+
+```text
+worktree=/Users/youssof/Documents/MTPLX-release/mtplx-v0.3.6
+branch=codex/release-v0.3.6
+user_gate=no merge, tag, GitHub release, PyPI, or Homebrew publish until user approves
+problem=bench tune telemetry showed misleading low GPU utilization because parent-side samples covered subprocess setup/teardown and one tail-idle powermetrics sample could land inside the old broad window
+```
+
+Fix:
+
+```text
+mtp_depth_sweep rows now include generation_started_at, generation_ended_at, and generation_window_s
+bench tune telemetry now reports scope=generation when powermetrics/thermalforge samples land inside the actual generation window
+scope=candidate is still shown when no generation-window sample is available, so the output does not pretend broad telemetry is generation telemetry
+powermetrics samples are timestamped at the midpoint of the actual telemetry capture, preventing end-of-generation idle samples from dragging D3 GPU utilization down
+```
+
+Real verification on `/Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized`:
+
+```text
+command=uv run --extra dev python -m mtplx.cli bench tune --model /Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized --limit 1 --max-tokens 192 --depths 1,2,3 --seed 0 --retune --no-save --yes --output-dir outputs/cli/tune-comparison --run-id bench-generation-midpoint-20260515-003100
+artifact=outputs/cli/tune-comparison/bench-generation-midpoint-20260515-003100/tune.json
+AR=24.52 tok/s, telemetry scope=generation, gpu=15.7W, GPU=98.9%, samples=5, window=7.8s
+D1=41.95 tok/s, telemetry scope=generation, gpu=53.1W, GPU=97.8%, samples=3, window=4.6s
+D2=48.51 tok/s, telemetry scope=generation, gpu=53.5W, GPU=81.3%, samples=3, window=4.0s
+D3=54.51 tok/s, telemetry scope=generation, gpu=72.0W, GPU=98.4%, samples=2, window=3.5s
+fan_restore=thermalforge status after run showed both fans in auto mode
+```
+
+Validation:
+
+```text
+python3 -m compileall -q mtplx tests -> pass
+uv run --extra dev python -m pytest tests/test_public_cli.py tests/test_mtp_depth_sweep.py -q -> pass
+uv run --extra dev python -m ruff check mtplx/benchmarks/runners/mtp_depth_sweep.py mtplx/commands/public.py tests/test_public_cli.py -> pass
+git diff --check -> pass
+```

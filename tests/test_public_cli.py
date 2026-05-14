@@ -1758,7 +1758,85 @@ def test_bench_tune_candidate_rows_include_hardware_telemetry(tmp_path, monkeypa
     )
 
     assert rows[0]["telemetry"]["power_w"]["package"]["avg"] == 42.0
-    assert any("telemetry: power pkg=42.0W" in line for line in progress)
+    assert any("telemetry: scope=candidate | power pkg=42.0W" in line for line in progress)
+
+
+def test_bench_tune_telemetry_prefers_generation_window_samples(tmp_path, monkeypatch):
+    progress: list[str] = []
+    telemetry = {
+        "enabled": True,
+        "scope": "candidate_process",
+        "sample_count": 2,
+        "samples": [
+            {
+                "timestamp": 100.0,
+                "power_w": {"gpu": 5.0},
+                "utilization_pct": {"gpu": 10.0},
+            },
+            {
+                "timestamp": 105.0,
+                "power_w": {"gpu": 40.0},
+                "utilization_pct": {"gpu": 99.0},
+            },
+        ],
+        "power_w": {"gpu": {"avg": 22.5}},
+        "utilization_pct": {"gpu": {"avg": 54.5}},
+    }
+
+    class FakeSampler:
+        def __init__(self, *, enabled):
+            self.enabled = enabled
+
+        def start(self):
+            assert self.enabled is True
+
+        def stop(self):
+            return dict(telemetry)
+
+    def fake_run(command, *, cwd, env, text, stdout, stderr, check):
+        output_arg = command[command.index("--_candidate-output") + 1]
+        output = Path(output_arg)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(
+                {
+                    "ar_rows": [
+                        {
+                            "tok_s": 12.0,
+                            "generated_tokens": 2,
+                            "generation_started_at": 104.0,
+                            "generation_ended_at": 106.0,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="candidate ok")
+
+    monkeypatch.setattr(public, "_TuneTelemetrySampler", FakeSampler)
+    monkeypatch.setattr(public.subprocess, "run", fake_run)
+
+    rows = public._run_tune_candidates(
+        SimpleNamespace(cache_dir=None, unsafe_force_unverified=False),
+        runtime_model="/tmp/model",
+        run_id="run",
+        output_root=tmp_path / "run",
+        depths=[],
+        settings={
+            "max_tokens": 8,
+            "limit": 1,
+            "seed": 0,
+            "depths": "",
+        },
+        progress=progress.append,
+        collect_telemetry=True,
+    )
+
+    generation = rows[0]["telemetry"]["generation"]
+    assert generation["scope"] == "generation_window"
+    assert generation["utilization_pct"]["gpu"]["avg"] == 99.0
+    assert any("scope=generation" in line and "GPU=99.0%" in line for line in progress)
 
 
 def test_tune_human_reports_candidate_errors_instead_of_false_no_win(capsys):
@@ -1844,7 +1922,7 @@ def test_bench_tune_human_verbose_prints_power_diagnostic_lines(capsys):
     public._print_tune_human(payload, verbose=True)
 
     out = capsys.readouterr().out
-    assert "telemetry=power pkg=44.0W cpu=6.0W ane=0.0W gpu=38.0W" in out
+    assert "telemetry=scope=candidate | power pkg=44.0W cpu=6.0W ane=0.0W gpu=38.0W" in out
     assert "freq P=4.05GHz M=1.05GHz GPU=1.22GHz" in out
     assert "temp core_avg=71.0C core_max=77.0C gpu_avg=69.0C" in out
     assert "util P=17.0% M=10.0% GPU=99.0%" in out
