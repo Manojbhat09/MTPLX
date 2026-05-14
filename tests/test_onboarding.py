@@ -72,8 +72,10 @@ def test_run_onboarding_screens_with_stubbed_input(monkeypatch, capsys):
     """Walk all three screens with stubbed ``input`` answers."""
     answers = iter(["1", "1", "1"])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    expected_model = onboarding._verified_default_model()
+
     state = onboarding.run_onboarding_screens()
-    assert state["model"] == onboarding.DEFAULT_HF_MODEL
+    assert state["model"] == expected_model
     assert state["profile"] == "sustained"
     assert state["max"] is False
     assert state["target"] == "openwebui"
@@ -371,7 +373,7 @@ def test_run_quickstart_flow_legacy_stable_state_is_not_reused(tmp_path, monkeyp
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
     state = onboarding.run_quickstart_flow(fresh=False)
     assert state is not None
-    assert state["model"] == onboarding.DEFAULT_HF_MODEL
+    assert state["model"] == onboarding._verified_default_model()
     assert state["profile"] == "sustained"
     assert state["max"] is False
     assert state["target"] == "openwebui"
@@ -423,7 +425,7 @@ def test_run_quickstart_flow_returning_user_says_no(tmp_path, monkeypatch):
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
     state = onboarding.run_quickstart_flow(fresh=False)
     assert state is not None
-    assert state["model"] == onboarding.DEFAULT_HF_MODEL
+    assert state["model"] == onboarding._verified_default_model()
     assert state["profile"] == "sustained"
     assert state["target"] == "openwebui"
 
@@ -438,14 +440,16 @@ def test_screen_model_surfaces_configured_path_first(tmp_path, monkeypatch):
     assert chosen == configured
 
 
-def test_screen_model_picks_canonical_default_when_configured_offered(monkeypatch):
+def test_screen_model_picks_verified_default_when_configured_offered(monkeypatch):
     """With a configured path shown as option 1, option 2 still maps to the
-    canonical Hugging Face default."""
+    verified default, preferring an installed local artifact when present."""
     configured = "/Users/test/Documents/MTPLX/models/Qwen3.6-27B-MTPLX"
     answers = iter(["2"])  # explicit "verified default"
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    expected_model = onboarding._verified_default_model()
+
     chosen = onboarding.screen_model(configured=configured)
-    assert chosen == onboarding.DEFAULT_HF_MODEL
+    assert chosen == expected_model
 
 
 def test_screen_model_picks_hardware_default_when_configured_offered(monkeypatch):
@@ -463,8 +467,10 @@ def test_screen_model_no_configured_uses_default_first(monkeypatch):
     """Without a configured path, option 1 maps to the hardware default."""
     answers = iter(["1"])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    expected_model = onboarding._verified_default_model()
+
     chosen = onboarding.screen_model(configured=None)
-    assert chosen == onboarding.DEFAULT_HF_MODEL
+    assert chosen == expected_model
 
 
 def test_screen_model_optimized_quality_prefers_local_model(tmp_path, monkeypatch, capsys):
@@ -685,6 +691,7 @@ def test_start_invokes_onboarding_when_no_explicit_flags(tmp_path, monkeypatch):
         "mtplx.commands.public._quickstart_run_terminal_chat",
         fake_run_terminal,
     )
+    monkeypatch.setattr("mtplx.ui.onboarding.screen_tuning_offer", lambda: False)
 
     from mtplx.commands.public import cmd_quickstart_public
 
@@ -911,3 +918,115 @@ def test_screen_model_local_folder_routes_through_picker(tmp_path, monkeypatch):
 
     assert chosen == str(target)
     assert invocations == [None]
+
+
+def test_screen_tuning_offer_uses_numbered_choices(monkeypatch):
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "2")
+
+    assert onboarding.screen_tuning_offer() is False
+
+
+def test_quickstart_applies_saved_tuned_depth(monkeypatch):
+    import argparse
+
+    from mtplx.commands import public
+
+    args = argparse.Namespace(depth=3, _explicit_depth=False, cache_dir=None)
+    monkeypatch.setattr(public, "_apple_hardware_context", lambda: {"chip": "Apple M5"})
+    monkeypatch.setattr(public, "_software_context", lambda: {"mtplx_version": "test", "mlx_version": "test"})
+    monkeypatch.setattr(public, "_mlx_backend_context", lambda _profile: {"stock_mlx_likely": True})
+    monkeypatch.setattr(public, "_tune_state_key", lambda *_args, **_kwargs: ("key", {}))
+    monkeypatch.setattr(
+        public,
+        "_load_tune_record",
+        lambda _key: {
+            "payload": {
+                "best": {
+                    "mode": "D2",
+                    "depth": 2,
+                    "multiplier_vs_ar": 1.8,
+                }
+            }
+        },
+    )
+
+    public._quickstart_apply_tuned_depth(
+        args,
+        runtime_model="/tmp/model",
+        target="terminal",
+        can_prompt=False,
+    )
+
+    assert args.depth == 2
+
+
+def test_quickstart_tuning_prompt_can_save_and_apply(monkeypatch):
+    import argparse
+
+    from mtplx.commands import public
+
+    args = argparse.Namespace(
+        depth=3,
+        _explicit_depth=False,
+        cache_dir=None,
+        unsafe_force_unverified=False,
+    )
+    monkeypatch.setattr(public, "_apple_hardware_context", lambda: {"chip": "Apple M5"})
+    monkeypatch.setattr(public, "_software_context", lambda: {"mtplx_version": "test", "mlx_version": "test"})
+    monkeypatch.setattr(public, "_mlx_backend_context", lambda _profile: {"stock_mlx_likely": True})
+    monkeypatch.setattr(public, "_tune_state_key", lambda *_args, **_kwargs: ("key", {}))
+    monkeypatch.setattr("mtplx.ui.onboarding.screen_tuning_offer", lambda: True)
+    calls = []
+    records = iter(
+        [
+            None,
+            {
+                "payload": {
+                    "best": {
+                        "mode": "D1",
+                        "depth": 1,
+                        "multiplier_vs_ar": 1.4,
+                    }
+                }
+            },
+        ]
+    )
+    monkeypatch.setattr(public, "_load_tune_record", lambda _key: next(records))
+
+    def fake_tune(*_args, **_kwargs):
+        calls.append(True)
+        return 0
+
+    monkeypatch.setattr(public, "_cmd_tune", fake_tune)
+
+    public._quickstart_apply_tuned_depth(
+        args,
+        runtime_model="/tmp/model",
+        target="terminal",
+        can_prompt=True,
+    )
+
+    assert calls == [True]
+    assert args.depth == 1
+
+
+def test_quickstart_explicit_depth_never_uses_tuning(monkeypatch):
+    import argparse
+
+    from mtplx.commands import public
+
+    args = argparse.Namespace(depth=2, _explicit_depth=True, cache_dir=None)
+    monkeypatch.setattr(
+        public,
+        "_load_tune_record",
+        lambda _key: (_ for _ in ()).throw(AssertionError("should not load tuning")),
+    )
+
+    public._quickstart_apply_tuned_depth(
+        args,
+        runtime_model="/tmp/model",
+        target="openwebui",
+        can_prompt=True,
+    )
+
+    assert args.depth == 2

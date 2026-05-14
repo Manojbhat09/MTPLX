@@ -2,7 +2,60 @@
 
 All notable user-facing changes are recorded here.
 
-## Unreleased
+## v0.3.6
+
+### Added
+
+- Added `mtplx tune`, `mtplx-tune`, and `mtplx bench tune` to compare AR
+  against D1/D2/D3 on a short coding prompt, keep AR as the `1.00x` baseline,
+  and save only a depth that actually beats AR for the current model, Mac, MLX
+  stack, and settings.
+- Added first-run Web UI and CLI tuning affordance so new installs can opt into
+  the measured best depth without hiding the default startup path.
+- Added hardware diagnostics to `mtplx bench tune`: each AR/D1/D2/D3 candidate
+  now records MX Power Gadget-style power, frequency, temperature, utilization,
+  thermal-pressure, and fan samples where macOS exposes them.
+- `mtplx bench tune` now labels telemetry scope and prefers generation-window
+  power/GPU utilization when samples land inside the actual token generation
+  span; `--no-telemetry` keeps the same candidate machinery for cleaner speed
+  comparisons.
+
+### Fixed
+
+- Fixed Qwen XML streaming tool calls so arguments are emitted as one complete,
+  schema-typed JSON object instead of string-fragment XML parameters. This fixes
+  OpenCode `bash.timeout` arriving as `"60000"` and `question.questions`
+  arriving as a stringified array.
+- Fixed restored-prefix suffix extension so warm SessionBank hits advance the
+  suffix in prefill chunks, with abort checks between chunks, instead of one
+  long hidden/logits AR call that could leave GPU work running after stop.
+- Fixed OpenCode stop-boundary postcommit churn: after the foreground prompt
+  prefix is committed, tiny final assistant turns no longer schedule a full
+  retokenized-history GPU prefill just to resolve a stop-token mismatch.
+- Fixed cold benchmark / one-off request memory growth when clients request
+  very large response budgets such as `max_tokens=65536`: dynamic paged KV now
+  reserves a bounded initial decode window and grows only if the model actually
+  reaches it.
+- Fixed anonymous SessionBank entries retaining full-capacity live paged-KV
+  buffers for no-reuse workloads, and tightened high-RAM default MLX Metal caps
+  so 512 GB Apple Silicon systems do not drift into hundreds of GiB of wired
+  allocator memory by default.
+- Fixed verified-default onboarding copy and resolution for Optimized Speed:
+  the current speed artifact is labeled as Q4 target + Q4 MTP, and an already
+  installed local verified artifact is preferred over prompting to download the
+  Hugging Face mirror again.
+- Fixed first-run Tune from `mtplx start` when launched outside the repo:
+  candidate artifacts now use absolute paths, Tune prints per-candidate
+  progress, and candidate failures are reported as failures instead of a false
+  "no MTP depth beat AR" result.
+- Moved Tune's "close heavy apps / fans may get loud" warning to the pre-run
+  progress output so the final results screen does not give stale advice after
+  measurement is already over.
+- Fixed served model-id detection for the installed Optimized Speed artifact so
+  mixed Q4/Q8 speed configs do not get mislabeled as Optimized Quality.
+- Fixed no-argument `mtplx bench tune` confusion by printing the exact model path
+  and warning when `~/.mtplx/config.toml` selects a different artifact than the
+  verified default shown by `mtplx start`.
 
 ## v0.3.5
 

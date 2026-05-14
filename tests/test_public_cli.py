@@ -1394,6 +1394,540 @@ def test_public_bench_long_code_dash_alias_uses_sustained_direct_test(capsys):
     assert command[command.index("--tests") + 1] == "long_code"
 
 
+def test_tune_dry_run_prints_clean_candidate_commands(capsys):
+    code = main(
+        [
+            "tune",
+            "--model",
+            "models/not-loaded-in-dry-run",
+            "--dry-run",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "MTPLX Tune" in out
+    assert "dry-run: no model will be loaded" in out
+    assert "--_candidate ar" in out
+    assert "--_candidate 3" in out
+
+
+def test_bench_tune_dry_run_is_json_support_payload(capsys):
+    code = main(
+        [
+            "bench",
+            "tune",
+            "--model",
+            "models/not-loaded-in-dry-run",
+            "--dry-run",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["action"] == "bench tune"
+    assert payload["save_default"] is False
+    assert payload["settings"]["depths"] == "1,2,3"
+    assert payload["settings"]["max_tokens"] == 192
+    assert [row["candidate"] for row in payload["candidates"]] == ["AR", "D1", "D2", "D3"]
+    assert payload["diagnostics"]["telemetry_enabled"] is True
+    assert payload["diagnostics"]["model_source_notes"] == []
+    assert "power" in payload["diagnostics"]["description"]
+
+
+def test_bench_tune_dry_run_can_disable_telemetry(capsys):
+    code = main(
+        [
+            "bench",
+            "tune",
+            "--model",
+            "models/not-loaded-in-dry-run",
+            "--dry-run",
+            "--no-telemetry",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["diagnostics"]["telemetry_enabled"] is False
+    assert "telemetry disabled" in payload["diagnostics"]["description"]
+
+
+def test_bench_tune_dry_run_warns_when_config_model_differs_from_default(tmp_path, monkeypatch, capsys):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        'model = "/Users/youssof/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Speed"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MTPLX_CONFIG", str(config))
+    monkeypatch.setattr(
+        public,
+        "select_default_model",
+        lambda: SimpleNamespace(model="/Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized"),
+    )
+
+    code = main(["bench", "tune", "--dry-run", "--json", "--no-telemetry"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["model"] == "/Users/youssof/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Speed"
+    notes = payload["diagnostics"]["model_source_notes"]
+    assert any("using configured model" in note for note in notes)
+    assert any("verified default for this Mac" in note for note in notes)
+
+
+def test_bench_tune_powermetrics_parser_extracts_power_frequency_and_utilization():
+    parsed = public._parse_powermetrics_text(
+        """
+M0-Cluster HW active frequency: 1600 MHz
+M0-Cluster HW active residency:  65.53%
+M1-Cluster HW active frequency: 1407 MHz
+M1-Cluster HW active residency:  18.71%
+P-Cluster HW active frequency: 3844 MHz
+P-Cluster HW active residency:  78.03%
+CPU Power: 5267 mW
+GPU Power: 128 mW
+ANE Power: 0 mW
+Combined Power (CPU + GPU + ANE): 5395 mW
+Current pressure level: Nominal
+GPU HW active frequency: 338 MHz
+GPU HW active residency:  18.41%
+GPU Power: 124 mW
+"""
+    )
+
+    assert parsed["power_w"]["package"] == pytest.approx(5.395)
+    assert parsed["power_w"]["cpu"] == pytest.approx(5.267)
+    assert parsed["power_w"]["ane"] == 0.0
+    assert parsed["power_w"]["gpu"] == pytest.approx(0.124)
+    assert parsed["frequency_ghz"]["p_cluster"] == pytest.approx(3.844)
+    assert parsed["frequency_ghz"]["m_cluster"] == pytest.approx((1.6 + 1.407) / 2)
+    assert parsed["frequency_ghz"]["gpu"] == pytest.approx(0.338)
+    assert parsed["utilization_pct"]["p_core"] == pytest.approx(78.03)
+    assert parsed["utilization_pct"]["m_core"] == pytest.approx((65.53 + 18.71) / 2)
+    assert parsed["utilization_pct"]["gpu"] == pytest.approx(18.41)
+    assert parsed["thermal_pressure"] == "Nominal"
+
+
+def test_bench_tune_thermalforge_temperature_grouping_prefers_core_sensors():
+    core, gpu = public._temperature_groups_from_thermalforge(
+        {
+            "TAOL": 36.7,
+            "TCDX": 56.1,
+            "TCMb": 65.2,
+            "TG0B": 36.6,
+            "Tp04": 56.4,
+            "Tm08": 54.4,
+        }
+    )
+
+    assert core == [56.1, 65.2, 56.4, 54.4]
+    assert gpu == [36.6]
+
+
+def test_tune_best_multiplier_selects_depth_not_ar():
+    rows = public._annotate_multipliers(
+        [
+            {"mode": "AR", "depth": None, "tok_s": 30.0},
+            {"mode": "D1", "depth": 1, "tok_s": 48.0},
+            {"mode": "D2", "depth": 2, "tok_s": 54.0},
+            {"mode": "D3", "depth": 3, "tok_s": 57.0},
+        ]
+    )
+    best = public._best_multiplier_summary(rows)
+
+    assert rows[0]["multiplier_vs_ar"] == 1.0
+    assert best["winner"]["mode"] == "D3"
+    assert best["winner"]["depth"] == 3
+    assert best["winner"]["multiplier_vs_ar"] == 1.9
+
+
+def test_tune_no_mtp_win_has_no_saved_recommendation():
+    best = public._best_multiplier_summary(
+        public._annotate_multipliers(
+            [
+                {"mode": "AR", "depth": None, "tok_s": 50.0},
+                {"mode": "D1", "depth": 1, "tok_s": 49.0},
+                {"mode": "D2", "depth": 2, "tok_s": 48.0},
+                {"mode": "D3", "depth": 3, "tok_s": 47.0},
+            ]
+        )
+    )
+
+    assert best["winner"] is None
+    assert best["verdict"] == "no_mtp_depth_beat_ar"
+
+
+def test_tune_tie_breaker_prefers_deeper_depth_within_noise_band():
+    best = public._best_multiplier_summary(
+        public._annotate_multipliers(
+            [
+                {"mode": "AR", "depth": None, "tok_s": 29.57},
+                {"mode": "D1", "depth": 1, "tok_s": 49.14},
+                {"mode": "D2", "depth": 2, "tok_s": 54.67},
+                {"mode": "D3", "depth": 3, "tok_s": 54.34},
+            ]
+        )
+    )
+
+    assert best["raw_winner"]["mode"] == "D2"
+    assert best["winner"]["mode"] == "D3"
+    assert best["tie_breaker"]["applied"] is True
+
+
+def test_tune_state_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setenv("MTPLX_TUNE_STATE", str(tmp_path / "tuning.json"))
+    payload = {
+        "best": {"mode": "D2", "depth": 2, "tok_s": 54.0, "multiplier_vs_ar": 1.8},
+        "results": [],
+    }
+
+    public._save_tune_record("key", key_material={"model": "m"}, payload=payload)
+    record = public._load_tune_record("key")
+
+    assert record is not None
+    assert record["payload"]["best"]["depth"] == 2
+
+
+def test_tune_model_source_notes_warn_when_config_model_differs_from_default(monkeypatch):
+    monkeypatch.setattr(
+        public,
+        "select_default_model",
+        lambda: SimpleNamespace(model="/Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized"),
+    )
+    args = SimpleNamespace(
+        _cli_flags=set(),
+        mtplx_config={
+            "path": "/Users/youssof/.mtplx/config.toml",
+            "model": "/Users/youssof/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Speed",
+        },
+    )
+
+    notes = public._tune_model_source_notes(
+        args,
+        runtime_model="/Users/youssof/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Speed",
+    )
+
+    assert any("using configured model" in note for note in notes)
+    assert any("verified default for this Mac" in note for note in notes)
+
+
+def test_tune_candidate_outputs_are_absolute_from_non_repo_cwd(tmp_path, monkeypatch):
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+    progress: list[str] = []
+
+    def fake_run(command, *, cwd, env, text, stdout, stderr, check):
+        output_arg = command[command.index("--_candidate-output") + 1]
+        output = Path(output_arg)
+        assert output.is_absolute()
+        assert str(output).startswith(str(caller))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps({"ar_rows": [{"tok_s": 12.0, "generated_tokens": 2}]}),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="candidate ok")
+
+    monkeypatch.setattr(public.subprocess, "run", fake_run)
+
+    rows = public._run_tune_candidates(
+        SimpleNamespace(cache_dir=None, unsafe_force_unverified=False),
+        runtime_model="/tmp/model",
+        run_id="run",
+        output_root=Path("outputs/cli/tune/run"),
+        depths=[],
+        settings={
+            "max_tokens": 8,
+            "limit": 1,
+            "seed": 0,
+            "depths": "",
+        },
+        progress=progress.append,
+    )
+
+    assert rows[0]["mode"] == "AR"
+    assert rows[0]["tok_s"] == 12.0
+    assert any("AR (1/1) starting" in line for line in progress)
+    assert any("AR finished" in line for line in progress)
+
+
+def test_tune_candidates_settle_between_depth_runs(tmp_path, monkeypatch):
+    sleeps: list[float] = []
+    progress: list[str] = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    def fake_run(command, *, cwd, env, text, stdout, stderr, check):
+        output_arg = command[command.index("--_candidate-output") + 1]
+        candidate = command[command.index("--_candidate") + 1]
+        output = Path(output_arg)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if candidate == "ar":
+            payload = {"ar_rows": [{"tok_s": 12.0, "generated_tokens": 2}]}
+        else:
+            payload = {
+                "depths": [
+                    {
+                        "summary": {
+                            "mean_tok_s": 13.0,
+                            "generated_tokens": 2,
+                            "verify_calls": 1,
+                        }
+                    }
+                ]
+            }
+        output.write_text(json.dumps(payload), encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="candidate ok")
+
+    monkeypatch.setattr(public.time, "sleep", fake_sleep)
+    monkeypatch.setattr(public.subprocess, "run", fake_run)
+
+    rows = public._run_tune_candidates(
+        SimpleNamespace(cache_dir=None, unsafe_force_unverified=False),
+        runtime_model="/tmp/model",
+        run_id="run",
+        output_root=tmp_path / "run",
+        depths=[1],
+        settings={
+            "max_tokens": 8,
+            "limit": 1,
+            "seed": 0,
+            "depths": "1",
+            "candidate_settle_s": 5.0,
+        },
+        progress=progress.append,
+    )
+
+    assert [row["mode"] for row in rows] == ["AR", "D1"]
+    assert sleeps == [5.0]
+    assert any("settling 5.0s before D1" in line for line in progress)
+
+
+def test_bench_tune_candidate_rows_include_hardware_telemetry(tmp_path, monkeypatch):
+    progress: list[str] = []
+    telemetry = {
+        "enabled": True,
+        "sample_count": 2,
+        "power_w": {"package": {"avg": 42.0}},
+        "frequency_ghz": {"p_cluster": {"avg": 4.05}},
+        "temperature_c": {"core_avg": {"avg": 71.0}},
+        "utilization_pct": {"gpu": {"avg": 95.0}},
+        "fans_rpm": {"avg": {"avg": 7800.0}},
+    }
+
+    class FakeSampler:
+        def __init__(self, *, enabled):
+            self.enabled = enabled
+
+        def start(self):
+            assert self.enabled is True
+
+        def stop(self):
+            return telemetry
+
+    def fake_run(command, *, cwd, env, text, stdout, stderr, check):
+        output_arg = command[command.index("--_candidate-output") + 1]
+        output = Path(output_arg)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps({"ar_rows": [{"tok_s": 12.0, "generated_tokens": 2}]}),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="candidate ok")
+
+    monkeypatch.setattr(public, "_TuneTelemetrySampler", FakeSampler)
+    monkeypatch.setattr(public.subprocess, "run", fake_run)
+
+    rows = public._run_tune_candidates(
+        SimpleNamespace(cache_dir=None, unsafe_force_unverified=False),
+        runtime_model="/tmp/model",
+        run_id="run",
+        output_root=tmp_path / "run",
+        depths=[],
+        settings={
+            "max_tokens": 8,
+            "limit": 1,
+            "seed": 0,
+            "depths": "",
+        },
+        progress=progress.append,
+        collect_telemetry=True,
+    )
+
+    assert rows[0]["telemetry"]["power_w"]["package"]["avg"] == 42.0
+    assert any("telemetry: scope=candidate | power pkg=42.0W" in line for line in progress)
+
+
+def test_bench_tune_telemetry_prefers_generation_window_samples(tmp_path, monkeypatch):
+    progress: list[str] = []
+    telemetry = {
+        "enabled": True,
+        "scope": "candidate_process",
+        "sample_count": 2,
+        "samples": [
+            {
+                "timestamp": 100.0,
+                "power_w": {"gpu": 5.0},
+                "utilization_pct": {"gpu": 10.0},
+            },
+            {
+                "timestamp": 105.0,
+                "power_w": {"gpu": 40.0},
+                "utilization_pct": {"gpu": 99.0},
+            },
+        ],
+        "power_w": {"gpu": {"avg": 22.5}},
+        "utilization_pct": {"gpu": {"avg": 54.5}},
+    }
+
+    class FakeSampler:
+        def __init__(self, *, enabled):
+            self.enabled = enabled
+
+        def start(self):
+            assert self.enabled is True
+
+        def stop(self):
+            return dict(telemetry)
+
+    def fake_run(command, *, cwd, env, text, stdout, stderr, check):
+        output_arg = command[command.index("--_candidate-output") + 1]
+        output = Path(output_arg)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(
+                {
+                    "ar_rows": [
+                        {
+                            "tok_s": 12.0,
+                            "generated_tokens": 2,
+                            "generation_started_at": 104.0,
+                            "generation_ended_at": 106.0,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="candidate ok")
+
+    monkeypatch.setattr(public, "_TuneTelemetrySampler", FakeSampler)
+    monkeypatch.setattr(public.subprocess, "run", fake_run)
+
+    rows = public._run_tune_candidates(
+        SimpleNamespace(cache_dir=None, unsafe_force_unverified=False),
+        runtime_model="/tmp/model",
+        run_id="run",
+        output_root=tmp_path / "run",
+        depths=[],
+        settings={
+            "max_tokens": 8,
+            "limit": 1,
+            "seed": 0,
+            "depths": "",
+        },
+        progress=progress.append,
+        collect_telemetry=True,
+    )
+
+    generation = rows[0]["telemetry"]["generation"]
+    assert generation["scope"] == "generation_window"
+    assert generation["utilization_pct"]["gpu"]["avg"] == 99.0
+    assert any("scope=generation" in line and "GPU=99.0%" in line for line in progress)
+
+
+def test_tune_human_reports_candidate_errors_instead_of_false_no_win(capsys):
+    payload = {
+        "results": [
+            {"mode": "AR", "depth": None, "tok_s": None, "multiplier_vs_ar": None, "error": "candidate did not write an artifact", "stdout": "/tmp/ar.log"},
+            {"mode": "D1", "depth": 1, "tok_s": None, "multiplier_vs_ar": None, "error": "candidate did not write an artifact", "stdout": "/tmp/d1.log"},
+        ],
+        "best": None,
+        "saved": False,
+        "save_skipped_reason": "tune failed; no candidate produced usable tokens",
+    }
+
+    public._print_tune_human(payload)
+
+    out = capsys.readouterr().out
+    assert "Tune failed for one or more candidates" in out
+    assert "No MTP depth beat AR" not in out
+    assert "Close heavy apps" not in out
+    assert "/tmp/ar.log" in out
+
+
+def test_tune_human_results_do_not_give_pre_run_advice_afterward(capsys):
+    payload = {
+        "results": [
+            {"mode": "AR", "depth": None, "tok_s": 20.0, "multiplier_vs_ar": 1.0},
+            {"mode": "D1", "depth": 1, "tok_s": 30.0, "multiplier_vs_ar": 1.5},
+        ],
+        "best": {"mode": "D1", "depth": 1, "tok_s": 30.0, "multiplier_vs_ar": 1.5},
+        "saved": False,
+        "save_skipped_reason": "save disabled",
+        "artifacts": {"root": "/tmp/tune"},
+    }
+
+    public._print_tune_human(payload)
+
+    out = capsys.readouterr().out
+    assert "Results written to /tmp/tune" in out
+    assert "Close heavy apps" not in out
+    assert "Fans may get loud" not in out
+    assert "Best for this Mac: D1" in out
+
+
+def test_bench_tune_human_verbose_prints_power_diagnostic_lines(capsys):
+    payload = {
+        "results": [
+            {
+                "mode": "AR",
+                "depth": None,
+                "tok_s": 20.0,
+                "multiplier_vs_ar": 1.0,
+                "telemetry": {
+                    "enabled": True,
+                    "sample_count": 3,
+                    "power_w": {
+                        "package": {"avg": 44.0},
+                        "cpu": {"avg": 6.0},
+                        "ane": {"avg": 0.0},
+                        "gpu": {"avg": 38.0},
+                    },
+                    "frequency_ghz": {
+                        "p_cluster": {"avg": 4.05},
+                        "m_cluster": {"avg": 1.05},
+                        "gpu": {"avg": 1.22},
+                    },
+                    "temperature_c": {
+                        "core_avg": {"avg": 71.0},
+                        "core_max": {"avg": 77.0},
+                        "gpu_avg": {"avg": 69.0},
+                    },
+                    "utilization_pct": {
+                        "p_core": {"avg": 17.0},
+                        "m_core": {"avg": 10.0},
+                        "gpu": {"avg": 99.0},
+                    },
+                },
+            }
+        ],
+        "best": None,
+        "saved": False,
+    }
+
+    public._print_tune_human(payload, verbose=True)
+
+    out = capsys.readouterr().out
+    assert "telemetry=scope=candidate | power pkg=44.0W cpu=6.0W ane=0.0W gpu=38.0W" in out
+    assert "freq P=4.05GHz M=1.05GHz GPU=1.22GHz" in out
+    assert "temp core_avg=71.0C core_max=77.0C gpu_avg=69.0C" in out
+    assert "util P=17.0% M=10.0% GPU=99.0%" in out
+
+
 def test_public_bench_run_dry_run_records_external_kernel_env(monkeypatch, capsys):
     monkeypatch.setenv("MTPLX_VERIFY_OUTPUT_DEPENDS", "recurrent")
     monkeypatch.setenv("MTPLX_VERIFY_OUTPUT_DEPENDS_AFTER_TOKENS", "1024")
@@ -1762,6 +2296,7 @@ def test_product_helper_commands_parse():
     ask = parser.parse_args(["ask", "hello"])
     ask_stats = parser.parse_args(["ask", "hello", "--stats"])
     serve_start = parser.parse_args(["serve", "--port", "18012"])
+    tune = parser.parse_args(["tune", "--dry-run"])
     status = parser.parse_args(["status", "--deep"])
     doctor_opencode = parser.parse_args(["doctor", "opencode", "--json"])
     doctor_android = parser.parse_args(["doctor", "android-studio", "--port", "8008", "--json"])
@@ -1771,6 +2306,7 @@ def test_product_helper_commands_parse():
     models = parser.parse_args(["models", "--json"])
     report = parser.parse_args(["report", "--output-dir", "reports"])
     nightly = parser.parse_args(["bench", "nightly", "--out", "out.json"])
+    bench_tune = parser.parse_args(["bench", "tune", "--dry-run"])
     nightly_json = parser.parse_args(["bench", "nightly", "--json", "--dry-run"])
     debug = parser.parse_args(["debug", "bundle", "--run-id", "debug-test"])
     hotpath = parser.parse_args(["debug", "hotpath"])
@@ -1815,6 +2351,8 @@ def test_product_helper_commands_parse():
     assert serve_start.command == "serve"
     assert serve_start.port == 18012
     assert serve_start.stats_footer is True
+    assert tune.command == "tune"
+    assert tune.depths == "1,2,3"
     assert status.command == "status"
     assert status.deep is True
     assert doctor_opencode.command == "doctor"
@@ -1831,6 +2369,7 @@ def test_product_helper_commands_parse():
     assert report.bundle is True
     assert report.deep is True
     assert nightly.bench_action == "nightly"
+    assert bench_tune.bench_action == "tune"
     assert nightly.output == "out.json"
     assert nightly_json.json is True
     assert debug.debug_action == "bundle"

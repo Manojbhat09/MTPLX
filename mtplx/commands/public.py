@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import platform
 import shlex
 import shutil
 import socket
@@ -18,10 +20,11 @@ import urllib.request
 import importlib
 import importlib.metadata
 import importlib.util
+import re
 import webbrowser
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 from mtplx.artifacts import inspect_model
 from mtplx.benchmarks.validators.basic import (
@@ -64,7 +67,6 @@ from mtplx.profiles import (
     DEFAULT_MODEL_ID,
     DEFAULT_PROFILE_NAME,
     DEFAULT_PUBLIC_MODEL_ID,
-    QUALITY_PUBLIC_MODEL_ID,
     apply_profile_env,
     get_profile,
 )
@@ -116,9 +118,27 @@ EXTERNAL_RUNTIME_ENV_KEYS = (
 )
 LOCALHOST_BINDS = {"", "127.0.0.1", "::1", "localhost"}
 MAX_PUBLIC_SPECULATIVE_DEPTH = 3
+TUNE_DEFAULT_DEPTHS = "1,2,3"
+TUNE_DEFAULT_SUITE = "cold-long-code-192"
+TUNE_DEFAULT_MAX_TOKENS = 192
+TUNE_DEFAULT_LIMIT = 1
+TUNE_DEFAULT_SEED = 0
+TUNE_STATE_PATH = Path("~/.mtplx/tuning.json").expanduser()
+TUNE_TELEMETRY_SAMPLE_INTERVAL_S = 0.75
+TUNE_POWERMETRICS_SAMPLE_INTERVAL_S = 1.5
+TUNE_CANDIDATE_SETTLE_S = 5.0
+TUNE_TIE_PREFER_DEEPER_WITHIN_PCT = 2.0
+TUNE_TELEMETRY_ENV = "MTPLX_BENCH_TUNE_TELEMETRY"
 GENERATION_MODE_MTP = "mtp"
 GENERATION_MODE_AR = "ar"
 GENERATION_MODES = {GENERATION_MODE_MTP, GENERATION_MODE_AR}
+
+
+def _absolute_user_path(path: str | Path) -> Path:
+    expanded = Path(path).expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return (Path.cwd() / expanded).resolve()
 
 
 def _print(value: Any) -> None:
@@ -137,6 +157,13 @@ def _benchmark_seed(args: Any, *, runtime_profile: str, harness: str) -> int:
         return 0
     return 42
 
+
+def _depths_for_bench_run(args: Any) -> str:
+    explicit_depths = getattr(args, "depths", None)
+    if explicit_depths:
+        return str(explicit_depths)
+    depth = int(getattr(args, "speculative_depth", 0) or 0)
+    return str(depth) if depth > 0 else "3"
 
 def _runtime_env_with_external_overrides(runtime_env: dict[str, str]) -> dict[str, str]:
     merged = dict(runtime_env)
@@ -859,12 +886,14 @@ def _depth_sweep_native60(
     *,
     model: str,
     prompt_suite: str,
+    depths: str = "3",
     max_tokens: int,
     limit: int | None,
     seed: int,
-    depth: int = 3,
     draft_lm_head: dict[str, Any] | None = None,
     draft_sampler: dict[str, Any] | None = None,
+    compare_ar: bool = False,
+    ar_only: bool = False,
 ) -> dict[str, Any]:
     from mtplx.benchmarks.runners.mtp_depth_sweep import run_mtp_depth_sweep
 
@@ -877,7 +906,7 @@ def _depth_sweep_native60(
     return run_mtp_depth_sweep(
         model,
         prompt_suite,
-        depths=str(depth),
+        depths=depths,
         temperature=0.6,
         top_p=0.95,
         top_k=20,
@@ -885,7 +914,8 @@ def _depth_sweep_native60(
         seed=seed,
         limit=limit,
         enable_thinking=False,
-        compare_ar=False,
+        compare_ar=compare_ar,
+        ar_only=ar_only,
         mtp_hidden_variant="post_norm",
         mtp_cache_policy="persistent",
         mtp_history_policy="committed",
@@ -901,7 +931,6 @@ def _depth_sweep_native60(
         draft_top_p=None if draft_sampler is None else float(draft_sampler["top_p"]),
         draft_top_k=None if draft_sampler is None else int(draft_sampler["top_k"]),
     )
-
 
 class _temporary_env:
     def __init__(self, updates: dict[str, str]) -> None:
@@ -1113,6 +1142,8 @@ def cmd_bench_public(args: Any) -> int:
         return 0
     if action in {"run", "context"}:
         return _cmd_bench_run(args)
+    if action == "tune":
+        return _cmd_bench_tune(args)
     if action == "nightly":
         return _cmd_bench_nightly(args)
     if action == "compare":
@@ -1125,6 +1156,1524 @@ def cmd_bench_public(args: Any) -> int:
         return _cmd_bench_reference_vllm(args)
     raise SystemExit(f"unknown bench action: {action}")
 
+
+def cmd_tune_public(args: Any) -> int:
+    if getattr(args, "_tune_candidate", None):
+        return _cmd_tune_candidate(args)
+    return _cmd_tune(
+        args,
+        action="tune",
+        save_default=not bool(getattr(args, "no_save", False)),
+        verbose_default=bool(getattr(args, "verbose", False)),
+    )
+
+
+def _cmd_bench_tune(args: Any) -> int:
+    child = SimpleNamespace(**vars(args))
+    cli_flags = getattr(child, "_cli_flags", set()) or set()
+    if "max-tokens" not in cli_flags:
+        child.max_tokens = TUNE_DEFAULT_MAX_TOKENS
+    return _cmd_tune(
+        child,
+        action="bench tune",
+        save_default=False,
+        verbose_default=True,
+    )
+
+
+def _cmd_tune(
+    args: Any,
+    *,
+    action: str,
+    save_default: bool,
+    verbose_default: bool,
+) -> int:
+    try:
+        depths = _parse_tune_depths(getattr(args, "depths", None) or TUNE_DEFAULT_DEPTHS)
+    except ValueError as exc:
+        return _tune_error(str(exc), json_output=bool(getattr(args, "json", False)))
+
+    model = getattr(args, "model", None) or DEFAULT_CHAMPION
+    settings = _tune_settings(args, depths=depths)
+    run_id = getattr(args, "run_id", None) or f"tune-{time.strftime('%Y%m%d-%H%M%S')}"
+    output_dir = _absolute_user_path(getattr(args, "output_dir", None) or "outputs/cli/tune")
+    output_root = output_dir / run_id
+    output_path = _absolute_user_path(getattr(args, "output")) if getattr(args, "output", None) else output_root / "tune.json"
+    json_output = bool(getattr(args, "json", False))
+    verbose = bool(getattr(args, "verbose", verbose_default) or verbose_default)
+    collect_telemetry = _tune_collect_telemetry(args, action=action)
+
+    if bool(getattr(args, "dry_run", False)):
+        model_source_notes = _tune_model_source_notes(args, runtime_model=model)
+        payload = _tune_dry_run_payload(
+            args,
+            action=action,
+            model=model,
+            run_id=run_id,
+            output_root=output_root,
+            output_path=output_path,
+            settings=settings,
+            depths=depths,
+            save_default=save_default,
+            collect_telemetry=collect_telemetry,
+            model_source_notes=model_source_notes,
+        )
+        if json_output or action == "bench tune":
+            _print(payload)
+        else:
+            _print_tune_dry_run_human(payload)
+        return 0
+
+    runtime_model, resolve_error = _resolve_runtime_model_path(
+        model,
+        cache_dir=getattr(args, "cache_dir", None),
+    )
+    if resolve_error is not None:
+        return _tune_error(
+            resolve_error.get("error") or "model is not available locally",
+            detail=resolve_error.get("detail"),
+            json_output=json_output,
+        )
+    model_source_notes = _tune_model_source_notes(args, runtime_model=runtime_model)
+
+    profile = get_profile("performance-cold")
+    hardware = _apple_hardware_context()
+    software = _software_context()
+    backend = _mlx_backend_context(profile)
+    state_key, key_material = _tune_state_key(
+        runtime_model,
+        settings=settings,
+        hardware=hardware,
+        software=software,
+        backend=backend,
+    )
+    cached = None if bool(getattr(args, "retune", False)) else _load_tune_record(state_key)
+    if save_default and cached is not None:
+        payload = dict(cached.get("payload") or {})
+        payload["from_cache"] = True
+        payload["state_path"] = str(_tune_state_path())
+        if json_output:
+            _print(payload)
+        else:
+            _print_tune_human(payload, verbose=verbose)
+        return 0
+
+    from mtplx.thermal import MaxSession
+
+    def _emit(line: str) -> None:
+        print(line, file=sys.stderr, flush=True)
+
+    if not json_output:
+        _emit(f"[tune] model: {runtime_model}")
+        for note in model_source_notes:
+            _emit(note)
+        if action == "bench tune":
+            if collect_telemetry:
+                _emit("[tune] diagnostic telemetry active; use --no-telemetry for clean speed comparison")
+            else:
+                _emit("[tune] diagnostic telemetry disabled; speed comparison is cleaner")
+        _emit("[tune] close heavy apps now for cleaner results before measurements start")
+        _emit("[tune] fans may get loud during tuning and will be restored afterward")
+    max_session = MaxSession(log=_emit)
+    if not max_session.start():
+        verified = max_session.thermal.get("verified") or {}
+        return _tune_error(
+            "verified max-fan mode did not start; refusing to run a model tune",
+            detail=verified.get("message"),
+            actionable=verified.get("actionable"),
+            thermal=max_session.thermal,
+            json_output=json_output,
+        )
+
+    try:
+        if not json_output:
+            _emit(f"[tune] artifacts: {output_root}")
+            _emit("[tune] running isolated candidates: AR, " + ", ".join(f"D{depth}" for depth in depths))
+        candidate_rows = _run_tune_candidates(
+            args,
+            runtime_model=runtime_model,
+            run_id=run_id,
+            output_root=output_root,
+            depths=depths,
+            settings=settings,
+            progress=_emit if not json_output else None,
+            collect_telemetry=collect_telemetry,
+        )
+    finally:
+        max_session.stop()
+
+    payload = _tune_payload(
+        action=action,
+        run_id=run_id,
+        model=runtime_model,
+        settings=settings,
+        rows=candidate_rows,
+        output_root=output_root,
+        output_path=output_path,
+        hardware=hardware,
+        software=software,
+        backend=backend,
+        thermal=max_session.thermal,
+        state_key=state_key,
+        diagnostics={
+            "telemetry_enabled": collect_telemetry,
+            "telemetry_env": TUNE_TELEMETRY_ENV,
+            "model_source_notes": model_source_notes,
+        },
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(output_path, payload)
+
+    if payload.get("best") and save_default and not bool(getattr(args, "no_save", False)):
+        payload["saved"] = True
+        payload["state_path"] = str(_tune_state_path())
+        _save_tune_record(state_key, key_material=key_material, payload=payload)
+        write_json(output_path, payload)
+    else:
+        payload["saved"] = False
+        payload["state_path"] = str(_tune_state_path())
+        if not any(isinstance(row.get("tok_s"), (int, float)) for row in candidate_rows):
+            payload["save_skipped_reason"] = "tune failed; no candidate produced usable tokens"
+        elif not payload.get("best"):
+            payload["save_skipped_reason"] = "no MTP depth beat AR"
+        elif bool(getattr(args, "no_save", False)) or not save_default:
+            payload["save_skipped_reason"] = "save disabled"
+        write_json(output_path, payload)
+
+    if json_output:
+        _print(payload)
+    else:
+        _print_tune_human(payload, verbose=verbose)
+    if not candidate_rows or not any(isinstance(row.get("tok_s"), (int, float)) for row in candidate_rows):
+        return 1
+    return 0
+
+
+def _cmd_tune_candidate(args: Any) -> int:
+    candidate = str(getattr(args, "_tune_candidate", "")).lower()
+    output = Path(getattr(args, "_tune_candidate_output", None) or "")
+    if candidate not in {"ar", "1", "2", "3"}:
+        return _tune_error("invalid tune candidate", json_output=True)
+    if not output:
+        return _tune_error("missing tune candidate output path", json_output=True)
+    model = getattr(args, "model", None) or DEFAULT_CHAMPION
+    runtime_model, resolve_error = _resolve_runtime_model_path(
+        model,
+        cache_dir=getattr(args, "cache_dir", None),
+    )
+    if resolve_error is not None:
+        _print(resolve_error)
+        return 1
+    inspection, gate_exit = _model_gate(
+        runtime_model,
+        unsafe_force_unverified=bool(getattr(args, "unsafe_force_unverified", False)),
+        yes=True,
+    )
+    if gate_exit is not None:
+        _print({"error": "model failed MTP primary gate", "model": inspection})
+        return gate_exit
+    profile = get_profile("performance-cold")
+    draft_lm_head = _model_draft_lm_head_spec(inspection, profile)
+    draft_sampler = _model_draft_sampler_spec(inspection, profile)
+    result = _depth_sweep_native60(
+        model=runtime_model,
+        prompt_suite=prompt_suite_path(TUNE_DEFAULT_SUITE),
+        depths="1" if candidate == "ar" else candidate,
+        max_tokens=int(getattr(args, "max_tokens", TUNE_DEFAULT_MAX_TOKENS) or TUNE_DEFAULT_MAX_TOKENS),
+        limit=int(getattr(args, "limit", TUNE_DEFAULT_LIMIT) or TUNE_DEFAULT_LIMIT),
+        seed=int(getattr(args, "seed", TUNE_DEFAULT_SEED) or TUNE_DEFAULT_SEED),
+        draft_lm_head=draft_lm_head,
+        draft_sampler=draft_sampler,
+        compare_ar=candidate == "ar",
+        ar_only=candidate == "ar",
+    )
+    from mtplx.benchmarks.runners.mtp_depth_sweep import write_depth_sweep
+
+    write_depth_sweep(output, result)
+    _print({"candidate": candidate, "output": str(output)})
+    return 0
+
+
+def _parse_tune_depths(raw: Any) -> list[int]:
+    if raw is None:
+        raw = TUNE_DEFAULT_DEPTHS
+    parts = [part.strip() for part in str(raw).split(",") if part.strip()]
+    if not parts:
+        raise ValueError("tune depths must include at least one of 1,2,3")
+    depths: list[int] = []
+    for part in parts:
+        try:
+            depth = int(part)
+        except ValueError as exc:
+            raise ValueError("tune depths must be integers from 1 to 3") from exc
+        if depth < 1 or depth > MAX_PUBLIC_SPECULATIVE_DEPTH:
+            raise ValueError("tune depths must be between 1 and 3")
+        if depth not in depths:
+            depths.append(depth)
+    return depths
+
+
+def _tune_env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    text = str(raw).strip().lower()
+    if text in {"0", "off", "false", "none", "no"}:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return default
+
+
+def _tune_env_bool(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled", "none"}:
+        return False
+    return default
+
+
+def _tune_collect_telemetry(args: Any, *, action: str) -> bool:
+    return (
+        action == "bench tune"
+        and not bool(getattr(args, "no_telemetry", False))
+        and _tune_env_bool(TUNE_TELEMETRY_ENV, default=True)
+    )
+
+
+def _normalize_model_ref_for_compare(value: str | Path | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith(("~", "/", "./", "../")):
+        path = Path(text).expanduser()
+        try:
+            return str(path.resolve())
+        except OSError:
+            return str(path)
+    return text
+
+
+def _same_model_ref(left: str | Path | None, right: str | Path | None) -> bool:
+    return _normalize_model_ref_for_compare(left) == _normalize_model_ref_for_compare(right)
+
+
+def _tune_model_source_notes(args: Any, *, runtime_model: str) -> list[str]:
+    cli_flags = getattr(args, "_cli_flags", set()) or set()
+    if "model" in cli_flags:
+        return []
+    config = getattr(args, "mtplx_config", None)
+    config_model = config.get("model") if isinstance(config, dict) else None
+    if not config_model or not _same_model_ref(runtime_model, config_model):
+        return []
+    try:
+        default_selection = select_default_model()
+    except Exception:
+        return []
+    default_model = default_selection.model
+    if _same_model_ref(runtime_model, default_model):
+        return []
+    config_path = config.get("path") if isinstance(config, dict) else "~/.mtplx/config.toml"
+    return [
+        f"[tune] using configured model from {config_path}: {runtime_model}",
+        f"[tune] verified default for this Mac is: {default_model}",
+        "[tune] pass --model <path> to benchmark a different artifact explicitly",
+    ]
+
+
+def _tune_settings(args: Any, *, depths: list[int]) -> dict[str, Any]:
+    return {
+        "profile": "performance-cold",
+        "suite": TUNE_DEFAULT_SUITE,
+        "depths": ",".join(str(depth) for depth in depths),
+        "max_tokens": int(getattr(args, "max_tokens", TUNE_DEFAULT_MAX_TOKENS) or TUNE_DEFAULT_MAX_TOKENS),
+        "limit": int(getattr(args, "limit", TUNE_DEFAULT_LIMIT) or TUNE_DEFAULT_LIMIT),
+        "seed": int(getattr(args, "seed", TUNE_DEFAULT_SEED) or TUNE_DEFAULT_SEED),
+        "thinking": "disabled",
+        "candidate_settle_s": max(
+            0.0,
+            _tune_env_float("MTPLX_TUNE_CANDIDATE_SETTLE_S", TUNE_CANDIDATE_SETTLE_S),
+        ),
+        "tie_prefer_deeper_within_pct": max(
+            0.0,
+            _tune_env_float(
+                "MTPLX_TUNE_TIE_PREFER_DEEPER_WITHIN_PCT",
+                TUNE_TIE_PREFER_DEEPER_WITHIN_PCT,
+            ),
+        ),
+    }
+
+
+def _tune_state_path() -> Path:
+    env = os.environ.get("MTPLX_TUNE_STATE")
+    return Path(env).expanduser() if env else TUNE_STATE_PATH
+
+
+def _load_tune_state() -> dict[str, Any]:
+    path = _tune_state_path()
+    if not path.exists():
+        return {"schema_version": 1, "records": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"schema_version": 1, "records": {}}
+    if not isinstance(data, dict):
+        return {"schema_version": 1, "records": {}}
+    records = data.get("records")
+    if not isinstance(records, dict):
+        data["records"] = {}
+    return data
+
+
+def _load_tune_record(state_key: str) -> dict[str, Any] | None:
+    record = (_load_tune_state().get("records") or {}).get(state_key)
+    if not isinstance(record, dict):
+        return None
+    payload = record.get("payload")
+    best = payload.get("best") if isinstance(payload, dict) else None
+    if not isinstance(best, dict):
+        return None
+    if not isinstance(best.get("depth"), int):
+        return None
+    return record
+
+
+def _save_tune_record(state_key: str, *, key_material: dict[str, Any], payload: dict[str, Any]) -> None:
+    state = _load_tune_state()
+    records = state.setdefault("records", {})
+    records[state_key] = {
+        "schema_version": 1,
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "key": state_key,
+        "key_material": key_material,
+        "payload": payload,
+    }
+    path = _tune_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, state)
+
+
+def _tune_state_key(
+    model: str,
+    *,
+    settings: dict[str, Any],
+    hardware: dict[str, Any],
+    software: dict[str, Any],
+    backend: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    model_identity = str(Path(model).expanduser().resolve()) if Path(model).expanduser().exists() else str(model)
+    key_material = {
+        "model": model_identity,
+        "hardware": {
+            "chip": hardware.get("chip"),
+            "chip_family": hardware.get("chip_family"),
+            "hw_model": hardware.get("hw_model"),
+            "machine": hardware.get("machine"),
+        },
+        "software": {
+            "mtplx_version": software.get("mtplx_version"),
+            "mlx_version": software.get("mlx_version"),
+            "mlx_lm_version": software.get("mlx_lm_version"),
+        },
+        "backend": {
+            "mlx_core_path": backend.get("mlx_core_path"),
+            "optional_fast_mlx_fork_active": backend.get("optional_fast_mlx_fork_active"),
+            "stock_mlx_likely": backend.get("stock_mlx_likely"),
+        },
+        "settings": settings,
+    }
+    encoded = json.dumps(key_material, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest(), key_material
+
+
+def _tune_dry_run_payload(
+    args: Any,
+    *,
+    action: str,
+    model: str,
+    run_id: str,
+    output_root: Path,
+    output_path: Path,
+    settings: dict[str, Any],
+    depths: list[int],
+    save_default: bool,
+    collect_telemetry: bool,
+    model_source_notes: list[str] | None = None,
+) -> dict[str, Any]:
+    commands = []
+    for candidate in ["ar", *[str(depth) for depth in depths]]:
+        candidate_output = output_root / f"{_tune_candidate_label(candidate).lower()}.json"
+        commands.append(
+            {
+                "candidate": _tune_candidate_label(candidate),
+                "command": _tune_candidate_command(
+                    args,
+                    candidate=candidate,
+                    model=model,
+                    output=candidate_output,
+                    settings=settings,
+                ),
+                "output": str(candidate_output),
+            }
+        )
+    return {
+        "dry_run": True,
+        "action": action,
+        "run_id": run_id,
+        "model": model,
+        "settings": settings,
+        "candidates": commands,
+        "output": str(output_path),
+        "state_path": str(_tune_state_path()),
+        "save_default": save_default,
+        "fan_control": "verified max-fan required before model load",
+        "diagnostics": {
+            "telemetry_enabled": collect_telemetry,
+            "telemetry_env": TUNE_TELEMETRY_ENV,
+            "model_source_notes": model_source_notes or [],
+            "description": (
+                "bench tune records per-candidate power, frequency, temperature, "
+                "utilization, and fan telemetry when not in dry-run"
+                if action == "bench tune" and collect_telemetry
+                else (
+                    "bench tune telemetry disabled; candidate commands match clean tune timing more closely"
+                    if action == "bench tune"
+                    else None
+                )
+            ),
+        },
+    }
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _avg(values: list[float]) -> float | None:
+    return (sum(values) / len(values)) if values else None
+
+
+def _series_stats(values: list[Any]) -> dict[str, Any] | None:
+    numeric = [float(value) for value in values if isinstance(value, (int, float))]
+    if not numeric:
+        return None
+    return {
+        "avg": sum(numeric) / len(numeric),
+        "min": min(numeric),
+        "max": max(numeric),
+        "last": numeric[-1],
+        "samples": len(numeric),
+    }
+
+
+def _generation_windows_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, float]]:
+    windows: list[dict[str, float]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        start = _float_or_none(row.get("generation_started_at"))
+        end = _float_or_none(row.get("generation_ended_at"))
+        if start is None or end is None or end <= start:
+            continue
+        windows.append({"start": start, "end": end, "duration_s": end - start})
+    return windows
+
+
+def _convert_power_to_watts(value: str, unit: str | None) -> float:
+    watts = float(value)
+    if (unit or "").lower() == "mw":
+        watts /= 1000.0
+    return watts
+
+
+def _convert_frequency_to_ghz(value: str, unit: str | None) -> float:
+    ghz = float(value)
+    if (unit or "").lower() == "mhz":
+        ghz /= 1000.0
+    return ghz
+
+
+def _parse_powermetrics_text(text: str) -> dict[str, Any]:
+    """Extract the MX Power Gadget-style rails from macOS powermetrics text."""
+
+    power: dict[str, float] = {}
+    for match in re.finditer(
+        r"(?m)^(CPU|GPU|ANE) Power:\s*([0-9]+(?:\.[0-9]+)?)\s*(mW|W)\b",
+        text,
+    ):
+        rail = match.group(1).lower()
+        power[rail] = _convert_power_to_watts(match.group(2), match.group(3))
+    package_match = re.search(
+        r"(?m)^Combined Power \(CPU \+ GPU \+ ANE\):\s*"
+        r"([0-9]+(?:\.[0-9]+)?)\s*(mW|W)\b",
+        text,
+    )
+    if package_match:
+        power["package"] = _convert_power_to_watts(
+            package_match.group(1),
+            package_match.group(2),
+        )
+
+    p_frequencies: list[float] = []
+    m_frequencies: list[float] = []
+    p_utilization: list[float] = []
+    m_utilization: list[float] = []
+    for match in re.finditer(
+        r"(?m)^([A-Za-z0-9]+)-Cluster HW active frequency:\s*"
+        r"([0-9]+(?:\.[0-9]+)?)\s*(MHz|GHz)\b",
+        text,
+    ):
+        name = match.group(1).upper()
+        ghz = _convert_frequency_to_ghz(match.group(2), match.group(3))
+        if name == "P":
+            p_frequencies.append(ghz)
+        else:
+            m_frequencies.append(ghz)
+    for match in re.finditer(
+        r"(?m)^([A-Za-z0-9]+)-Cluster HW active residency:\s*"
+        r"([0-9]+(?:\.[0-9]+)?)%",
+        text,
+    ):
+        name = match.group(1).upper()
+        residency = float(match.group(2))
+        if name == "P":
+            p_utilization.append(residency)
+        else:
+            m_utilization.append(residency)
+
+    frequency: dict[str, float] = {}
+    utilization: dict[str, float] = {}
+    p_cluster = _avg(p_frequencies)
+    m_cluster = _avg(m_frequencies)
+    p_core = _avg(p_utilization)
+    m_core = _avg(m_utilization)
+    if p_cluster is not None:
+        frequency["p_cluster"] = p_cluster
+    if m_cluster is not None:
+        frequency["m_cluster"] = m_cluster
+    if p_core is not None:
+        utilization["p_core"] = p_core
+    if m_core is not None:
+        utilization["m_core"] = m_core
+
+    gpu_freq_match = re.search(
+        r"(?m)^GPU HW active frequency:\s*([0-9]+(?:\.[0-9]+)?)\s*(MHz|GHz)\b",
+        text,
+    )
+    if gpu_freq_match:
+        frequency["gpu"] = _convert_frequency_to_ghz(
+            gpu_freq_match.group(1),
+            gpu_freq_match.group(2),
+        )
+    gpu_residency_match = re.search(
+        r"(?m)^GPU HW active residency:\s*([0-9]+(?:\.[0-9]+)?)%",
+        text,
+    )
+    if gpu_residency_match:
+        utilization["gpu"] = float(gpu_residency_match.group(1))
+
+    payload: dict[str, Any] = {
+        "source": "powermetrics",
+        "power_w": power,
+        "frequency_ghz": frequency,
+        "utilization_pct": utilization,
+    }
+    pressure_match = re.search(r"(?m)^Current pressure level:\s*(.+)$", text)
+    if pressure_match:
+        payload["thermal_pressure"] = pressure_match.group(1).strip()
+    return payload
+
+
+def _thermalforge_binary() -> str | None:
+    owned = Path("~/.mtplx/bin/thermalforge").expanduser()
+    if owned.exists():
+        return str(owned)
+    return shutil.which("thermalforge")
+
+
+def _temperature_groups_from_thermalforge(
+    temperatures: dict[str, Any],
+) -> tuple[list[float], list[float]]:
+    core_values: list[float] = []
+    fallback_core_values: list[float] = []
+    gpu_values: list[float] = []
+    for key, raw_value in temperatures.items():
+        value = _float_or_none(raw_value)
+        if value is None:
+            continue
+        name = str(key)
+        upper = name.upper()
+        if upper.startswith("TG") or name.startswith("Tg"):
+            gpu_values.append(value)
+        elif upper.startswith("TC") or name.startswith(("Tp", "Tm")):
+            core_values.append(value)
+        else:
+            fallback_core_values.append(value)
+    return core_values or fallback_core_values, gpu_values
+
+
+def _sample_thermalforge_status() -> dict[str, Any]:
+    binary = _thermalforge_binary()
+    if not binary:
+        return {"source": "thermalforge", "error": "thermalforge not found"}
+    try:
+        proc = subprocess.run(
+            [binary, "status"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=1.0,
+        )
+    except Exception as exc:
+        return {"source": "thermalforge", "error": str(exc)}
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return {"source": "thermalforge", "error": detail or f"exit {proc.returncode}"}
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return {"source": "thermalforge", "error": f"invalid JSON: {exc}"}
+
+    fans = data.get("fans") if isinstance(data, dict) else []
+    fan_rpms: list[float] = []
+    if isinstance(fans, dict):
+        fans = list(fans.values())
+    for fan in fans if isinstance(fans, list) else []:
+        if not isinstance(fan, dict):
+            continue
+        rpm = _float_or_none(fan.get("actual_rpm"))
+        if rpm is None:
+            rpm = _float_or_none(fan.get("target_rpm"))
+        if rpm is not None:
+            fan_rpms.append(rpm)
+
+    temperatures = data.get("temperatures") if isinstance(data, dict) else {}
+    core_values, gpu_values = (
+        _temperature_groups_from_thermalforge(temperatures)
+        if isinstance(temperatures, dict)
+        else ([], [])
+    )
+    temperature: dict[str, float] = {}
+    if core_values:
+        temperature["core_avg"] = sum(core_values) / len(core_values)
+        temperature["core_max"] = max(core_values)
+        temperature["core_min"] = min(core_values)
+    if gpu_values:
+        temperature["gpu_avg"] = sum(gpu_values) / len(gpu_values)
+
+    payload: dict[str, Any] = {
+        "source": "thermalforge",
+        "fans_rpm": {
+            "min": min(fan_rpms),
+            "max": max(fan_rpms),
+            "avg": sum(fan_rpms) / len(fan_rpms),
+        }
+        if fan_rpms
+        else {},
+        "temperature_c": temperature,
+    }
+    if isinstance(temperatures, dict):
+        payload["temperature_sensors_c"] = {
+            str(key): value
+            for key, value in temperatures.items()
+            if isinstance(value, (int, float))
+        }
+    return payload
+
+
+def _sample_powermetrics_once() -> dict[str, Any]:
+    if not shutil.which("powermetrics"):
+        return {"source": "powermetrics", "error": "powermetrics not found"}
+    if not shutil.which("sudo"):
+        return {"source": "powermetrics", "error": "sudo not found"}
+    command = [
+        "sudo",
+        "-n",
+        "powermetrics",
+        "-n",
+        "1",
+        "-i",
+        "250",
+        "--samplers",
+        "cpu_power,gpu_power,ane_power,thermal",
+    ]
+    try:
+        proc = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=2.0,
+        )
+    except Exception as exc:
+        return {"source": "powermetrics", "error": str(exc)}
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return {"source": "powermetrics", "error": detail or f"exit {proc.returncode}"}
+    return _parse_powermetrics_text(proc.stdout)
+
+
+def _summarize_tune_telemetry_samples(
+    samples: list[dict[str, Any]],
+    *,
+    errors: list[str] | None = None,
+    started_at: float | None = None,
+    ended_at: float | None = None,
+) -> dict[str, Any]:
+    power_keys = ("package", "cpu", "ane", "gpu")
+    frequency_keys = ("p_cluster", "m_cluster", "gpu")
+    temperature_keys = ("core_avg", "core_max", "core_min", "gpu_avg")
+    utilization_keys = ("p_core", "m_core", "gpu")
+
+    summary: dict[str, Any] = {
+        "enabled": True,
+        "scope": "candidate_process",
+        "sample_count": len(samples),
+        "duration_s": (
+            float(ended_at - started_at)
+            if started_at is not None and ended_at is not None
+            else None
+        ),
+        "samples": samples,
+        "sources": {
+            "thermalforge": any(sample.get("thermalforge_ok") for sample in samples),
+            "powermetrics": any(sample.get("powermetrics_ok") for sample in samples),
+        },
+    }
+    errors = list(errors or [])
+    if errors:
+        summary["errors"] = sorted(set(errors))
+
+    power = {
+        key: _series_stats(
+            [
+                ((sample.get("power_w") or {}).get(key))
+                for sample in samples
+            ]
+        )
+        for key in power_keys
+    }
+    frequency = {
+        key: _series_stats(
+            [
+                ((sample.get("frequency_ghz") or {}).get(key))
+                for sample in samples
+            ]
+        )
+        for key in frequency_keys
+    }
+    temperature = {
+        key: _series_stats(
+            [
+                ((sample.get("temperature_c") or {}).get(key))
+                for sample in samples
+            ]
+        )
+        for key in temperature_keys
+    }
+    utilization = {
+        key: _series_stats(
+            [
+                ((sample.get("utilization_pct") or {}).get(key))
+                for sample in samples
+            ]
+        )
+        for key in utilization_keys
+    }
+    fans = {
+        key: _series_stats(
+            [
+                ((sample.get("fans_rpm") or {}).get(key))
+                for sample in samples
+            ]
+        )
+        for key in ("avg", "min", "max")
+    }
+    summary["power_w"] = {key: value for key, value in power.items() if value}
+    summary["frequency_ghz"] = {key: value for key, value in frequency.items() if value}
+    summary["temperature_c"] = {key: value for key, value in temperature.items() if value}
+    summary["utilization_pct"] = {
+        key: value for key, value in utilization.items() if value
+    }
+    summary["fans_rpm"] = {key: value for key, value in fans.items() if value}
+
+    pressures = [
+        str(sample.get("thermal_pressure"))
+        for sample in samples
+        if sample.get("thermal_pressure")
+    ]
+    if pressures:
+        summary["thermal_pressure"] = {
+            "last": pressures[-1],
+            "observed": sorted(set(pressures)),
+        }
+
+    latest_sensors = next(
+        (
+            sample.get("temperature_sensors_c")
+            for sample in reversed(samples)
+            if sample.get("temperature_sensors_c")
+        ),
+        None,
+    )
+    if isinstance(latest_sensors, dict):
+        summary["latest_temperature_sensors_c"] = latest_sensors
+    return summary
+
+
+def _sample_in_any_window(sample: dict[str, Any], windows: list[dict[str, float]]) -> bool:
+    timestamp = _float_or_none(sample.get("timestamp"))
+    if timestamp is None:
+        return False
+    return any(window["start"] <= timestamp <= window["end"] for window in windows)
+
+
+def _attach_generation_telemetry(
+    telemetry: dict[str, Any] | None,
+    row: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(telemetry, dict):
+        return telemetry
+    windows = [
+        window
+        for window in row.get("generation_windows", [])
+        if isinstance(window, dict)
+        and isinstance(window.get("start"), (int, float))
+        and isinstance(window.get("end"), (int, float))
+        and float(window["end"]) > float(window["start"])
+    ]
+    if not windows:
+        telemetry["generation"] = {
+            "enabled": True,
+            "scope": "generation_window",
+            "sample_count": 0,
+            "note": "candidate artifact did not include generation timing windows",
+        }
+        return telemetry
+    samples = [
+        sample
+        for sample in telemetry.get("samples", [])
+        if isinstance(sample, dict) and _sample_in_any_window(sample, windows)
+    ]
+    started_at = min(float(window["start"]) for window in windows)
+    ended_at = max(float(window["end"]) for window in windows)
+    generation = _summarize_tune_telemetry_samples(
+        samples,
+        errors=telemetry.get("errors") or [],
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+    generation["scope"] = "generation_window"
+    generation["windows"] = windows
+    generation["window_count"] = len(windows)
+    generation["window_duration_s"] = sum(
+        float(window["end"]) - float(window["start"])
+        for window in windows
+    )
+    if not samples:
+        generation["note"] = "no powermetrics/thermalforge sample landed inside the generation window"
+    telemetry["generation"] = generation
+    return telemetry
+
+
+class _TuneTelemetrySampler:
+    def __init__(self, *, enabled: bool) -> None:
+        self.enabled = enabled
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._samples: list[dict[str, Any]] = []
+        self._errors: list[str] = []
+        self._lock = threading.Lock()
+        self._powermetrics_disabled = False
+        self._started_at: float | None = None
+
+    def start(self) -> None:
+        if not self.enabled:
+            return
+        self._started_at = time.monotonic()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> dict[str, Any] | None:
+        if not self.enabled:
+            return None
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)
+        ended_at = time.monotonic()
+        with self._lock:
+            samples = list(self._samples)
+            errors = list(self._errors)
+        return _summarize_tune_telemetry_samples(
+            samples,
+            errors=errors,
+            started_at=self._started_at,
+            ended_at=ended_at,
+        )
+
+    def _loop(self) -> None:
+        next_powermetrics = 0.0
+        while not self._stop.is_set():
+            now = time.monotonic()
+            sample_started_at = time.time()
+            sample: dict[str, Any] = {}
+            thermal = _sample_thermalforge_status()
+            if thermal.get("error"):
+                self._add_error(f"thermalforge: {thermal.get('error')}")
+            else:
+                sample["thermalforge_ok"] = True
+                sample.update({k: v for k, v in thermal.items() if k != "source"})
+            if not self._powermetrics_disabled and now >= next_powermetrics:
+                power = _sample_powermetrics_once()
+                next_powermetrics = now + TUNE_POWERMETRICS_SAMPLE_INTERVAL_S
+                if power.get("error"):
+                    self._powermetrics_disabled = True
+                    self._add_error(f"powermetrics: {power.get('error')}")
+                else:
+                    sample["powermetrics_ok"] = True
+                    for key in (
+                        "power_w",
+                        "frequency_ghz",
+                        "utilization_pct",
+                        "thermal_pressure",
+                    ):
+                        if key in power:
+                            sample[key] = power[key]
+            sample_ended_at = time.time()
+            sample["sample_started_at"] = sample_started_at
+            sample["sample_ended_at"] = sample_ended_at
+            sample["timestamp"] = (sample_started_at + sample_ended_at) / 2.0
+            with self._lock:
+                self._samples.append(sample)
+            self._stop.wait(TUNE_TELEMETRY_SAMPLE_INTERVAL_S)
+
+    def _add_error(self, message: str) -> None:
+        with self._lock:
+            if message not in self._errors:
+                self._errors.append(message)
+
+
+def _run_tune_candidates(
+    args: Any,
+    *,
+    runtime_model: str,
+    run_id: str,
+    output_root: Path,
+    depths: list[int],
+    settings: dict[str, Any],
+    progress: Callable[[str], None] | None = None,
+    collect_telemetry: bool = False,
+) -> list[dict[str, Any]]:
+    output_root = _absolute_user_path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    total = 1 + len(depths)
+    settle_s = float(settings.get("candidate_settle_s") or 0.0)
+    for candidate in ["ar", *[str(depth) for depth in depths]]:
+        label = _tune_candidate_label(candidate)
+        candidate_output = output_root / f"{label.lower()}.json"
+        stdout_path = output_root / f"{label.lower()}.log"
+        command = _tune_candidate_command(
+            args,
+            candidate=candidate,
+            model=runtime_model,
+            output=candidate_output,
+            settings=settings,
+        )
+        if rows and settle_s > 0.0:
+            if progress is not None:
+                progress(f"[tune] settling {settle_s:.1f}s before {label}")
+            time.sleep(settle_s)
+        if progress is not None:
+            progress(f"[tune] {label} ({len(rows) + 1}/{total}) starting; log: {stdout_path}")
+        started = time.monotonic()
+        telemetry_sampler = _TuneTelemetrySampler(enabled=collect_telemetry)
+        telemetry_sampler.start()
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=repo_root(),
+                env={**os.environ, "MTPLX_TUNE_CHILD": "1"},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        finally:
+            telemetry = telemetry_sampler.stop()
+        elapsed_s = time.monotonic() - started
+        stdout_path.write_text(proc.stdout, encoding="utf-8")
+        row = _tune_candidate_summary(
+            candidate,
+            candidate_output,
+            returncode=proc.returncode,
+            stdout_path=stdout_path,
+            command=command,
+        )
+        if telemetry is not None:
+            row["telemetry"] = _attach_generation_telemetry(telemetry, row)
+        rows.append(row)
+        if progress is not None:
+            if isinstance(row.get("tok_s"), (int, float)):
+                progress(f"[tune] {label} finished in {elapsed_s:.1f}s: {float(row['tok_s']):.2f} tok/s")
+            else:
+                progress(f"[tune] {label} failed in {elapsed_s:.1f}s: {row.get('error') or 'no token rate'}")
+            telemetry_line = _format_tune_telemetry_inline(row.get("telemetry"))
+            if telemetry_line:
+                progress(f"[tune] {label} telemetry: {telemetry_line}")
+    return rows
+
+
+def _tune_candidate_command(
+    args: Any,
+    *,
+    candidate: str,
+    model: str,
+    output: Path,
+    settings: dict[str, Any],
+) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "mtplx.cli",
+        "tune",
+        "--_candidate",
+        candidate,
+        "--_candidate-output",
+        str(output),
+        "--model",
+        str(model),
+        "--max-tokens",
+        str(int(settings["max_tokens"])),
+        "--limit",
+        str(int(settings["limit"])),
+        "--seed",
+        str(int(settings["seed"])),
+        "--depths",
+        str(settings["depths"]),
+        "--yes",
+    ]
+    cache_dir = getattr(args, "cache_dir", None)
+    if cache_dir:
+        command.extend(["--cache-dir", str(cache_dir)])
+    if bool(getattr(args, "unsafe_force_unverified", False)):
+        command.append("--unsafe-force-unverified")
+    return command
+
+
+def _tune_candidate_label(candidate: str) -> str:
+    return "AR" if candidate == "ar" else f"D{candidate}"
+
+
+def _tune_candidate_summary(
+    candidate: str,
+    path: Path,
+    *,
+    returncode: int,
+    stdout_path: Path,
+    command: list[str],
+) -> dict[str, Any]:
+    label = _tune_candidate_label(candidate)
+    base = {
+        "mode": label,
+        "depth": None if candidate == "ar" else int(candidate),
+        "candidate": candidate,
+        "returncode": returncode,
+        "artifact": str(path),
+        "stdout": str(stdout_path),
+        "command": command,
+    }
+    if not path.exists():
+        return {**base, "error": "candidate did not write an artifact"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {**base, "error": f"candidate artifact is not valid JSON: {exc}"}
+    if candidate == "ar":
+        ar_rows = data.get("ar_rows") or []
+        tok_values = [
+            float(row["tok_s"])
+            for row in ar_rows
+            if isinstance(row.get("tok_s"), (int, float))
+        ]
+        generation_windows = _generation_windows_from_rows(ar_rows)
+        return {
+            **base,
+            "tok_s": (sum(tok_values) / len(tok_values)) if tok_values else None,
+            "generated_tokens": sum(int(row.get("generated_tokens") or 0) for row in ar_rows),
+            "generation_windows": generation_windows,
+            "generation_window_s": sum(window["duration_s"] for window in generation_windows),
+            "verify_ms_per_call": None,
+            "quality_passed": True if ar_rows else None,
+        }
+    depth_rows = data.get("depths") or data.get("depth_results") or []
+    row = depth_rows[0] if depth_rows else {}
+    summary = row.get("summary") or {}
+    generation_rows = [
+        result_row
+        for depth_row in depth_rows
+        for result_row in depth_row.get("rows", [])
+        if isinstance(result_row, dict)
+    ]
+    generation_windows = _generation_windows_from_rows(generation_rows)
+    verify_calls = int(summary.get("verify_calls") or 0)
+    validations = [
+        validation
+        for depth_row in depth_rows
+        for result_row in depth_row.get("rows", [])
+        for validation in result_row.get("validations", [])
+    ]
+    acceptance = summary.get("acceptance_by_depth")
+    if acceptance is None:
+        acceptance = _rate_lists(
+            summary.get("accepted_by_depth") or [],
+            summary.get("drafted_by_depth") or [],
+        )
+    return {
+        **base,
+        "tok_s": summary.get("mean_tok_s"),
+        "generated_tokens": summary.get("generated_tokens"),
+        "elapsed_s": summary.get("elapsed_s"),
+        "generation_windows": generation_windows,
+        "generation_window_s": sum(window["duration_s"] for window in generation_windows),
+        "verify_time_s": summary.get("verify_time_s"),
+        "verify_calls": verify_calls,
+        "verify_ms_per_call": _ms_per_call(summary.get("verify_time_s"), verify_calls),
+        "verify_forward_ms_per_call": _ms_per_call(summary.get("verify_forward_time_s"), verify_calls),
+        "verify_eval_ms_per_call": _ms_per_call(summary.get("verify_eval_time_s"), verify_calls),
+        "verify_hidden_eval_ms_per_call": _ms_per_call(summary.get("verify_hidden_eval_time_s"), verify_calls),
+        "accepted_by_depth": summary.get("accepted_by_depth"),
+        "drafted_by_depth": summary.get("drafted_by_depth"),
+        "acceptance_by_depth": acceptance,
+        "acceptance_percent_by_depth": [
+            (None if value is None else 100.0 * float(value)) for value in acceptance
+        ],
+        "mean_accept_probability_by_depth": summary.get("mean_accept_probability_by_depth"),
+        "quality_passed": all(bool(v.get("passed")) for v in validations) if validations else None,
+        "validations_total": len(validations),
+        "validations_passed": sum(1 for v in validations if v.get("passed")),
+    }
+
+
+def _tune_payload(
+    *,
+    action: str,
+    run_id: str,
+    model: str,
+    settings: dict[str, Any],
+    rows: list[dict[str, Any]],
+    output_root: Path,
+    output_path: Path,
+    hardware: dict[str, Any],
+    software: dict[str, Any],
+    backend: dict[str, Any],
+    thermal: dict[str, Any],
+    state_key: str,
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    rows = _annotate_multipliers(rows)
+    best = _best_multiplier_summary(rows)
+    return {
+        "action": action,
+        "run_id": run_id,
+        "model": model,
+        "profile": "performance-cold",
+        "suite": settings["suite"],
+        "settings": settings,
+        "results": rows,
+        "best": best.get("winner"),
+        "best_multiplier": best,
+        "hardware": hardware,
+        "software": software,
+        "backend": backend,
+        "thermal": thermal,
+        "diagnostics": diagnostics or {},
+        "state_key": state_key,
+        "artifacts": {
+            "root": str(output_root),
+            "summary": str(output_path),
+        },
+    }
+
+
+def _annotate_multipliers(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ar_tok_s = None
+    for row in results:
+        if row.get("mode") == "AR":
+            ar_tok_s = row.get("tok_s")
+            break
+    annotated = []
+    for row in results:
+        item = dict(row)
+        if item.get("mode") == "AR":
+            item["multiplier_vs_ar"] = 1.0 if isinstance(item.get("tok_s"), (int, float)) else None
+        else:
+            item["multiplier_vs_ar"] = item.get("speedup_vs_ar") or _safe_ratio(item.get("tok_s"), ar_tok_s)
+        annotated.append(item)
+    return annotated
+
+
+def _best_multiplier_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    annotated = _annotate_multipliers(results)
+    ar = next((row for row in annotated if row.get("mode") == "AR"), None)
+    if not ar or not isinstance(ar.get("tok_s"), (int, float)):
+        return {
+            "available": False,
+            "ar_tok_s": None,
+            "winner": None,
+            "verdict": "tune_failed_no_ar_result",
+        }
+    candidates = [
+        row
+        for row in annotated
+        if row.get("depth") is not None
+        and isinstance(row.get("multiplier_vs_ar"), (int, float))
+        and float(row["multiplier_vs_ar"]) > 1.0
+    ]
+    raw_winner = max(candidates, key=lambda row: float(row["multiplier_vs_ar"]), default=None)
+    winner = raw_winner
+    tie_margin_pct = max(
+        0.0,
+        _tune_env_float(
+            "MTPLX_TUNE_TIE_PREFER_DEEPER_WITHIN_PCT",
+            TUNE_TIE_PREFER_DEEPER_WITHIN_PCT,
+        ),
+    )
+    if raw_winner is not None and tie_margin_pct > 0.0:
+        raw_tok_s = raw_winner.get("tok_s")
+        if isinstance(raw_tok_s, (int, float)) and float(raw_tok_s) > 0.0:
+            floor = float(raw_tok_s) * (1.0 - tie_margin_pct / 100.0)
+            tied = [
+                row
+                for row in candidates
+                if isinstance(row.get("tok_s"), (int, float))
+                and float(row["tok_s"]) >= floor
+            ]
+            winner = max(
+                tied,
+                key=lambda row: (
+                    int(row.get("depth") or 0),
+                    float(row.get("tok_s") or 0.0),
+                ),
+                default=raw_winner,
+            )
+    if winner is None:
+        return {
+            "available": bool(ar and isinstance(ar.get("tok_s"), (int, float))),
+            "ar_tok_s": ar.get("tok_s") if ar else None,
+            "winner": None,
+            "verdict": "no_mtp_depth_beat_ar",
+        }
+    raw_winner_changed = (
+        raw_winner is not None
+        and raw_winner.get("mode") != winner.get("mode")
+    )
+    return {
+        "available": True,
+        "ar_tok_s": ar.get("tok_s") if ar else None,
+        "winner": {
+            "mode": winner.get("mode"),
+            "depth": winner.get("depth"),
+            "tok_s": winner.get("tok_s"),
+            "multiplier_vs_ar": winner.get("multiplier_vs_ar"),
+        },
+        "raw_winner": {
+            "mode": raw_winner.get("mode"),
+            "depth": raw_winner.get("depth"),
+            "tok_s": raw_winner.get("tok_s"),
+            "multiplier_vs_ar": raw_winner.get("multiplier_vs_ar"),
+        }
+        if raw_winner is not None
+        else None,
+        "tie_breaker": {
+            "applied": raw_winner_changed,
+            "prefer_deeper_within_pct": tie_margin_pct,
+        },
+        "verdict": "mtp_depth_wins",
+    }
+
+
+def _print_tune_dry_run_human(payload: dict[str, Any]) -> None:
+    print("MTPLX Tune")
+    print("dry-run: no model will be loaded")
+    print(f"model: {payload.get('model')}")
+    print(f"output: {payload.get('output')}")
+    print("candidate commands:")
+    for row in payload.get("candidates", []):
+        print(f"  {row.get('candidate')}: {shlex.join(row.get('command') or [])}")
+
+
+def _stat_avg(stats: Any) -> float | None:
+    if isinstance(stats, dict) and isinstance(stats.get("avg"), (int, float)):
+        return float(stats["avg"])
+    return None
+
+
+def _format_tune_telemetry_inline(telemetry: Any) -> str | None:
+    if not isinstance(telemetry, dict) or not telemetry.get("enabled"):
+        return None
+    display = telemetry
+    scope = "candidate"
+    generation = telemetry.get("generation")
+    if isinstance(generation, dict) and generation.get("sample_count"):
+        display = generation
+        scope = "generation"
+    parts: list[str] = []
+    power = display.get("power_w") or {}
+    power_parts = []
+    for label, key in (("pkg", "package"), ("cpu", "cpu"), ("ane", "ane"), ("gpu", "gpu")):
+        value = _stat_avg(power.get(key))
+        if value is not None:
+            power_parts.append(f"{label}={value:.1f}W")
+    if power_parts:
+        parts.append("power " + " ".join(power_parts))
+
+    frequency = display.get("frequency_ghz") or {}
+    frequency_parts = []
+    for label, key in (("P", "p_cluster"), ("M", "m_cluster"), ("GPU", "gpu")):
+        value = _stat_avg(frequency.get(key))
+        if value is not None:
+            frequency_parts.append(f"{label}={value:.2f}GHz")
+    if frequency_parts:
+        parts.append("freq " + " ".join(frequency_parts))
+
+    temperature = display.get("temperature_c") or {}
+    temp_parts = []
+    core_avg = _stat_avg(temperature.get("core_avg"))
+    core_max = _stat_avg(temperature.get("core_max"))
+    gpu_avg = _stat_avg(temperature.get("gpu_avg"))
+    if core_avg is not None:
+        temp_parts.append(f"core_avg={core_avg:.1f}C")
+    if core_max is not None:
+        temp_parts.append(f"core_max={core_max:.1f}C")
+    if gpu_avg is not None:
+        temp_parts.append(f"gpu_avg={gpu_avg:.1f}C")
+    if temp_parts:
+        parts.append("temp " + " ".join(temp_parts))
+
+    utilization = display.get("utilization_pct") or {}
+    utilization_parts = []
+    for label, key in (("P", "p_core"), ("M", "m_core"), ("GPU", "gpu")):
+        value = _stat_avg(utilization.get(key))
+        if value is not None:
+            utilization_parts.append(f"{label}={value:.1f}%")
+    if utilization_parts:
+        parts.append("util " + " ".join(utilization_parts))
+
+    fans = display.get("fans_rpm") or {}
+    fan_avg = _stat_avg(fans.get("avg"))
+    if fan_avg is not None:
+        parts.append(f"fans={fan_avg:.0f}rpm")
+
+    sample_count = display.get("sample_count")
+    if isinstance(sample_count, int):
+        parts.append(f"samples={sample_count}")
+    window_duration = display.get("window_duration_s")
+    if scope == "generation" and isinstance(window_duration, (int, float)):
+        parts.append(f"window={float(window_duration):.1f}s")
+    errors = display.get("errors") or telemetry.get("errors") or []
+    if parts and errors:
+        parts.append("notes=" + "; ".join(str(error) for error in errors[:2]))
+    if not parts:
+        if errors:
+            return f"unavailable ({'; '.join(str(error) for error in errors[:2])})"
+        return None
+    parts.insert(0, f"scope={scope}")
+    return " | ".join(parts)
+
+
+def _print_tune_human(payload: dict[str, Any], *, verbose: bool = False) -> None:
+    print("MTPLX Tune")
+    if payload.get("from_cache"):
+        print("Using saved tuning. Run `mtplx tune --retune` to measure again.")
+    else:
+        artifacts = payload.get("artifacts") or {}
+        if artifacts.get("root"):
+            print(f"Results written to {artifacts.get('root')}")
+    print()
+    best = payload.get("best") or {}
+    for row in payload.get("results", []):
+        mode = str(row.get("mode") or "?")
+        tok_s = _fmt_metric(row.get("tok_s"), digits=1)
+        multiplier = _fmt_metric(row.get("multiplier_vs_ar"), digits=2)
+        marker = "  BEST" if best.get("mode") == mode else ""
+        print(f"{mode:<4} {tok_s:>6} tok/s   {multiplier}x{marker}")
+    print()
+    errors = [row for row in payload.get("results", []) if row.get("error")]
+    if errors:
+        print("Tune failed for one or more candidates:")
+        for row in errors:
+            print(f"  {row.get('mode')}: {row.get('error')} (log: {row.get('stdout')})")
+    elif best:
+        print(
+            f"Best for this Mac: {best.get('mode')}, "
+            f"{_fmt_metric(best.get('multiplier_vs_ar'), digits=2)}x AR"
+        )
+        best_multiplier = payload.get("best_multiplier") or {}
+        tie_breaker = best_multiplier.get("tie_breaker") or {}
+        raw_winner = best_multiplier.get("raw_winner") or {}
+        if tie_breaker.get("applied") and raw_winner.get("mode"):
+            print(
+                f"Tie-break: {best.get('mode')} was within "
+                f"{_fmt_metric(tie_breaker.get('prefer_deeper_within_pct'), digits=1)}% "
+                f"of raw fastest {raw_winner.get('mode')}; preferred the deeper depth."
+            )
+    else:
+        print("No MTP depth beat AR on this run")
+    if payload.get("saved") and best:
+        print(f"Saved: Web UI starts will use depth {best.get('depth')} for this model.")
+    elif payload.get("save_skipped_reason"):
+        print(f"Not saved: {payload.get('save_skipped_reason')}.")
+    if verbose:
+        print()
+        for row in payload.get("results", []):
+            if row.get("depth") is not None:
+                print(
+                    f"{row.get('mode')}: verify_ms={_fmt_metric(row.get('verify_ms_per_call'), digits=2)} "
+                    f"acceptance={_format_depth_acceptance(row)}"
+                )
+            telemetry_line = _format_tune_telemetry_inline(row.get("telemetry"))
+            if telemetry_line:
+                print(f"{row.get('mode')}: telemetry={telemetry_line}")
+        artifacts = payload.get("artifacts") or {}
+        if artifacts:
+            print(f"artifacts: {artifacts.get('root')}")
+
+
+def _tune_error(
+    message: str,
+    *,
+    detail: str | None = None,
+    actionable: str | None = None,
+    thermal: dict[str, Any] | None = None,
+    json_output: bool = False,
+) -> int:
+    payload: dict[str, Any] = {"error": message}
+    if detail:
+        payload["detail"] = detail
+    if actionable:
+        payload["actionable"] = actionable
+    if thermal is not None:
+        payload["thermal"] = thermal
+    if json_output:
+        _print(payload)
+    else:
+        print(f"error: {message}", file=sys.stderr)
+        if detail:
+            print(f"detail: {detail}", file=sys.stderr)
+        if actionable:
+            print(f"action: {actionable}", file=sys.stderr)
+    return 1
 
 def cmd_pull_public(args: Any) -> int:
     from mtplx.hf_loader import pull_model, repo_id_from_model_ref
@@ -1234,6 +2783,7 @@ def _cmd_bench_run(args: Any) -> int:
     if harness == "auto":
         harness = "depth-sweep" if selected_profile.name == "performance-cold" else "direct-http"
     benchmark_seed = _benchmark_seed(args, runtime_profile=runtime_profile, harness=harness)
+    depths = _depths_for_bench_run(args)
 
     if args.dry_run:
         direct_command = _direct_http_bench_command(
@@ -1257,6 +2807,10 @@ def _cmd_bench_run(args: Any) -> int:
                     "profile": _exactness_profile_kwargs(args),
                 },
                 "harness": harness,
+                "depths": depths if harness == "depth-sweep" else None,
+                "compare_ar": bool(getattr(args, "compare_ar", False))
+                if harness == "depth-sweep"
+                else None,
                 "seed": benchmark_seed,
                 "profile": selected_profile.to_dict(),
                 "runtime_profile": runtime_profile,
@@ -1332,19 +2886,13 @@ def _cmd_bench_run(args: Any) -> int:
         result = _depth_sweep_native60(
             model=runtime_model,
             prompt_suite=prompt_suite,
+            depths=depths,
             max_tokens=args.max_tokens,
             limit=args.limit,
             seed=benchmark_seed,
-            depth=(
-                int(getattr(args, "depth", 3))
-                if "depth" in (getattr(args, "_cli_flags", set()) or set())
-                else _model_contract_depth(
-                    inspection,
-                    fallback=int(getattr(args, "depth", 3)),
-                )
-            ),
             draft_lm_head=draft_lm_head,
             draft_sampler=draft_sampler,
+            compare_ar=bool(getattr(args, "compare_ar", False)),
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     write_depth_sweep(output, result)
@@ -3246,6 +4794,144 @@ def _active_mlx_fork_status(*, expected_fragment: str, expected_commit: str | No
         "observed_commit": commit,
     }
 
+
+def _apple_hardware_context() -> dict[str, Any]:
+    mem_bytes = _sysctl_int("hw.memsize")
+    chip = _sysctl_text("machdep.cpu.brand_string")
+    return {
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "platform": platform.platform(),
+        "macos_version": _command_text(["sw_vers", "-productVersion"]),
+        "macos_build": _command_text(["sw_vers", "-buildVersion"]),
+        "chip": chip,
+        "chip_family": _apple_chip_family(chip),
+        "hw_model": _sysctl_text("hw.model"),
+        "memory_gib": (mem_bytes / (1024**3)) if mem_bytes else None,
+        "logical_cpu": _sysctl_int("hw.logicalcpu"),
+        "physical_cpu": _sysctl_int("hw.physicalcpu"),
+        "perf_cores": _sysctl_int("hw.perflevel0.physicalcpu"),
+        "efficiency_cores": _sysctl_int("hw.perflevel1.physicalcpu"),
+        "arm64": _sysctl_int("hw.optional.arm64"),
+    }
+
+def _software_context() -> dict[str, Any]:
+    env = collect_environment(".").to_dict()
+    return {
+        "python_executable": env.get("python_executable"),
+        "python_version": env.get("python_version"),
+        "mtplx_version": _package_version("mtplx"),
+        "mlx_version": _package_version("mlx"),
+        "mlx_lm_version": _package_version("mlx-lm"),
+        "numpy_version": _package_version("numpy"),
+        "git_branch": env.get("git_branch"),
+        "git_status": env.get("git_status"),
+    }
+
+def _mlx_backend_context(profile: Any) -> dict[str, Any]:
+    path = None
+    try:
+        spec = importlib.util.find_spec("mlx.core")
+        path = str(Path(spec.origin).resolve()) if spec and spec.origin else None
+    except Exception as exc:  # pragma: no cover - host dependent
+        path = f"ERROR: {exc}"
+    fork_status = None
+    if getattr(profile, "required_mlx_fork_fragment", None):
+        fork_status = _active_mlx_fork_status(
+            expected_fragment=profile.required_mlx_fork_fragment,
+            expected_commit=profile.required_mlx_fork_commit,
+        )
+    custom_env = {
+        key: os.environ.get(key)
+        for key in (
+            "MTPLX_GDN_OUT_QMV8",
+            "MTPLX_SOURCE_QMM_MANY",
+            "MTPLX_SOURCE_QMM_MANY_STRICT",
+            "MTPLX_NATIVE_MLP",
+            "MTPLX_VERIFY_MLP_FUSED",
+        )
+        if os.environ.get(key)
+    }
+    fork_active = bool(fork_status and fork_status.get("ok"))
+    return {
+        "mlx_core_path": path,
+        "mlx_version": _package_version("mlx"),
+        "mlx_lm_version": _package_version("mlx-lm"),
+        "optional_fast_mlx_fork_active": fork_active,
+        "optional_fast_mlx_fork": fork_status,
+        "stock_mlx_likely": not fork_active,
+        "custom_qmv_or_qmm_env": custom_env,
+    }
+
+def _ms_per_call(seconds: Any, calls: int) -> float | None:
+    if not isinstance(seconds, (int, float)) or not calls:
+        return None
+    return 1000.0 * float(seconds) / calls
+
+def _safe_ratio(numerator: Any, denominator: Any) -> float | None:
+    if not isinstance(numerator, (int, float)) or not isinstance(denominator, (int, float)):
+        return None
+    if float(denominator) == 0.0:
+        return None
+    return float(numerator) / float(denominator)
+
+def _package_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except Exception:
+        return None
+
+def _command_text(args: list[str]) -> str | None:
+    try:
+        return subprocess.check_output(
+            args,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2.0,
+        ).strip()
+    except Exception:
+        return None
+
+def _sysctl_text(name: str) -> str | None:
+    return _command_text(["sysctl", "-n", name])
+
+def _sysctl_int(name: str) -> int | None:
+    text = _sysctl_text(name)
+    try:
+        return int(text) if text is not None else None
+    except ValueError:
+        return None
+
+def _apple_chip_family(chip: str | None) -> str | None:
+    if not chip:
+        return None
+    words = str(chip).replace("(TM)", "").split()
+    if len(words) >= 2 and words[0] == "Apple" and words[1].startswith("M"):
+        return " ".join(words[:3]) if len(words) >= 3 else " ".join(words[:2])
+    return chip
+
+def _rate_lists(numerators: list[Any], denominators: list[Any]) -> list[float | None]:
+    rates: list[float | None] = []
+    for numerator, denominator in zip(numerators, denominators):
+        den = float(denominator or 0)
+        rates.append((float(numerator) / den) if den else None)
+    return rates
+
+def _format_depth_acceptance(row: dict[str, Any]) -> str:
+    accepted = row.get("accepted_by_depth") or []
+    drafted = row.get("drafted_by_depth") or []
+    percentages = row.get("acceptance_percent_by_depth") or []
+    parts = []
+    for index, (acc, draft) in enumerate(zip(accepted, drafted), start=1):
+        pct = percentages[index - 1] if index - 1 < len(percentages) else None
+        pct_text = _fmt_metric(pct, digits=2)
+        parts.append(f"MTP{index} {acc}/{draft} ({pct_text}%)")
+    return " | ".join(parts) if parts else "n/a"
+
+def _fmt_metric(value: Any, *, digits: int) -> str:
+    if isinstance(value, (int, float)):
+        return f"{float(value):.{digits}f}"
+    return "n/a"
 
 def _print_serve_start_line(text: str = "") -> None:
     print(text, flush=True)
@@ -5556,6 +7242,97 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
         turn_index += 1
 
 
+def _quickstart_apply_tuned_depth(
+    args: Any,
+    *,
+    runtime_model: str,
+    target: str,
+    can_prompt: bool,
+) -> None:
+    if target not in {"openwebui", "terminal"}:
+        return
+    if bool(getattr(args, "_explicit_depth", False)):
+        return
+    settings = {
+        "profile": "performance-cold",
+        "suite": TUNE_DEFAULT_SUITE,
+        "depths": TUNE_DEFAULT_DEPTHS,
+        "max_tokens": TUNE_DEFAULT_MAX_TOKENS,
+        "limit": TUNE_DEFAULT_LIMIT,
+        "seed": TUNE_DEFAULT_SEED,
+        "thinking": "disabled",
+    }
+    profile = get_profile("performance-cold")
+    hardware = _apple_hardware_context()
+    software = _software_context()
+    backend = _mlx_backend_context(profile)
+    state_key, _key_material = _tune_state_key(
+        runtime_model,
+        settings=settings,
+        hardware=hardware,
+        software=software,
+        backend=backend,
+    )
+    record = _load_tune_record(state_key)
+    if record is not None:
+        payload = record.get("payload") or {}
+        best = payload.get("best") or {}
+        depth = best.get("depth")
+        if isinstance(depth, int):
+            args.depth = depth
+            _quickstart_line(
+                f"tuned depth: D{depth} "
+                f"({_fmt_metric(best.get('multiplier_vs_ar'), digits=2)}x AR)"
+            )
+            return
+    if not can_prompt:
+        return
+    try:
+        from mtplx.ui.onboarding import screen_tuning_offer
+
+        should_tune = screen_tuning_offer()
+    except (KeyboardInterrupt, EOFError):
+        _quickstart_line()
+        _quickstart_line("tuning skipped")
+        return
+    if not should_tune:
+        _quickstart_line("tuning skipped; using default depth")
+        return
+    tune_args = SimpleNamespace(
+        command="tune",
+        model=runtime_model,
+        cache_dir=getattr(args, "cache_dir", None),
+        depths=TUNE_DEFAULT_DEPTHS,
+        max_tokens=TUNE_DEFAULT_MAX_TOKENS,
+        limit=TUNE_DEFAULT_LIMIT,
+        seed=TUNE_DEFAULT_SEED,
+        run_id=None,
+        output_dir=None,
+        output=None,
+        json=False,
+        verbose=False,
+        dry_run=False,
+        no_save=False,
+        retune=False,
+        unsafe_force_unverified=bool(getattr(args, "unsafe_force_unverified", False)),
+        yes=True,
+    )
+    code = _cmd_tune(
+        tune_args,
+        action="tune",
+        save_default=True,
+        verbose_default=False,
+    )
+    if code != 0:
+        _quickstart_line("tuning failed; using default depth")
+        return
+    record = _load_tune_record(state_key)
+    payload = record.get("payload") if isinstance(record, dict) else None
+    best = payload.get("best") if isinstance(payload, dict) else None
+    depth = best.get("depth") if isinstance(best, dict) else None
+    if isinstance(depth, int):
+        args.depth = depth
+
 def cmd_quickstart_public(args: Any) -> int:
     raw_target = getattr(args, "target", None)
 
@@ -5585,6 +7362,8 @@ def cmd_quickstart_public(args: Any) -> int:
     has_explicit_model = "model" in cli_flags
     args._model_explicit = has_explicit_model
     has_explicit_profile_flag = "profile" in cli_flags
+    has_explicit_depth = "depth" in cli_flags
+    args._explicit_depth = has_explicit_depth
     has_explicit_max = "max" in cli_flags
     has_prompt = bool(getattr(args, "prompt", None))
     is_dry_run = bool(getattr(args, "dry_run", False))
@@ -5861,6 +7640,12 @@ def cmd_quickstart_public(args: Any) -> int:
                 )
                 return gate_exit
             _apply_model_contract_depth_default(args, inspection)
+            _quickstart_apply_tuned_depth(
+                args,
+                runtime_model=runtime_model,
+                target=target,
+                can_prompt=bool(getattr(args, "_onboarded", False) and is_tty and not is_yes),
+            )
             if target == "openwebui":
                 args.model = runtime_model
                 return _quickstart_run_openwebui(args, runtime_model=runtime_model, inspection=inspection)
@@ -5900,6 +7685,12 @@ def cmd_quickstart_public(args: Any) -> int:
         )
         return gate_exit
     _apply_model_contract_depth_default(args, inspection)
+    _quickstart_apply_tuned_depth(
+        args,
+        runtime_model=runtime_model,
+        target=target,
+        can_prompt=bool(getattr(args, "_onboarded", False) and is_tty and not is_yes),
+    )
     _quickstart_line(f"model ready: {runtime_model}")
     if resolution.get("downloaded"):
         _quickstart_line(f"downloaded: {resolution.get('download_ref')}")
