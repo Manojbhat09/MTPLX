@@ -12,6 +12,9 @@ All notable user-facing changes are recorded here.
   stack, and settings.
 - Added first-run Web UI and CLI tuning affordance so new installs can opt into
   the measured best depth without hiding the default startup path.
+- Added hardware diagnostics to `mtplx bench tune`: each AR/D1/D2/D3 candidate
+  now records MX Power Gadget-style power, frequency, temperature, utilization,
+  thermal-pressure, and fan samples where macOS exposes them.
 
 ### Fixed
 

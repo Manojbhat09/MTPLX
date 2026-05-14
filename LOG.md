@@ -1,5 +1,49 @@
 # MTPLX Release Log
 
+## 2026-05-14 23:47 BST - v0.3.6 Bench Tune Hardware Telemetry
+
+Scope:
+
+```text
+worktree=/Users/youssof/Documents/MTPLX-release/mtplx-v0.3.6
+branch=codex/release-v0.3.6
+trigger=user reported mtplx bench tune was not diagnostic enough for M3/M4/M5 chip behavior; wanted MX Power Gadget-style power, temperature, frequency, and utilization during AR/D1/D2/D3 tests
+public_release_done=false
+```
+
+Implementation:
+
+```text
+bench_tune_telemetry=enabled only for mtplx bench tune, not normal mtplx tune
+candidate_scope=each isolated candidate subprocess gets its own telemetry sampler and row-level JSON summary
+powermetrics_fields=package/cpu/gpu/ane watts, P/M/GPU GHz, P/M/GPU utilization, thermal pressure
+thermalforge_fields=fan RPM plus CPU/core and GPU temperature summaries with latest raw sensor values
+human_output=per-candidate progress and verbose results now include power/frequency/temp/utilization/fan samples
+fallback_policy=if powermetrics is unavailable or sudo -n is not configured, bench tune still reports thermalforge temps/fans and records the reason
+```
+
+Validation:
+
+```text
+python3 -m py_compile mtplx/commands/public.py tests/test_public_cli.py -> pass
+uv run --extra dev python -m ruff check mtplx/commands/public.py tests/test_public_cli.py -> pass
+uv run --extra dev python -m pytest tests/test_public_cli.py -q -> pass
+uv run --extra dev python -m pytest tests/test_default_models.py -q -> pass
+uv run --extra dev python -m pytest tests/test_onboarding.py::test_quickstart_applies_saved_tuned_depth tests/test_onboarding.py::test_quickstart_tuning_prompt_can_save_and_apply tests/test_onboarding.py::test_quickstart_explicit_depth_never_uses_tuning -q -> pass
+git diff --check -> pass
+non_model_probe=thermalforge and powermetrics parsers returned watts/GHz/C/utilization/fan fields on this Mac
+real_short_bench_tune=MTPLX_TUNE_STATE=/tmp/mtplx-bench-tune-telemetry-state.json uv run --extra dev python -m mtplx.cli bench tune --model /Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized --limit 1 --max-tokens 16 --depths 1 --retune --no-save --run-id telemetry-smoke-20260514 --output-dir /tmp/mtplx-bench-tune-telemetry --yes
+real_short_result=AR 16.98 tok/s; D1 24.30 tok/s; output printed package/cpu/ane/gpu watts, P/M/GPU GHz, core/GPU temps, P/M/GPU utilization, fan RPM, and sample counts for both candidates
+thermal_restore=post-run thermalforge status fan_modes auto/auto
+uv run --extra dev python -m build -> pass; rebuilt dist/mtplx-0.3.6.tar.gz and dist/mtplx-0.3.6-py3-none-any.whl
+uv run --extra dev python -m twine check dist/* -> pass
+/opt/homebrew/opt/python@3.14/bin/python3.14 -m pip install --force-reinstall --no-deps dist/mtplx-0.3.6-py3-none-any.whl -> pass
+global_mtplx_version=mtplx 0.3.6
+global_real_short_bench_tune=MTPLX_TUNE_STATE=/tmp/mtplx-bench-tune-global-telemetry-state.json mtplx bench tune --model /Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized --limit 1 --max-tokens 8 --depths 1 --retune --no-save --run-id global-telemetry-smoke-20260514 --output-dir /tmp/mtplx-bench-tune-global-telemetry --yes
+global_real_short_result=AR 13.42 tok/s; D1 17.41 tok/s; global PATH output printed power/frequency/temp/utilization/fan telemetry for both candidates
+global_thermal_restore=post-run thermalforge status fan_modes auto/auto
+```
+
 ## 2026-05-14 23:31 BST - v0.3.6 Onboarding Regression Fix Before User Test
 
 Scope:

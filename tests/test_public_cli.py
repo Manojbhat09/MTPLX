@@ -1430,6 +1430,56 @@ def test_bench_tune_dry_run_is_json_support_payload(capsys):
     assert payload["settings"]["depths"] == "1,2,3"
     assert payload["settings"]["max_tokens"] == 192
     assert [row["candidate"] for row in payload["candidates"]] == ["AR", "D1", "D2", "D3"]
+    assert "power" in payload["diagnostics"]
+
+
+def test_bench_tune_powermetrics_parser_extracts_power_frequency_and_utilization():
+    parsed = public._parse_powermetrics_text(
+        """
+M0-Cluster HW active frequency: 1600 MHz
+M0-Cluster HW active residency:  65.53%
+M1-Cluster HW active frequency: 1407 MHz
+M1-Cluster HW active residency:  18.71%
+P-Cluster HW active frequency: 3844 MHz
+P-Cluster HW active residency:  78.03%
+CPU Power: 5267 mW
+GPU Power: 128 mW
+ANE Power: 0 mW
+Combined Power (CPU + GPU + ANE): 5395 mW
+Current pressure level: Nominal
+GPU HW active frequency: 338 MHz
+GPU HW active residency:  18.41%
+GPU Power: 124 mW
+"""
+    )
+
+    assert parsed["power_w"]["package"] == pytest.approx(5.395)
+    assert parsed["power_w"]["cpu"] == pytest.approx(5.267)
+    assert parsed["power_w"]["ane"] == 0.0
+    assert parsed["power_w"]["gpu"] == pytest.approx(0.124)
+    assert parsed["frequency_ghz"]["p_cluster"] == pytest.approx(3.844)
+    assert parsed["frequency_ghz"]["m_cluster"] == pytest.approx((1.6 + 1.407) / 2)
+    assert parsed["frequency_ghz"]["gpu"] == pytest.approx(0.338)
+    assert parsed["utilization_pct"]["p_core"] == pytest.approx(78.03)
+    assert parsed["utilization_pct"]["m_core"] == pytest.approx((65.53 + 18.71) / 2)
+    assert parsed["utilization_pct"]["gpu"] == pytest.approx(18.41)
+    assert parsed["thermal_pressure"] == "Nominal"
+
+
+def test_bench_tune_thermalforge_temperature_grouping_prefers_core_sensors():
+    core, gpu = public._temperature_groups_from_thermalforge(
+        {
+            "TAOL": 36.7,
+            "TCDX": 56.1,
+            "TCMb": 65.2,
+            "TG0B": 36.6,
+            "Tp04": 56.4,
+            "Tm08": 54.4,
+        }
+    )
+
+    assert core == [56.1, 65.2, 56.4, 54.4]
+    assert gpu == [36.6]
 
 
 def test_tune_best_multiplier_selects_depth_not_ar():
@@ -1520,6 +1570,61 @@ def test_tune_candidate_outputs_are_absolute_from_non_repo_cwd(tmp_path, monkeyp
     assert any("AR finished" in line for line in progress)
 
 
+def test_bench_tune_candidate_rows_include_hardware_telemetry(tmp_path, monkeypatch):
+    progress: list[str] = []
+    telemetry = {
+        "enabled": True,
+        "sample_count": 2,
+        "power_w": {"package": {"avg": 42.0}},
+        "frequency_ghz": {"p_cluster": {"avg": 4.05}},
+        "temperature_c": {"core_avg": {"avg": 71.0}},
+        "utilization_pct": {"gpu": {"avg": 95.0}},
+        "fans_rpm": {"avg": {"avg": 7800.0}},
+    }
+
+    class FakeSampler:
+        def __init__(self, *, enabled):
+            self.enabled = enabled
+
+        def start(self):
+            assert self.enabled is True
+
+        def stop(self):
+            return telemetry
+
+    def fake_run(command, *, cwd, env, text, stdout, stderr, check):
+        output_arg = command[command.index("--_candidate-output") + 1]
+        output = Path(output_arg)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps({"ar_rows": [{"tok_s": 12.0, "generated_tokens": 2}]}),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="candidate ok")
+
+    monkeypatch.setattr(public, "_TuneTelemetrySampler", FakeSampler)
+    monkeypatch.setattr(public.subprocess, "run", fake_run)
+
+    rows = public._run_tune_candidates(
+        SimpleNamespace(cache_dir=None, unsafe_force_unverified=False),
+        runtime_model="/tmp/model",
+        run_id="run",
+        output_root=tmp_path / "run",
+        depths=[],
+        settings={
+            "max_tokens": 8,
+            "limit": 1,
+            "seed": 0,
+            "depths": "",
+        },
+        progress=progress.append,
+        collect_telemetry=True,
+    )
+
+    assert rows[0]["telemetry"]["power_w"]["package"]["avg"] == 42.0
+    assert any("telemetry: power pkg=42.0W" in line for line in progress)
+
+
 def test_tune_human_reports_candidate_errors_instead_of_false_no_win(capsys):
     payload = {
         "results": [
@@ -1559,6 +1664,54 @@ def test_tune_human_results_do_not_give_pre_run_advice_afterward(capsys):
     assert "Close heavy apps" not in out
     assert "Fans may get loud" not in out
     assert "Best for this Mac: D1" in out
+
+
+def test_bench_tune_human_verbose_prints_power_diagnostic_lines(capsys):
+    payload = {
+        "results": [
+            {
+                "mode": "AR",
+                "depth": None,
+                "tok_s": 20.0,
+                "multiplier_vs_ar": 1.0,
+                "telemetry": {
+                    "enabled": True,
+                    "sample_count": 3,
+                    "power_w": {
+                        "package": {"avg": 44.0},
+                        "cpu": {"avg": 6.0},
+                        "ane": {"avg": 0.0},
+                        "gpu": {"avg": 38.0},
+                    },
+                    "frequency_ghz": {
+                        "p_cluster": {"avg": 4.05},
+                        "m_cluster": {"avg": 1.05},
+                        "gpu": {"avg": 1.22},
+                    },
+                    "temperature_c": {
+                        "core_avg": {"avg": 71.0},
+                        "core_max": {"avg": 77.0},
+                        "gpu_avg": {"avg": 69.0},
+                    },
+                    "utilization_pct": {
+                        "p_core": {"avg": 17.0},
+                        "m_core": {"avg": 10.0},
+                        "gpu": {"avg": 99.0},
+                    },
+                },
+            }
+        ],
+        "best": None,
+        "saved": False,
+    }
+
+    public._print_tune_human(payload, verbose=True)
+
+    out = capsys.readouterr().out
+    assert "telemetry=power pkg=44.0W cpu=6.0W ane=0.0W gpu=38.0W" in out
+    assert "freq P=4.05GHz M=1.05GHz GPU=1.22GHz" in out
+    assert "temp core_avg=71.0C core_max=77.0C gpu_avg=69.0C" in out
+    assert "util P=17.0% M=10.0% GPU=99.0%" in out
 
 
 def test_public_bench_run_dry_run_records_external_kernel_env(monkeypatch, capsys):

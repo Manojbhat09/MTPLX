@@ -44,6 +44,9 @@ mtplx tune --model /path/to/model --retune
 
 Tune compares AR, D1, D2, and D3 with thinking disabled, keeps AR as the `1.00x`
 baseline, and only saves a recommendation when an MTP depth is actually faster.
+For hardware diagnosis, `mtplx bench tune` prints and saves per-candidate
+power, frequency, temperature, utilization, fan, and thermal-pressure telemetry
+when `thermalforge` and macOS `powermetrics` are available.
 
 ---
 
@@ -65,7 +68,7 @@ baseline, and only saves a recommendation when an MTP depth is actually faster.
   - `Stable` — hidden compatibility flag (`--profile stable` / `--profile safe`) for the exact/staged long-reply path.
 - **Crash-safe fan control.** When Sustained Max or Burst is on, MTPLX spawns a detached watchdog that restores fans to auto if the parent dies for any reason — including `kill -9` and "I closed the terminal". Verified live on hardware.
 - **Idle-aware fan-backed modes.** Server tracks request activity; after 15 minutes of no chat, fans drop to auto, then ramp back up on the next message.
-- **Per-Mac Tune.** `mtplx tune`, `mtplx-tune`, and `mtplx bench tune` compare AR/D1/D2/D3 in isolated subprocesses and persist the winning depth per model, hardware, software, and settings. If no MTP depth beats AR, nothing worse is saved.
+- **Per-Mac Tune.** `mtplx tune`, `mtplx-tune`, and `mtplx bench tune` compare AR/D1/D2/D3 in isolated subprocesses and persist the winning depth per model, hardware, software, and settings. If no MTP depth beats AR, nothing worse is saved. `mtplx bench tune` also records MX Power Gadget-style power, frequency, temperature, utilization, fan, and thermal-pressure telemetry per candidate for chip-level diagnosis.
 - **Four-tier model compatibility contract.** `mtplx inspect <model>` reports: verified / arch-compatible-unverified / incompatible-architecture / no-MTP. No silent garbage runs.
 - **Lazy imports.** `mtplx --help`, `doctor`, `inspect`, `init`, `setup` work on a fresh venv *without MLX installed*. Generation and serving pull in MLX only when needed.
 - **v0.3.6 memory, Tune, and OpenCode fixes.** Large `max_tokens` one-off requests no longer reserve the full decode KV window up front, anonymous no-reuse sessions do not retain full-capacity live cache refs, OpenCode tool-result turns reuse the stable cached prefix instead of cold-prefilling the full history, and Tune is available from the packaged CLI.

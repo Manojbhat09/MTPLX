@@ -20,6 +20,7 @@ import urllib.request
 import importlib
 import importlib.metadata
 import importlib.util
+import re
 import webbrowser
 from pathlib import Path
 from types import SimpleNamespace
@@ -123,6 +124,8 @@ TUNE_DEFAULT_MAX_TOKENS = 192
 TUNE_DEFAULT_LIMIT = 1
 TUNE_DEFAULT_SEED = 0
 TUNE_STATE_PATH = Path("~/.mtplx/tuning.json").expanduser()
+TUNE_TELEMETRY_SAMPLE_INTERVAL_S = 0.75
+TUNE_POWERMETRICS_SAMPLE_INTERVAL_S = 1.5
 GENERATION_MODE_MTP = "mtp"
 GENERATION_MODE_AR = "ar"
 GENERATION_MODES = {GENERATION_MODE_MTP, GENERATION_MODE_AR}
@@ -1278,6 +1281,7 @@ def _cmd_tune(
             depths=depths,
             settings=settings,
             progress=_emit if not json_output else None,
+            collect_telemetry=action == "bench tune",
         )
     finally:
         max_session.stop()
@@ -1521,7 +1525,451 @@ def _tune_dry_run_payload(
         "state_path": str(_tune_state_path()),
         "save_default": save_default,
         "fan_control": "verified max-fan required before model load",
+        "diagnostics": (
+            "bench tune records per-candidate power, frequency, temperature, "
+            "utilization, and fan telemetry when not in dry-run"
+            if action == "bench tune"
+            else None
+        ),
     }
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _avg(values: list[float]) -> float | None:
+    return (sum(values) / len(values)) if values else None
+
+
+def _series_stats(values: list[Any]) -> dict[str, Any] | None:
+    numeric = [float(value) for value in values if isinstance(value, (int, float))]
+    if not numeric:
+        return None
+    return {
+        "avg": sum(numeric) / len(numeric),
+        "min": min(numeric),
+        "max": max(numeric),
+        "last": numeric[-1],
+        "samples": len(numeric),
+    }
+
+
+def _convert_power_to_watts(value: str, unit: str | None) -> float:
+    watts = float(value)
+    if (unit or "").lower() == "mw":
+        watts /= 1000.0
+    return watts
+
+
+def _convert_frequency_to_ghz(value: str, unit: str | None) -> float:
+    ghz = float(value)
+    if (unit or "").lower() == "mhz":
+        ghz /= 1000.0
+    return ghz
+
+
+def _parse_powermetrics_text(text: str) -> dict[str, Any]:
+    """Extract the MX Power Gadget-style rails from macOS powermetrics text."""
+
+    power: dict[str, float] = {}
+    for match in re.finditer(
+        r"(?m)^(CPU|GPU|ANE) Power:\s*([0-9]+(?:\.[0-9]+)?)\s*(mW|W)\b",
+        text,
+    ):
+        rail = match.group(1).lower()
+        power[rail] = _convert_power_to_watts(match.group(2), match.group(3))
+    package_match = re.search(
+        r"(?m)^Combined Power \(CPU \+ GPU \+ ANE\):\s*"
+        r"([0-9]+(?:\.[0-9]+)?)\s*(mW|W)\b",
+        text,
+    )
+    if package_match:
+        power["package"] = _convert_power_to_watts(
+            package_match.group(1),
+            package_match.group(2),
+        )
+
+    p_frequencies: list[float] = []
+    m_frequencies: list[float] = []
+    p_utilization: list[float] = []
+    m_utilization: list[float] = []
+    for match in re.finditer(
+        r"(?m)^([A-Za-z0-9]+)-Cluster HW active frequency:\s*"
+        r"([0-9]+(?:\.[0-9]+)?)\s*(MHz|GHz)\b",
+        text,
+    ):
+        name = match.group(1).upper()
+        ghz = _convert_frequency_to_ghz(match.group(2), match.group(3))
+        if name == "P":
+            p_frequencies.append(ghz)
+        else:
+            m_frequencies.append(ghz)
+    for match in re.finditer(
+        r"(?m)^([A-Za-z0-9]+)-Cluster HW active residency:\s*"
+        r"([0-9]+(?:\.[0-9]+)?)%",
+        text,
+    ):
+        name = match.group(1).upper()
+        residency = float(match.group(2))
+        if name == "P":
+            p_utilization.append(residency)
+        else:
+            m_utilization.append(residency)
+
+    frequency: dict[str, float] = {}
+    utilization: dict[str, float] = {}
+    p_cluster = _avg(p_frequencies)
+    m_cluster = _avg(m_frequencies)
+    p_core = _avg(p_utilization)
+    m_core = _avg(m_utilization)
+    if p_cluster is not None:
+        frequency["p_cluster"] = p_cluster
+    if m_cluster is not None:
+        frequency["m_cluster"] = m_cluster
+    if p_core is not None:
+        utilization["p_core"] = p_core
+    if m_core is not None:
+        utilization["m_core"] = m_core
+
+    gpu_freq_match = re.search(
+        r"(?m)^GPU HW active frequency:\s*([0-9]+(?:\.[0-9]+)?)\s*(MHz|GHz)\b",
+        text,
+    )
+    if gpu_freq_match:
+        frequency["gpu"] = _convert_frequency_to_ghz(
+            gpu_freq_match.group(1),
+            gpu_freq_match.group(2),
+        )
+    gpu_residency_match = re.search(
+        r"(?m)^GPU HW active residency:\s*([0-9]+(?:\.[0-9]+)?)%",
+        text,
+    )
+    if gpu_residency_match:
+        utilization["gpu"] = float(gpu_residency_match.group(1))
+
+    payload: dict[str, Any] = {
+        "source": "powermetrics",
+        "power_w": power,
+        "frequency_ghz": frequency,
+        "utilization_pct": utilization,
+    }
+    pressure_match = re.search(r"(?m)^Current pressure level:\s*(.+)$", text)
+    if pressure_match:
+        payload["thermal_pressure"] = pressure_match.group(1).strip()
+    return payload
+
+
+def _thermalforge_binary() -> str | None:
+    owned = Path("~/.mtplx/bin/thermalforge").expanduser()
+    if owned.exists():
+        return str(owned)
+    return shutil.which("thermalforge")
+
+
+def _temperature_groups_from_thermalforge(
+    temperatures: dict[str, Any],
+) -> tuple[list[float], list[float]]:
+    core_values: list[float] = []
+    fallback_core_values: list[float] = []
+    gpu_values: list[float] = []
+    for key, raw_value in temperatures.items():
+        value = _float_or_none(raw_value)
+        if value is None:
+            continue
+        name = str(key)
+        upper = name.upper()
+        if upper.startswith("TG") or name.startswith("Tg"):
+            gpu_values.append(value)
+        elif upper.startswith("TC") or name.startswith(("Tp", "Tm")):
+            core_values.append(value)
+        else:
+            fallback_core_values.append(value)
+    return core_values or fallback_core_values, gpu_values
+
+
+def _sample_thermalforge_status() -> dict[str, Any]:
+    binary = _thermalforge_binary()
+    if not binary:
+        return {"source": "thermalforge", "error": "thermalforge not found"}
+    try:
+        proc = subprocess.run(
+            [binary, "status"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=1.0,
+        )
+    except Exception as exc:
+        return {"source": "thermalforge", "error": str(exc)}
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return {"source": "thermalforge", "error": detail or f"exit {proc.returncode}"}
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return {"source": "thermalforge", "error": f"invalid JSON: {exc}"}
+
+    fans = data.get("fans") if isinstance(data, dict) else []
+    fan_rpms: list[float] = []
+    if isinstance(fans, dict):
+        fans = list(fans.values())
+    for fan in fans if isinstance(fans, list) else []:
+        if not isinstance(fan, dict):
+            continue
+        rpm = _float_or_none(fan.get("actual_rpm"))
+        if rpm is None:
+            rpm = _float_or_none(fan.get("target_rpm"))
+        if rpm is not None:
+            fan_rpms.append(rpm)
+
+    temperatures = data.get("temperatures") if isinstance(data, dict) else {}
+    core_values, gpu_values = (
+        _temperature_groups_from_thermalforge(temperatures)
+        if isinstance(temperatures, dict)
+        else ([], [])
+    )
+    temperature: dict[str, float] = {}
+    if core_values:
+        temperature["core_avg"] = sum(core_values) / len(core_values)
+        temperature["core_max"] = max(core_values)
+        temperature["core_min"] = min(core_values)
+    if gpu_values:
+        temperature["gpu_avg"] = sum(gpu_values) / len(gpu_values)
+
+    payload: dict[str, Any] = {
+        "source": "thermalforge",
+        "fans_rpm": {
+            "min": min(fan_rpms),
+            "max": max(fan_rpms),
+            "avg": sum(fan_rpms) / len(fan_rpms),
+        }
+        if fan_rpms
+        else {},
+        "temperature_c": temperature,
+    }
+    if isinstance(temperatures, dict):
+        payload["temperature_sensors_c"] = {
+            str(key): value
+            for key, value in temperatures.items()
+            if isinstance(value, (int, float))
+        }
+    return payload
+
+
+def _sample_powermetrics_once() -> dict[str, Any]:
+    if not shutil.which("powermetrics"):
+        return {"source": "powermetrics", "error": "powermetrics not found"}
+    if not shutil.which("sudo"):
+        return {"source": "powermetrics", "error": "sudo not found"}
+    command = [
+        "sudo",
+        "-n",
+        "powermetrics",
+        "-n",
+        "1",
+        "-i",
+        "250",
+        "--samplers",
+        "cpu_power,gpu_power,ane_power,thermal",
+    ]
+    try:
+        proc = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=2.0,
+        )
+    except Exception as exc:
+        return {"source": "powermetrics", "error": str(exc)}
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return {"source": "powermetrics", "error": detail or f"exit {proc.returncode}"}
+    return _parse_powermetrics_text(proc.stdout)
+
+
+def _summarize_tune_telemetry_samples(
+    samples: list[dict[str, Any]],
+    *,
+    errors: list[str] | None = None,
+    started_at: float | None = None,
+    ended_at: float | None = None,
+) -> dict[str, Any]:
+    power_keys = ("package", "cpu", "ane", "gpu")
+    frequency_keys = ("p_cluster", "m_cluster", "gpu")
+    temperature_keys = ("core_avg", "core_max", "core_min", "gpu_avg")
+    utilization_keys = ("p_core", "m_core", "gpu")
+
+    summary: dict[str, Any] = {
+        "enabled": True,
+        "sample_count": len(samples),
+        "duration_s": (
+            float(ended_at - started_at)
+            if started_at is not None and ended_at is not None
+            else None
+        ),
+        "sources": {
+            "thermalforge": any(sample.get("thermalforge_ok") for sample in samples),
+            "powermetrics": any(sample.get("powermetrics_ok") for sample in samples),
+        },
+    }
+    errors = list(errors or [])
+    if errors:
+        summary["errors"] = sorted(set(errors))
+
+    power = {
+        key: _series_stats(
+            [
+                ((sample.get("power_w") or {}).get(key))
+                for sample in samples
+            ]
+        )
+        for key in power_keys
+    }
+    frequency = {
+        key: _series_stats(
+            [
+                ((sample.get("frequency_ghz") or {}).get(key))
+                for sample in samples
+            ]
+        )
+        for key in frequency_keys
+    }
+    temperature = {
+        key: _series_stats(
+            [
+                ((sample.get("temperature_c") or {}).get(key))
+                for sample in samples
+            ]
+        )
+        for key in temperature_keys
+    }
+    utilization = {
+        key: _series_stats(
+            [
+                ((sample.get("utilization_pct") or {}).get(key))
+                for sample in samples
+            ]
+        )
+        for key in utilization_keys
+    }
+    fans = {
+        key: _series_stats(
+            [
+                ((sample.get("fans_rpm") or {}).get(key))
+                for sample in samples
+            ]
+        )
+        for key in ("avg", "min", "max")
+    }
+    summary["power_w"] = {key: value for key, value in power.items() if value}
+    summary["frequency_ghz"] = {key: value for key, value in frequency.items() if value}
+    summary["temperature_c"] = {key: value for key, value in temperature.items() if value}
+    summary["utilization_pct"] = {
+        key: value for key, value in utilization.items() if value
+    }
+    summary["fans_rpm"] = {key: value for key, value in fans.items() if value}
+
+    pressures = [
+        str(sample.get("thermal_pressure"))
+        for sample in samples
+        if sample.get("thermal_pressure")
+    ]
+    if pressures:
+        summary["thermal_pressure"] = {
+            "last": pressures[-1],
+            "observed": sorted(set(pressures)),
+        }
+
+    latest_sensors = next(
+        (
+            sample.get("temperature_sensors_c")
+            for sample in reversed(samples)
+            if sample.get("temperature_sensors_c")
+        ),
+        None,
+    )
+    if isinstance(latest_sensors, dict):
+        summary["latest_temperature_sensors_c"] = latest_sensors
+    return summary
+
+
+class _TuneTelemetrySampler:
+    def __init__(self, *, enabled: bool) -> None:
+        self.enabled = enabled
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._samples: list[dict[str, Any]] = []
+        self._errors: list[str] = []
+        self._lock = threading.Lock()
+        self._powermetrics_disabled = False
+        self._started_at: float | None = None
+
+    def start(self) -> None:
+        if not self.enabled:
+            return
+        self._started_at = time.monotonic()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> dict[str, Any] | None:
+        if not self.enabled:
+            return None
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)
+        ended_at = time.monotonic()
+        with self._lock:
+            samples = list(self._samples)
+            errors = list(self._errors)
+        return _summarize_tune_telemetry_samples(
+            samples,
+            errors=errors,
+            started_at=self._started_at,
+            ended_at=ended_at,
+        )
+
+    def _loop(self) -> None:
+        next_powermetrics = 0.0
+        while not self._stop.is_set():
+            now = time.monotonic()
+            sample: dict[str, Any] = {"timestamp": time.time()}
+            thermal = _sample_thermalforge_status()
+            if thermal.get("error"):
+                self._add_error(f"thermalforge: {thermal.get('error')}")
+            else:
+                sample["thermalforge_ok"] = True
+                sample.update({k: v for k, v in thermal.items() if k != "source"})
+            if not self._powermetrics_disabled and now >= next_powermetrics:
+                power = _sample_powermetrics_once()
+                next_powermetrics = now + TUNE_POWERMETRICS_SAMPLE_INTERVAL_S
+                if power.get("error"):
+                    self._powermetrics_disabled = True
+                    self._add_error(f"powermetrics: {power.get('error')}")
+                else:
+                    sample["powermetrics_ok"] = True
+                    for key in (
+                        "power_w",
+                        "frequency_ghz",
+                        "utilization_pct",
+                        "thermal_pressure",
+                    ):
+                        if key in power:
+                            sample[key] = power[key]
+            with self._lock:
+                self._samples.append(sample)
+            self._stop.wait(TUNE_TELEMETRY_SAMPLE_INTERVAL_S)
+
+    def _add_error(self, message: str) -> None:
+        with self._lock:
+            if message not in self._errors:
+                self._errors.append(message)
 
 
 def _run_tune_candidates(
@@ -1533,6 +1981,7 @@ def _run_tune_candidates(
     depths: list[int],
     settings: dict[str, Any],
     progress: Callable[[str], None] | None = None,
+    collect_telemetry: bool = False,
 ) -> list[dict[str, Any]]:
     output_root = _absolute_user_path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1552,15 +2001,20 @@ def _run_tune_candidates(
         if progress is not None:
             progress(f"[tune] {label} ({len(rows) + 1}/{total}) starting; log: {stdout_path}")
         started = time.monotonic()
-        proc = subprocess.run(
-            command,
-            cwd=repo_root(),
-            env={**os.environ, "MTPLX_TUNE_CHILD": "1"},
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
+        telemetry_sampler = _TuneTelemetrySampler(enabled=collect_telemetry)
+        telemetry_sampler.start()
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=repo_root(),
+                env={**os.environ, "MTPLX_TUNE_CHILD": "1"},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        finally:
+            telemetry = telemetry_sampler.stop()
         elapsed_s = time.monotonic() - started
         stdout_path.write_text(proc.stdout, encoding="utf-8")
         row = _tune_candidate_summary(
@@ -1570,12 +2024,17 @@ def _run_tune_candidates(
             stdout_path=stdout_path,
             command=command,
         )
+        if telemetry is not None:
+            row["telemetry"] = telemetry
         rows.append(row)
         if progress is not None:
             if isinstance(row.get("tok_s"), (int, float)):
                 progress(f"[tune] {label} finished in {elapsed_s:.1f}s: {float(row['tok_s']):.2f} tok/s")
             else:
                 progress(f"[tune] {label} failed in {elapsed_s:.1f}s: {row.get('error') or 'no token rate'}")
+            telemetry_line = _format_tune_telemetry_inline(row.get("telemetry"))
+            if telemetry_line:
+                progress(f"[tune] {label} telemetry: {telemetry_line}")
     return rows
 
 
@@ -1802,6 +2261,75 @@ def _print_tune_dry_run_human(payload: dict[str, Any]) -> None:
         print(f"  {row.get('candidate')}: {shlex.join(row.get('command') or [])}")
 
 
+def _stat_avg(stats: Any) -> float | None:
+    if isinstance(stats, dict) and isinstance(stats.get("avg"), (int, float)):
+        return float(stats["avg"])
+    return None
+
+
+def _format_tune_telemetry_inline(telemetry: Any) -> str | None:
+    if not isinstance(telemetry, dict) or not telemetry.get("enabled"):
+        return None
+    parts: list[str] = []
+    power = telemetry.get("power_w") or {}
+    power_parts = []
+    for label, key in (("pkg", "package"), ("cpu", "cpu"), ("ane", "ane"), ("gpu", "gpu")):
+        value = _stat_avg(power.get(key))
+        if value is not None:
+            power_parts.append(f"{label}={value:.1f}W")
+    if power_parts:
+        parts.append("power " + " ".join(power_parts))
+
+    frequency = telemetry.get("frequency_ghz") or {}
+    frequency_parts = []
+    for label, key in (("P", "p_cluster"), ("M", "m_cluster"), ("GPU", "gpu")):
+        value = _stat_avg(frequency.get(key))
+        if value is not None:
+            frequency_parts.append(f"{label}={value:.2f}GHz")
+    if frequency_parts:
+        parts.append("freq " + " ".join(frequency_parts))
+
+    temperature = telemetry.get("temperature_c") or {}
+    temp_parts = []
+    core_avg = _stat_avg(temperature.get("core_avg"))
+    core_max = _stat_avg(temperature.get("core_max"))
+    gpu_avg = _stat_avg(temperature.get("gpu_avg"))
+    if core_avg is not None:
+        temp_parts.append(f"core_avg={core_avg:.1f}C")
+    if core_max is not None:
+        temp_parts.append(f"core_max={core_max:.1f}C")
+    if gpu_avg is not None:
+        temp_parts.append(f"gpu_avg={gpu_avg:.1f}C")
+    if temp_parts:
+        parts.append("temp " + " ".join(temp_parts))
+
+    utilization = telemetry.get("utilization_pct") or {}
+    utilization_parts = []
+    for label, key in (("P", "p_core"), ("M", "m_core"), ("GPU", "gpu")):
+        value = _stat_avg(utilization.get(key))
+        if value is not None:
+            utilization_parts.append(f"{label}={value:.1f}%")
+    if utilization_parts:
+        parts.append("util " + " ".join(utilization_parts))
+
+    fans = telemetry.get("fans_rpm") or {}
+    fan_avg = _stat_avg(fans.get("avg"))
+    if fan_avg is not None:
+        parts.append(f"fans={fan_avg:.0f}rpm")
+
+    sample_count = telemetry.get("sample_count")
+    if isinstance(sample_count, int):
+        parts.append(f"samples={sample_count}")
+    errors = telemetry.get("errors") or []
+    if parts and errors:
+        parts.append("notes=" + "; ".join(str(error) for error in errors[:2]))
+    if not parts:
+        if errors:
+            return f"unavailable ({'; '.join(str(error) for error in errors[:2])})"
+        return None
+    return " | ".join(parts)
+
+
 def _print_tune_human(payload: dict[str, Any], *, verbose: bool = False) -> None:
     print("MTPLX Tune")
     if payload.get("from_cache"):
@@ -1838,12 +2366,14 @@ def _print_tune_human(payload: dict[str, Any], *, verbose: bool = False) -> None
     if verbose:
         print()
         for row in payload.get("results", []):
-            if row.get("depth") is None:
-                continue
-            print(
-                f"{row.get('mode')}: verify_ms={_fmt_metric(row.get('verify_ms_per_call'), digits=2)} "
-                f"acceptance={_format_depth_acceptance(row)}"
-            )
+            if row.get("depth") is not None:
+                print(
+                    f"{row.get('mode')}: verify_ms={_fmt_metric(row.get('verify_ms_per_call'), digits=2)} "
+                    f"acceptance={_format_depth_acceptance(row)}"
+                )
+            telemetry_line = _format_tune_telemetry_inline(row.get("telemetry"))
+            if telemetry_line:
+                print(f"{row.get('mode')}: telemetry={telemetry_line}")
         artifacts = payload.get("artifacts") or {}
         if artifacts:
             print(f"artifacts: {artifacts.get('root')}")
