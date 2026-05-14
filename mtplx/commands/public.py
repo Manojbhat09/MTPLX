@@ -1252,6 +1252,9 @@ def _cmd_tune(
     def _emit(line: str) -> None:
         print(line, file=sys.stderr, flush=True)
 
+    if not json_output:
+        _emit("[tune] close heavy apps now for cleaner results before measurements start")
+        _emit("[tune] fans may get loud during tuning and will be restored afterward")
     max_session = MaxSession(log=_emit)
     if not max_session.start():
         verified = max_session.thermal.get("verified") or {}
@@ -1804,7 +1807,9 @@ def _print_tune_human(payload: dict[str, Any], *, verbose: bool = False) -> None
     if payload.get("from_cache"):
         print("Using saved tuning. Run `mtplx tune --retune` to measure again.")
     else:
-        print("Close heavy apps for cleaner results. Fans may get loud during tuning.")
+        artifacts = payload.get("artifacts") or {}
+        if artifacts.get("root"):
+            print(f"Results written to {artifacts.get('root')}")
     print()
     best = payload.get("best") or {}
     for row in payload.get("results", []):

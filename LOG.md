@@ -88,6 +88,36 @@ from_home_real_short_tune=MTPLX_TUNE_STATE=/tmp/mtplx-tune-home-real-state.json 
 thermalforge post-run status -> fans mode=auto actual=0 target=0
 ```
 
+## 2026-05-15 00:10 BST - v0.3.6 Tune Results Copy Fix
+
+Scope:
+
+```text
+worktree=/Users/youssof/Documents/MTPLX-release/mtplx-v0.3.6
+branch=codex/release-v0.3.6
+trigger=user noted Tune printed "Close heavy apps for cleaner results" after the benchmark had already completed
+public_release_done=false
+```
+
+Fix:
+
+```text
+tune_pre_run_copy=print close-heavy-apps/fans-may-get-loud warnings before fan ramp and candidate measurements start
+tune_results_copy=final Tune output now shows results/artifact path only; no stale pre-run advice after measurements are over
+```
+
+Validation:
+
+```text
+python3 -m py_compile mtplx/commands/public.py tests/test_public_cli.py -> pass
+uv run --extra dev python -m ruff check mtplx/commands/public.py tests/test_public_cli.py -> pass
+uv run --extra dev python -m pytest tests/test_public_cli.py::test_tune_human_reports_candidate_errors_instead_of_false_no_win tests/test_public_cli.py::test_tune_human_results_do_not_give_pre_run_advice_afterward tests/test_public_cli.py::test_tune_candidate_outputs_are_absolute_from_non_repo_cwd -q -> pass
+uv run --extra dev python -m build -> pass; rebuilt dist/mtplx-0.3.6.tar.gz and dist/mtplx-0.3.6-py3-none-any.whl
+uv run --extra dev python -m twine check dist/* -> pass
+/opt/homebrew/opt/python@3.14/bin/python3.14 -m pip install --force-reinstall --no-deps dist/mtplx-0.3.6-py3-none-any.whl -> pass
+global packaged Tune result-render smoke -> final output says "Results written to ..." and contains no "Close heavy apps" or "Fans may get loud"
+```
+
 ## 2026-05-14 22:05 BST - v0.3.6 Release Candidate Assembly
 
 Scope:

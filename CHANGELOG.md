@@ -41,6 +41,9 @@ All notable user-facing changes are recorded here.
   candidate artifacts now use absolute paths, Tune prints per-candidate
   progress, and candidate failures are reported as failures instead of a false
   "no MTP depth beat AR" result.
+- Moved Tune's "close heavy apps / fans may get loud" warning to the pre-run
+  progress output so the final results screen does not give stale advice after
+  measurement is already over.
 - Fixed served model-id detection for the installed Optimized Speed artifact so
   mixed Q4/Q8 speed configs do not get mislabeled as Optimized Quality.
 

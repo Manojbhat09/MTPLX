@@ -1536,7 +1536,29 @@ def test_tune_human_reports_candidate_errors_instead_of_false_no_win(capsys):
     out = capsys.readouterr().out
     assert "Tune failed for one or more candidates" in out
     assert "No MTP depth beat AR" not in out
+    assert "Close heavy apps" not in out
     assert "/tmp/ar.log" in out
+
+
+def test_tune_human_results_do_not_give_pre_run_advice_afterward(capsys):
+    payload = {
+        "results": [
+            {"mode": "AR", "depth": None, "tok_s": 20.0, "multiplier_vs_ar": 1.0},
+            {"mode": "D1", "depth": 1, "tok_s": 30.0, "multiplier_vs_ar": 1.5},
+        ],
+        "best": {"mode": "D1", "depth": 1, "tok_s": 30.0, "multiplier_vs_ar": 1.5},
+        "saved": False,
+        "save_skipped_reason": "save disabled",
+        "artifacts": {"root": "/tmp/tune"},
+    }
+
+    public._print_tune_human(payload)
+
+    out = capsys.readouterr().out
+    assert "Results written to /tmp/tune" in out
+    assert "Close heavy apps" not in out
+    assert "Fans may get loud" not in out
+    assert "Best for this Mac: D1" in out
 
 
 def test_public_bench_run_dry_run_records_external_kernel_env(monkeypatch, capsys):
