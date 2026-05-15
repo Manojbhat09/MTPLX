@@ -1,5 +1,62 @@
 # MTPLX Release Log
 
+## 2026-05-15 21:01 BST - Post-v0.3.6 Model Reference Hotfixes, No Public Release
+
+Scope:
+
+```text
+worktree=/Users/youssof/Documents/MTPLX-release/mtplx-v0.3.6
+branch=codex/model-alias-resolution-fix
+base_release=v0.3.6 public release, tag/main commit 1d6a7b7
+hotfix_commits=7aa8624 Fix public model alias resolution; 16155bf Fix direct CLI default model path
+user_gate=no new GitHub release, PyPI publish, or Homebrew update yet; local global venv hotpatched only for user testing
+trigger_1=external screenshot showed `mtplx quickstart --max --model Qwen3.6-27B-MTPLX-Optimized-Quality` failing as no-MTP
+trigger_2=GitHub issue #67 reported `mtplx quickstart --profile sustained` failing after `mtplx start` installed and ran the default model successfully
+```
+
+Release-artifact investigation:
+
+```text
+verified_actual_release=downloaded PyPI mtplx==0.3.6 sdist and inspected v0.3.6/main state before final diagnosis
+public_0_3_6_repro_1=bare Quality artifact name was treated as a local folder; missing/nonexistent local path then produced a false no-MTP error
+public_0_3_6_repro_2=direct `mtplx quickstart --profile sustained` defaulted to `models/Qwen3.6-27B-MTPLX-Optimized-Speed`, not the installed Hugging Face cache
+public_0_3_6_repro_3=standalone `mtplx tune --dry-run --json` also emitted candidate commands with `--model models/Qwen3.6-27B-MTPLX-Optimized-Speed`
+issue_67_doctor_context=reporter cache was valid at `/Users/matt/.mtplx/models/Youssofal--Qwen3.6-27B-MTPLX-Optimized-Speed` with config/tokenizer/index/mtp/runtime contract present
+correct_diagnosis=the model choice was right, but direct CLI/tune default references were stale repo-relative paths; the no-MTP message was a false diagnosis from inspecting the wrong path
+```
+
+Fix:
+
+```text
+public_aliases=known public artifact names now canonicalize to `Youssofal/...` repo ids for Speed, Speed-FP16, legacy Optimized, and Quality
+missing_local_path=resolve_model_path now rejects unavailable local paths instead of returning a nonexistent folder to the MTP compatibility gate
+direct_cli_default=parser default for quickstart/serve/tune now uses `Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed` instead of `models/Qwen3.6-27B-MTPLX-Optimized-Speed`
+standalone_tune_default=DEFAULT_CHAMPION now points at the public verified model id, so `mtplx tune` and `mtplx-tune` do not fall back to the old repo-local model path
+legacy_config=stale config value `models/Qwen3.6-27B-MTPLX-Optimized-Speed` is treated as a legacy default and ignored, preserving real custom model paths
+```
+
+Validation:
+
+```text
+uv run --extra dev python -m pytest tests/test_hf_loader.py tests/test_public_cli.py::test_quickstart_public_quality_alias_missing_cache_is_not_no_mtp tests/test_public_cli.py::test_start_missing_model_suggests_download -q -> pass
+uv run --extra dev python -m pytest tests/test_public_cli.py::test_product_helper_commands_parse tests/test_public_cli.py::test_quickstart_default_missing_cache_is_not_legacy_models_path tests/test_public_cli.py::test_tune_default_dry_run_is_not_legacy_models_path tests/test_public_cli.py::test_quickstart_public_quality_alias_missing_cache_is_not_no_mtp tests/test_config.py::test_apply_user_config_ignores_legacy_optimized_speed_default -q -> pass
+uv run --extra dev python -m pytest tests/test_public_cli.py tests/test_config.py tests/test_default_models.py tests/test_hf_loader.py tests/test_no_mlx_imports.py -q -> pass
+python3 -m compileall -q mtplx tests -> pass
+uv run --extra dev python -m ruff check mtplx/cli.py mtplx/config.py mtplx/commands/public.py mtplx/artifacts.py mtplx/hf_loader.py tests/test_public_cli.py tests/test_config.py tests/test_hf_loader.py -> pass
+git diff --check -> pass
+global_hotpatch=/opt/homebrew/var/mtplx/venv-0.3.6/bin/python -m pip install --force-reinstall --no-deps . -> pass
+global_quickstart_probe=MTPLX_CONFIG=/tmp/mtplx-issue67-global-no-config.toml mtplx quickstart --profile sustained --cache-dir /tmp/mtplx-empty-cache-issue67-global --yes --warmup-tokens 0 --port 18113 -> loads/checks `Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed`, exits with honest not-cached message, no no-MTP claim
+global_tune_probe=MTPLX_CONFIG=/tmp/mtplx-issue67-global-no-config.toml mtplx tune --dry-run --json --cache-dir /tmp/mtplx-empty-cache-issue67-global -> candidate command uses `--model Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed`
+```
+
+Public status:
+
+```text
+not_published=PyPI/Homebrew/GitHub Releases remain public v0.3.6 until user approves a hotfix release
+known_release_risk=public v0.3.6 still has issue #67 behavior until a new release is cut
+next_release_candidate=hotfix should be versioned as a new patch release, not silently mutate v0.3.6
+```
+
 ## 2026-05-14 23:47 BST - v0.3.6 Bench Tune Hardware Telemetry
 
 Scope:

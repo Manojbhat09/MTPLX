@@ -2,6 +2,22 @@
 
 All notable user-facing changes are recorded here.
 
+## Unreleased
+
+### Fixed
+
+- Fixed direct `mtplx quickstart`, `mtplx serve`, `mtplx tune`, and
+  `mtplx-tune` default model references so they use the public verified
+  Optimized Speed repo instead of the old repo-relative
+  `models/Qwen3.6-27B-MTPLX-Optimized-Speed` path.
+- Fixed stale verified-default config handling so an old
+  `models/Qwen3.6-27B-MTPLX-Optimized-Speed` value no longer causes false
+  `no-MTP` compatibility failures after the Hugging Face cache is installed.
+- Fixed public artifact aliases such as
+  `Qwen3.6-27B-MTPLX-Optimized-Quality` so they resolve to the canonical
+  `Youssofal/...` Hugging Face repos instead of being treated as missing local
+  folders.
+
 ## v0.3.6
 
 ### Added
