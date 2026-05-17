@@ -52,6 +52,7 @@ from mtplx.mtp_patch import MTPContract
 from mtplx.model_scheduler import ModelWorkScheduler
 from mtplx.sampling import SamplerConfig
 from mtplx.profiles import (
+    DEFAULT_HF_MODEL_ID,
     DEFAULT_PROFILE_NAME,
     PROFILE_CHOICES,
     apply_profile_env,
@@ -9510,7 +9511,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     postcommit_default = os.environ.get("MTPLX_SESSION_POSTCOMMIT_MODE", "async")
     if postcommit_default not in {"inline", "async"}:
         postcommit_default = "async"
-    parser.add_argument("--model", default="models/Qwen3.6-27B-MTPLX-Optimized-Speed")
+    parser.add_argument("--model", default=DEFAULT_HF_MODEL_ID)
     parser.add_argument("--model-id", default="mtplx-qwen36-27b-native-mtp")
     parser.add_argument(
         "--profile", choices=PROFILE_CHOICES, default=DEFAULT_PROFILE_NAME

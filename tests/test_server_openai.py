@@ -10,9 +10,15 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
-from mtplx.profiles import get_profile
+from mtplx.profiles import DEFAULT_HF_MODEL_ID, get_profile
 from mtplx.server import openai
 from mtplx.server.openai import _RateLimiter, create_app, parse_args
+
+
+def test_server_parser_default_model_is_public_hf_default():
+    args = parse_args(["--warmup-tokens", "0"])
+
+    assert args.model == DEFAULT_HF_MODEL_ID
 
 
 def test_runtime_mode_label_distinguishes_sustained_max_and_burst():

@@ -2220,7 +2220,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench_p.add_argument("--exactness-partition-size", type=int, default=512)
     bench_p.add_argument("--models", nargs="+")
     bench_p.add_argument("--record-champion", action="store_true")
-    bench_p.add_argument("--champion", default="models/Qwen3.6-27B-MTPLX-Optimized-Speed")
+    bench_p.add_argument("--champion", default=DEFAULT_HF_MODEL_ID)
     bench_p.add_argument("--references", nargs="+", default=["stock_mlx_lm", "llama_cpp"])
     bench_p.add_argument("--url", default="http://127.0.0.1:8000")
     bench_p.add_argument("--port", type=int, default=8041)

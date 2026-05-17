@@ -2666,6 +2666,8 @@ def test_product_helper_commands_parse():
     assert report.deep is True
     assert nightly.bench_action == "nightly"
     assert bench_tune.bench_action == "tune"
+    assert bench_tune.model == "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed"
+    assert bench_tune.champion == "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed"
     assert nightly.output == "out.json"
     assert nightly_json.json is True
     assert debug.debug_action == "bundle"
