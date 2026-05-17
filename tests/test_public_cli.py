@@ -152,12 +152,19 @@ def test_bench_prefill_ladder_dry_run_json(monkeypatch, capsys):
     assert payload["profile"]["env"]["MTPLX_LAZY_VERIFY_LOGITS"] == "1"
     assert payload["profile"]["env"]["MTPLX_BATCH_TARGET_ARRAYS"] == "1"
     assert payload["profile"]["env"]["MTPLX_PREFILL_CHUNK_CACHE_CLEANUP"] == "1"
-    assert payload["profile"]["env"]["MTPLX_PREFILL_CHUNK_CACHE_CLEANUP_EVERY"] == "auto"
+    assert (
+        payload["profile"]["env"]["MTPLX_PREFILL_CHUNK_CACHE_CLEANUP_EVERY"] == "auto"
+    )
     assert payload["profile"]["env"]["MTPLX_PREFILL_OMLX_EXTERNAL"] == "1"
     assert payload["profile"]["env"]["MTPLX_DEFER_VERIFY_HIDDEN_EVAL"] == "1"
-    assert payload["profile"]["env"]["MTPLX_VERIFY_HIDDEN_MODE"] == "logits_first_committed_slice"
+    assert (
+        payload["profile"]["env"]["MTPLX_VERIFY_HIDDEN_MODE"]
+        == "logits_first_committed_slice"
+    )
     assert payload["profile"]["env"]["MTPLX_LONG_CONTEXT_MTP_DEPTH_POLICY"] == "auto"
-    assert payload["profile"]["env"]["MTPLX_LONG_CONTEXT_MTP_DEPTH_THRESHOLD"] == "98304"
+    assert (
+        payload["profile"]["env"]["MTPLX_LONG_CONTEXT_MTP_DEPTH_THRESHOLD"] == "98304"
+    )
     assert payload["profile"]["env"]["MTPLX_LONG_CONTEXT_MTP_DEPTH"] == "2"
     assert payload["profile"]["env"]["MTPLX_VLLM_METAL_PAGED_TURBOQUANT"] == "0"
 
@@ -224,7 +231,9 @@ def test_help_with_no_topic_is_verbose_not_compact(capsys):
     code = main(["help"])
     verbose = capsys.readouterr().out
     assert code == 0
-    assert len(verbose) > len(compact), "`mtplx help` must be more verbose than bare `mtplx`"
+    assert len(verbose) > len(compact), (
+        "`mtplx help` must be more verbose than bare `mtplx`"
+    )
     # Verbose-only sections.
     assert "Overview" in verbose
     assert "Help subtopics" in verbose
@@ -340,7 +349,10 @@ def test_start_dry_run_is_consumer_friendly(monkeypatch, tmp_path, capsys):
     assert "MTPLX start" in captured
     assert "model: models/example" in captured
     assert "profile: sustained" in captured
-    assert "then: load once -> chat in this terminal -> stream output -> show speed stats" in captured
+    assert (
+        "then: load once -> chat in this terminal -> stream output -> show speed stats"
+        in captured
+    )
 
 
 def test_start_auto_default_can_route_to_fp16(monkeypatch, tmp_path, capsys):
@@ -449,7 +461,9 @@ def test_start_target_aliases_route_correctly(monkeypatch, tmp_path, capsys):
     assert run("sv")["target"] == "swival"
 
 
-def test_start_opencode_dry_run_json_writes_no_hidden_cap(monkeypatch, tmp_path, capsys):
+def test_start_opencode_dry_run_json_writes_no_hidden_cap(
+    monkeypatch, tmp_path, capsys
+):
     monkeypatch.setenv("MTPLX_CONFIG", str(tmp_path / "missing-config.toml"))
     monkeypatch.setenv("MTPLX_OPENCODE_CONFIG", str(tmp_path / "opencode.json"))
 
@@ -550,7 +564,9 @@ def test_terminal_quickstart_max_uses_verified_max_session(monkeypatch):
         show_stats=False,
     )
 
-    rc = public._quickstart_run_terminal_chat(args, runtime_model="/tmp/model", inspection={})
+    rc = public._quickstart_run_terminal_chat(
+        args, runtime_model="/tmp/model", inspection={}
+    )
 
     assert rc == 0
     assert calls == ["start", "stop"]
@@ -581,7 +597,9 @@ def test_one_shot_max_uses_verified_max_session(monkeypatch):
     fake_generation.generate_mtpk = lambda *a, **kw: SimpleNamespace(
         text="ok",
         tokens=[1],
-        stats=SimpleNamespace(generated_tokens=1, tok_s=1.0, verify_time_s=0.0, verify_calls=0),
+        stats=SimpleNamespace(
+            generated_tokens=1, tok_s=1.0, verify_time_s=0.0, verify_calls=0
+        ),
     )
     fake_generation.generate_ar = fake_generation.generate_mtpk
     fake_sampling = ModuleType("mtplx.sampling")
@@ -592,7 +610,11 @@ def test_one_shot_max_uses_verified_max_session(monkeypatch):
     monkeypatch.setitem(sys.modules, "mtplx.generation", fake_generation)
     monkeypatch.setitem(sys.modules, "mtplx.sampling", fake_sampling)
     monkeypatch.setattr("mtplx.thermal.MaxSession", FakeMaxSession)
-    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: ("/tmp/model", None))
+    monkeypatch.setattr(
+        public,
+        "_resolve_runtime_model_path",
+        lambda model, cache_dir=None: ("/tmp/model", None),
+    )
     monkeypatch.setattr(
         public,
         "_model_gate",
@@ -954,7 +976,9 @@ def test_quickstart_incremental_decoder_streams_word_boundaries():
     assert decoder.finish() == "world"
 
 
-def test_quickstart_generation_default_uses_remaining_model_context(monkeypatch, tmp_path):
+def test_quickstart_generation_default_uses_remaining_model_context(
+    monkeypatch, tmp_path
+):
     captured: dict[str, int] = {}
 
     class TinyTokenizer:
@@ -1097,10 +1121,17 @@ def test_quickstart_mtp_slash_command_toggles_next_turn(capsys):
     args = SimpleNamespace(no_mtp=False)
     runtime = SimpleNamespace(mtp_enabled=True)
 
-    assert public._handle_quickstart_mtp_command(args, "/mtp status", runtime=runtime) is True
-    assert public._handle_quickstart_mtp_command(args, "/mtp off", runtime=runtime) is True
+    assert (
+        public._handle_quickstart_mtp_command(args, "/mtp status", runtime=runtime)
+        is True
+    )
+    assert (
+        public._handle_quickstart_mtp_command(args, "/mtp off", runtime=runtime) is True
+    )
     assert args.no_mtp is True
-    assert public._handle_quickstart_mtp_command(args, "/mtp on", runtime=runtime) is True
+    assert (
+        public._handle_quickstart_mtp_command(args, "/mtp on", runtime=runtime) is True
+    )
     assert args.no_mtp is False
 
     captured = capsys.readouterr().out
@@ -1109,7 +1140,9 @@ def test_quickstart_mtp_slash_command_toggles_next_turn(capsys):
     assert "MTP: on for the next turn" in captured
 
 
-def test_quickstart_generation_reasoning_on_passes_enable_thinking(monkeypatch, tmp_path):
+def test_quickstart_generation_reasoning_on_passes_enable_thinking(
+    monkeypatch, tmp_path
+):
     captured: dict[str, object] = {}
 
     class TinyTokenizer:
@@ -1201,8 +1234,14 @@ def test_quickstart_openwebui_dry_run_json(monkeypatch, tmp_path, capsys):
     assert payload["openwebui"]["base_url"] == "http://127.0.0.1:18012/v1"
     assert payload["openwebui"]["api_base_url"] == "http://127.0.0.1:18012/v1"
     assert payload["openwebui"]["chat_url"] == "http://127.0.0.1:18012/"
-    assert "Open chat UI: http://127.0.0.1:18012/" in payload["openwebui"]["openwebui_steps"]
-    assert "OpenAI-compatible API base URL: http://127.0.0.1:18012/v1" in payload["openwebui"]["openwebui_steps"]
+    assert (
+        "Open chat UI: http://127.0.0.1:18012/"
+        in payload["openwebui"]["openwebui_steps"]
+    )
+    assert (
+        "OpenAI-compatible API base URL: http://127.0.0.1:18012/v1"
+        in payload["openwebui"]["openwebui_steps"]
+    )
     assert "--profile sustained" in payload["openwebui"]["server_command"]
     assert "--no-stats-footer" in payload["openwebui"]["server_command"]
     assert "--open-browser" in payload["openwebui"]["server_command"]
@@ -1251,7 +1290,9 @@ def test_start_pi_missing_cli_stops_before_model_check(monkeypatch, tmp_path, ca
             return False
 
     monkeypatch.setattr(public.sys, "stdin", NonInteractiveStdin())
-    monkeypatch.setattr(public.shutil, "which", lambda name: None if name == "pi" else "/usr/bin/npm")
+    monkeypatch.setattr(
+        public.shutil, "which", lambda name: None if name == "pi" else "/usr/bin/npm"
+    )
 
     def fail_resolve(*_args, **_kwargs):
         raise AssertionError("Pi preflight must run before model resolution")
@@ -1447,7 +1488,9 @@ def test_public_bench_run_dry_run(capsys):
     assert payload["direct_http_command"] is not None
     assert "--profiles" in payload["direct_http_command"]
     assert (
-        payload["direct_http_command"][payload["direct_http_command"].index("--profiles") + 1]
+        payload["direct_http_command"][
+            payload["direct_http_command"].index("--profiles") + 1
+        ]
         == "sustained"
     )
 
@@ -1471,7 +1514,9 @@ def test_public_bench_long_context_default_is_sustained(capsys):
     assert payload["harness"] == "direct-http"
     assert payload["runtime_profile"] == "native_mtp_sustained"
     assert (
-        payload["direct_http_command"][payload["direct_http_command"].index("--profiles") + 1]
+        payload["direct_http_command"][
+            payload["direct_http_command"].index("--profiles") + 1
+        ]
         == "sustained"
     )
 
@@ -1534,7 +1579,12 @@ def test_bench_tune_dry_run_is_json_support_payload(capsys):
     assert payload["save_default"] is False
     assert payload["settings"]["depths"] == "1,2,3"
     assert payload["settings"]["max_tokens"] == 192
-    assert [row["candidate"] for row in payload["candidates"]] == ["AR", "D1", "D2", "D3"]
+    assert [row["candidate"] for row in payload["candidates"]] == [
+        "AR",
+        "D1",
+        "D2",
+        "D3",
+    ]
     assert payload["diagnostics"]["telemetry_enabled"] is True
     assert payload["diagnostics"]["model_source_notes"] == []
     assert "power" in payload["diagnostics"]["description"]
@@ -1558,9 +1608,13 @@ def test_bench_tune_dry_run_can_disable_telemetry(capsys):
     assert "telemetry disabled" in payload["diagnostics"]["description"]
 
 
-def test_bench_tune_dry_run_warns_when_config_model_differs_from_default(tmp_path, monkeypatch, capsys):
+def test_bench_tune_dry_run_warns_when_config_model_differs_from_default(
+    tmp_path, monkeypatch, capsys
+):
     config = tmp_path / "config.toml"
-    configured_model = "/Users/youssof/Documents/CustomModels/Qwen3.6-27B-MTPLX-Optimized-Speed"
+    configured_model = (
+        "/Users/youssof/Documents/CustomModels/Qwen3.6-27B-MTPLX-Optimized-Speed"
+    )
     config.write_text(
         f'model = "{configured_model}"\n',
         encoding="utf-8",
@@ -1569,7 +1623,9 @@ def test_bench_tune_dry_run_warns_when_config_model_differs_from_default(tmp_pat
     monkeypatch.setattr(
         public,
         "select_default_model",
-        lambda: SimpleNamespace(model="/Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized"),
+        lambda: SimpleNamespace(
+            model="/Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized"
+        ),
     )
 
     code = main(["bench", "tune", "--dry-run", "--json", "--no-telemetry"])
@@ -1695,11 +1751,15 @@ def test_tune_state_round_trip(tmp_path, monkeypatch):
     assert record["payload"]["best"]["depth"] == 2
 
 
-def test_tune_model_source_notes_warn_when_config_model_differs_from_default(monkeypatch):
+def test_tune_model_source_notes_warn_when_config_model_differs_from_default(
+    monkeypatch,
+):
     monkeypatch.setattr(
         public,
         "select_default_model",
-        lambda: SimpleNamespace(model="/Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized"),
+        lambda: SimpleNamespace(
+            model="/Users/youssof/.mtplx/hf-upload/Qwen3.6-27B-MTPLX-Optimized"
+        ),
     )
     args = SimpleNamespace(
         _cli_flags=set(),
@@ -1757,6 +1817,105 @@ def test_tune_candidate_outputs_are_absolute_from_non_repo_cwd(tmp_path, monkeyp
     assert rows[0]["tok_s"] == 12.0
     assert any("AR (1/1) starting" in line for line in progress)
     assert any("AR finished" in line for line in progress)
+
+
+def test_tune_candidate_summary_promotes_child_json_error(tmp_path):
+    stdout = tmp_path / "ar.log"
+    stdout.write_text(
+        json.dumps(
+            {
+                "error": "model failed MTP primary gate",
+                "model": {
+                    "model_dir": "models/Qwen3.6-27B-MTPLX-Optimized-Speed",
+                    "config_exists": False,
+                    "model_files": [],
+                    "compatibility": {
+                        "message": "Model has no MTP head. MTPLX requires an MTP-equipped model.",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    row = public._tune_candidate_summary(
+        "ar",
+        tmp_path / "missing-ar.json",
+        returncode=2,
+        stdout_path=stdout,
+        command=["mtplx", "tune"],
+    )
+
+    assert row["returncode"] == 2
+    assert row["model"] == "models/Qwen3.6-27B-MTPLX-Optimized-Speed"
+    assert row["child_error"]["model"]["config_exists"] is False
+    assert "model failed MTP primary gate: Model has no MTP head" in row["error"]
+    assert row["error"] != "candidate did not write an artifact"
+
+
+def test_tune_candidate_summary_prefers_decode_tok_s(tmp_path):
+    ar_artifact = tmp_path / "ar.json"
+    ar_artifact.write_text(
+        json.dumps(
+            {
+                "ar_rows": [
+                    {
+                        "tok_s": 20.0,
+                        "decode_tok_s": 20.0,
+                        "decode_elapsed_s": 9.6,
+                        "end_to_end_tok_s": 14.4,
+                        "elapsed_s": 13.3,
+                        "prompt_eval_time_s": 3.7,
+                        "generated_tokens": 192,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    depth_artifact = tmp_path / "d1.json"
+    depth_artifact.write_text(
+        json.dumps(
+            {
+                "depths": [
+                    {
+                        "rows": [],
+                        "summary": {
+                            "mean_tok_s": 21.0,
+                            "mean_decode_tok_s": 21.0,
+                            "mean_end_to_end_tok_s": 15.5,
+                            "generated_tokens": 192,
+                            "elapsed_s": 12.4,
+                            "verify_calls": 2,
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ar_row = public._tune_candidate_summary(
+        "ar",
+        ar_artifact,
+        returncode=0,
+        stdout_path=tmp_path / "ar.log",
+        command=["mtplx", "tune"],
+    )
+    depth_row = public._tune_candidate_summary(
+        "1",
+        depth_artifact,
+        returncode=0,
+        stdout_path=tmp_path / "d1.log",
+        command=["mtplx", "tune"],
+    )
+
+    assert ar_row["tok_s"] == 20.0
+    assert ar_row["decode_tok_s"] == 20.0
+    assert ar_row["end_to_end_tok_s"] == 14.4
+    assert depth_row["tok_s"] == 21.0
+    assert depth_row["decode_tok_s"] == 21.0
+    assert depth_row["end_to_end_tok_s"] == 15.5
 
 
 def test_tune_candidates_settle_between_depth_runs(tmp_path, monkeypatch):
@@ -1864,7 +2023,9 @@ def test_bench_tune_candidate_rows_include_hardware_telemetry(tmp_path, monkeypa
     )
 
     assert rows[0]["telemetry"]["power_w"]["package"]["avg"] == 42.0
-    assert any("telemetry: scope=candidate | power pkg=42.0W" in line for line in progress)
+    assert any(
+        "telemetry: scope=candidate | power pkg=42.0W" in line for line in progress
+    )
 
 
 def test_bench_tune_telemetry_prefers_generation_window_samples(tmp_path, monkeypatch):
@@ -1948,8 +2109,22 @@ def test_bench_tune_telemetry_prefers_generation_window_samples(tmp_path, monkey
 def test_tune_human_reports_candidate_errors_instead_of_false_no_win(capsys):
     payload = {
         "results": [
-            {"mode": "AR", "depth": None, "tok_s": None, "multiplier_vs_ar": None, "error": "candidate did not write an artifact", "stdout": "/tmp/ar.log"},
-            {"mode": "D1", "depth": 1, "tok_s": None, "multiplier_vs_ar": None, "error": "candidate did not write an artifact", "stdout": "/tmp/d1.log"},
+            {
+                "mode": "AR",
+                "depth": None,
+                "tok_s": None,
+                "multiplier_vs_ar": None,
+                "error": "candidate did not write an artifact",
+                "stdout": "/tmp/ar.log",
+            },
+            {
+                "mode": "D1",
+                "depth": 1,
+                "tok_s": None,
+                "multiplier_vs_ar": None,
+                "error": "candidate did not write an artifact",
+                "stdout": "/tmp/d1.log",
+            },
         ],
         "best": None,
         "saved": False,
@@ -2028,7 +2203,9 @@ def test_bench_tune_human_verbose_prints_power_diagnostic_lines(capsys):
     public._print_tune_human(payload, verbose=True)
 
     out = capsys.readouterr().out
-    assert "telemetry=scope=candidate | power pkg=44.0W cpu=6.0W ane=0.0W gpu=38.0W" in out
+    assert (
+        "telemetry=scope=candidate | power pkg=44.0W cpu=6.0W ane=0.0W gpu=38.0W" in out
+    )
     assert "freq P=4.05GHz M=1.05GHz GPU=1.22GHz" in out
     assert "temp core_avg=71.0C core_max=77.0C gpu_avg=69.0C" in out
     assert "util P=17.0% M=10.0% GPU=99.0%" in out
@@ -2394,7 +2571,9 @@ def test_product_helper_commands_parse():
     start_openwebui = parser.parse_args(["start", "openwebui", "--port", "18012"])
     start_opencode = parser.parse_args(["start", "opencode", "--port", "18083"])
     start_swival = parser.parse_args(["start", "swival", "--port", "18084"])
-    start_openwebui_strict = parser.parse_args(["start", "openwebui", "--strict-fast-path"])
+    start_openwebui_strict = parser.parse_args(
+        ["start", "openwebui", "--strict-fast-path"]
+    )
     quickstart = parser.parse_args(["quickstart", "--port", "18012"])
     quickstart_alias = parser.parse_args(["quick-start", "--port", "18013"])
     setup = parser.parse_args(["setup", "--dry-run"])
@@ -2405,7 +2584,9 @@ def test_product_helper_commands_parse():
     tune = parser.parse_args(["tune", "--dry-run"])
     status = parser.parse_args(["status", "--deep"])
     doctor_opencode = parser.parse_args(["doctor", "opencode", "--json"])
-    doctor_android = parser.parse_args(["doctor", "android-studio", "--port", "8008", "--json"])
+    doctor_android = parser.parse_args(
+        ["doctor", "android-studio", "--port", "8008", "--json"]
+    )
     connect = parser.parse_args(["connect", "openwebui", "--port", "18012"])
     connect_opencode = parser.parse_args(["connect", "opencode", "--port", "18012"])
     connect_swival = parser.parse_args(["connect", "swival", "--port", "18084"])
@@ -2417,14 +2598,20 @@ def test_product_helper_commands_parse():
     debug = parser.parse_args(["debug", "bundle", "--run-id", "debug-test"])
     hotpath = parser.parse_args(["debug", "hotpath"])
     metrics = parser.parse_args(["metrics", "watch", "--count", "1", "--json"])
-    openwebui = parser.parse_args(["integrate", "openwebui", "--port", "18012", "--json"])
-    openwebui_docker = parser.parse_args(["openwebui", "docker-command", "--mtplx-port", "18012"])
+    openwebui = parser.parse_args(
+        ["integrate", "openwebui", "--port", "18012", "--json"]
+    )
+    openwebui_docker = parser.parse_args(
+        ["openwebui", "docker-command", "--mtplx-port", "18012"]
+    )
     claude = parser.parse_args(["integrate", "claude-code", "--port", "18012"])
     opencode = parser.parse_args(["integrate", "opencode", "--port", "18012"])
     swival = parser.parse_args(["integrate", "swival", "--port", "18084"])
     architectures = parser.parse_args(["model", "architectures", "--json"])
     qa_architectures = parser.parse_args(["model", "qa-architectures", "--json"])
-    publish = parser.parse_args(["model", "publish-check", "--repo-id", "mtplx/example"])
+    publish = parser.parse_args(
+        ["model", "publish-check", "--repo-id", "mtplx/example"]
+    )
     config = parser.parse_args(["config", "set", "profile", "exact", "--dry-run"])
     attribution = parser.parse_args(["profile", "eval-attribution", "--dry-run"])
 
@@ -2524,8 +2711,16 @@ def test_model_qa_architectures_runs_contract_fixture_gates(capsys):
     assert payload["gates"]["fixture_inspections_passed"] is True
     labels = {row["label"]: row for row in payload["fixtures"]}
     assert labels["deepseek-v3-contract-gated"]["observed"]["tier"] == "verified"
-    assert labels["glm4-moe-lite-contract-gated"]["observed"]["recommended_backend"] == "glm_mtp"
-    assert labels["minimax-m2-num-mtp-modules-recognized-pending"]["observed"]["runtime_compatibility"] == "recognized-backend-pending"
+    assert (
+        labels["glm4-moe-lite-contract-gated"]["observed"]["recommended_backend"]
+        == "glm_mtp"
+    )
+    assert (
+        labels["minimax-m2-num-mtp-modules-recognized-pending"]["observed"][
+            "runtime_compatibility"
+        ]
+        == "recognized-backend-pending"
+    )
     assert labels["gemma4-without-mtp-stays-no-mtp"]["observed"]["tier"] == "no-MTP"
     assert all(row["passed"] for row in payload["runtime_import_smokes"])
 
@@ -2626,7 +2821,11 @@ def test_doctor_android_studio_json_reports_openai_compatibility(monkeypatch, ca
     monkeypatch.setattr(
         public,
         "_http_post_text",
-        lambda url, payload, timeout=15.0: {"ok": True, "status": 200, "preview": "data: [DONE]"},
+        lambda url, payload, timeout=15.0: {
+            "ok": True,
+            "status": 200,
+            "preview": "data: [DONE]",
+        },
     )
 
     code = main(["doctor", "android-studio", "--port", "8008", "--json"])
@@ -2644,7 +2843,9 @@ def test_doctor_android_studio_json_reports_openai_compatibility(monkeypatch, ca
 def test_config_set_dry_run_uses_selected_path(tmp_path, capsys):
     config = tmp_path / "config.toml"
 
-    code = main(["config", "set", "profile", "exact", "--config", str(config), "--dry-run"])
+    code = main(
+        ["config", "set", "profile", "exact", "--config", str(config), "--dry-run"]
+    )
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
@@ -2666,9 +2867,17 @@ def test_debug_hotpath_reports_next_kernel_boundary(capsys):
     assert "fused_logits_topk_distribution" in names
     assert "external_vllm_partitioned_fallback" in names
     assert payload["raw_sync_markers"]["native_mlp_is_mlx_primitive"] is True
-    assert "native residual MLP layer-boundary fusion" in payload["verdict"]["do_not_loop"]
-    assert "standalone dense-logit top-k distribution kernels" in payload["verdict"]["do_not_loop"]
-    assert "larger owned verify-layer or verify-cycle primitive" in payload["verdict"]["highest_upside_next"]
+    assert (
+        "native residual MLP layer-boundary fusion" in payload["verdict"]["do_not_loop"]
+    )
+    assert (
+        "standalone dense-logit top-k distribution kernels"
+        in payload["verdict"]["do_not_loop"]
+    )
+    assert (
+        "larger owned verify-layer or verify-cycle primitive"
+        in payload["verdict"]["highest_upside_next"]
+    )
 
 
 def test_serve_dispatches_packaged_openai_server(monkeypatch, capsys):
@@ -2933,7 +3142,11 @@ def test_serve_uses_legacy_public_model_id_for_legacy_optimized_local_path(monke
 def test_serve_uses_model_contract_depth_when_depth_not_explicit(monkeypatch):
     calls = {}
 
-    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: (model, None))
+    monkeypatch.setattr(
+        public,
+        "_resolve_runtime_model_path",
+        lambda model, cache_dir=None: (model, None),
+    )
     monkeypatch.setattr(
         public,
         "_model_gate",
@@ -2991,7 +3204,11 @@ def test_serve_uses_model_contract_depth_when_depth_not_explicit(monkeypatch):
 def test_serve_no_mtp_dispatches_ar_generation_mode(monkeypatch):
     calls = {}
 
-    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: (model, None))
+    monkeypatch.setattr(
+        public,
+        "_resolve_runtime_model_path",
+        lambda model, cache_dir=None: (model, None),
+    )
     monkeypatch.setattr(
         public,
         "_model_gate",
@@ -3044,7 +3261,11 @@ def test_serve_no_mtp_dispatches_ar_generation_mode(monkeypatch):
 def test_serve_stock_ar_dispatches_unloaded_ar(monkeypatch):
     calls = {}
 
-    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: (model, None))
+    monkeypatch.setattr(
+        public,
+        "_resolve_runtime_model_path",
+        lambda model, cache_dir=None: (model, None),
+    )
     monkeypatch.setattr(
         public,
         "_model_gate",
@@ -3099,7 +3320,11 @@ def test_serve_stock_ar_dispatches_unloaded_ar(monkeypatch):
 def test_quickstart_pi_passes_launch_command_to_server(monkeypatch):
     calls = {}
 
-    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: (model, None))
+    monkeypatch.setattr(
+        public,
+        "_resolve_runtime_model_path",
+        lambda model, cache_dir=None: (model, None),
+    )
     monkeypatch.setattr(
         public,
         "_model_gate",
@@ -3189,7 +3414,11 @@ def test_bare_serve_invokes_server_onboarding_in_tty(monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr(public, "_port_is_busy", lambda host, port: False)
-    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: (model, None))
+    monkeypatch.setattr(
+        public,
+        "_resolve_runtime_model_path",
+        lambda model, cache_dir=None: (model, None),
+    )
     monkeypatch.setattr(
         public,
         "_model_gate",
@@ -3342,7 +3571,11 @@ def test_serve_skips_onboarding_with_explicit_model(monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr(public, "_port_is_busy", lambda host, port: False)
-    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: (model, None))
+    monkeypatch.setattr(
+        public,
+        "_resolve_runtime_model_path",
+        lambda model, cache_dir=None: (model, None),
+    )
     monkeypatch.setattr(
         public,
         "_model_gate",
@@ -3401,7 +3634,11 @@ def test_serve_skips_onboarding_with_explicit_model(monkeypatch):
 def test_serve_relaxes_missing_fast_mlx_fork_for_product_start(monkeypatch, capsys):
     calls = {}
 
-    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: (model, None))
+    monkeypatch.setattr(
+        public,
+        "_resolve_runtime_model_path",
+        lambda model, cache_dir=None: (model, None),
+    )
     monkeypatch.setattr(
         public,
         "_model_gate",
@@ -3461,7 +3698,11 @@ def test_serve_relaxes_missing_fast_mlx_fork_for_product_start(monkeypatch, caps
 
 
 def test_serve_strict_fast_path_fails_cleanly_without_traceback(monkeypatch, capsys):
-    monkeypatch.setattr(public, "_resolve_runtime_model_path", lambda model, cache_dir=None: (model, None))
+    monkeypatch.setattr(
+        public,
+        "_resolve_runtime_model_path",
+        lambda model, cache_dir=None: (model, None),
+    )
     monkeypatch.setattr(
         public,
         "_model_gate",
@@ -3511,7 +3752,9 @@ def test_serve_reports_busy_port_before_model_resolution(monkeypatch, capsys):
     monkeypatch.setattr(
         public,
         "_resolve_runtime_model_path",
-        lambda model, cache_dir=None: (_ for _ in ()).throw(AssertionError("should not resolve")),
+        lambda model, cache_dir=None: (_ for _ in ()).throw(
+            AssertionError("should not resolve")
+        ),
     )
     args = SimpleNamespace(
         model="models/example",
@@ -3549,15 +3792,22 @@ def test_quickstart_openwebui_reuses_existing_server(monkeypatch, capsys):
     monkeypatch.setattr(
         public,
         "_http_json",
-        lambda url, timeout=15.0: {"ok": True, "model": "mtplx-qwen36-27b-optimized-speed"},
+        lambda url, timeout=15.0: {
+            "ok": True,
+            "model": "mtplx-qwen36-27b-optimized-speed",
+        },
     )
     monkeypatch.setattr(
         public,
         "_resolve_runtime_model_path",
-        lambda model, cache_dir=None: (_ for _ in ()).throw(AssertionError("should not resolve")),
+        lambda model, cache_dir=None: (_ for _ in ()).throw(
+            AssertionError("should not resolve")
+        ),
     )
     opened = {}
-    monkeypatch.setattr(public, "_open_browser_url", lambda url: opened.setdefault("url", url))
+    monkeypatch.setattr(
+        public, "_open_browser_url", lambda url: opened.setdefault("url", url)
+    )
     args = SimpleNamespace(
         model="models/example",
         model_id="mtplx-qwen36-27b-optimized-speed",
@@ -3597,7 +3847,9 @@ def test_serve_rejects_non_localhost_without_api_key(monkeypatch, capsys):
     monkeypatch.setattr(
         public,
         "_resolve_runtime_model_path",
-        lambda model, cache_dir=None: (_ for _ in ()).throw(AssertionError("should not resolve")),
+        lambda model, cache_dir=None: (_ for _ in ()).throw(
+            AssertionError("should not resolve")
+        ),
     )
     args = SimpleNamespace(
         model="models/example",
@@ -3693,7 +3945,7 @@ def test_start_gate_failure_is_human_readable_for_config_only_qwen(tmp_path, cap
     assert "runtime: missing-mtp-weights" in captured
     assert "mtplx_runtime.json is optional metadata" in captured
     assert "fix: choose a model with real MTP weights" in captured
-    assert "\"model_files\"" not in captured
+    assert '"model_files"' not in captured
 
 
 def test_start_gate_failure_is_human_readable_for_config_only_glm(tmp_path, capsys):
@@ -3720,7 +3972,7 @@ def test_start_gate_failure_is_human_readable_for_config_only_glm(tmp_path, caps
     assert "mtplx_runtime.json is optional metadata" in captured
     assert "fix: choose a model with real MTP weights" in captured
     assert "MTP MTP markers" not in captured
-    assert "\"model_files\"" not in captured
+    assert '"model_files"' not in captured
 
 
 def test_profiles_command_lists_default_without_mlx(capsys):

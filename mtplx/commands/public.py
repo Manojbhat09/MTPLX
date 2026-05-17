@@ -172,6 +172,7 @@ def _depths_for_bench_run(args: Any) -> str:
     depth = int(getattr(args, "speculative_depth", 0) or 0)
     return str(depth) if depth > 0 else "3"
 
+
 def _runtime_env_with_external_overrides(runtime_env: dict[str, str]) -> dict[str, str]:
     merged = dict(runtime_env)
     for key in EXTERNAL_RUNTIME_ENV_KEYS:
@@ -192,7 +193,8 @@ def _bench_run_console_summary(envelope: dict[str, Any]) -> dict[str, Any]:
         "harness": envelope.get("harness") or "depth-sweep",
         "runtime_profile": envelope.get("runtime_profile"),
         "tok_s": runtime.get("tok_s") or runtime.get("mean_tok_s"),
-        "generated_tokens": runtime.get("generated_tokens") or trace.get("generated_tokens"),
+        "generated_tokens": runtime.get("generated_tokens")
+        or trace.get("generated_tokens"),
         "first64_tok_s": trace.get("first64_tok_s"),
         "last64_tok_s": trace.get("last64_tok_s"),
         "last64_over_first64": trace.get("last64_over_first64"),
@@ -287,7 +289,9 @@ def _model_gate_error_lines(inspection: dict[str, Any]) -> list[str]:
         f"model: {inspection.get('model_dir') or inspection.get('model') or 'unknown'}",
         f"tier: {compatibility.get('tier') or 'unknown'}",
     ]
-    runtime_compatibility = compatibility.get("runtime_compatibility") or inspection.get("runtime_compatibility")
+    runtime_compatibility = compatibility.get(
+        "runtime_compatibility"
+    ) or inspection.get("runtime_compatibility")
     mtp_layers = int(inspection.get("mtp_num_hidden_layers") or 0)
     missing_mtp_weights = (
         mtp_layers > 0
@@ -322,7 +326,9 @@ def _model_gate_error_lines(inspection: dict[str, Any]) -> list[str]:
             "into this base model."
         )
     elif compatibility.get("unsafe_force_required"):
-        lines.append("try: add --unsafe-force-unverified --yes to run without support guarantees")
+        lines.append(
+            "try: add --unsafe-force-unverified --yes to run without support guarantees"
+        )
     else:
         lines.append("try: mtplx inspect MODEL")
     return lines
@@ -401,7 +407,11 @@ def _generation_mode_from_args(args: Any) -> str:
     explicit = getattr(args, "generation_mode", None)
     if explicit is not None:
         return _normalize_generation_mode(explicit)
-    return GENERATION_MODE_AR if bool(getattr(args, "no_mtp", False)) else GENERATION_MODE_MTP
+    return (
+        GENERATION_MODE_AR
+        if bool(getattr(args, "no_mtp", False))
+        else GENERATION_MODE_MTP
+    )
 
 
 def _set_generation_mode_on_args(args: Any, mode: str) -> None:
@@ -432,7 +442,9 @@ def _download_progress_callback(*, printer=print):
         kind = event.get("event")
         size = _format_bytes(event.get("size_bytes"))
         if kind == "start":
-            printer(f"[1/4] Download started: {event.get('repo_id')} -> {event.get('path')}")
+            printer(
+                f"[1/4] Download started: {event.get('repo_id')} -> {event.get('path')}"
+            )
         elif kind == "resume":
             printer(
                 "[1/4] Resuming partial download: "
@@ -460,7 +472,10 @@ def _download_progress_callback(*, printer=print):
 def _rich_download_progress_callback(*, repo_id: str, total_bytes: int | None = None):
     """Single-line live progress callback for interactive downloads."""
 
-    from mtplx.ui.download_progress import RichDownloadProgress, from_progress_event_callback
+    from mtplx.ui.download_progress import (
+        RichDownloadProgress,
+        from_progress_event_callback,
+    )
 
     progress = RichDownloadProgress(repo_id=repo_id, total_bytes=total_bytes)
     callback = from_progress_event_callback(progress=progress)
@@ -607,7 +622,9 @@ def _cli_generation_budget(
     if explicit_max_tokens is not None:
         request_max_tokens = int(explicit_max_tokens)
         if request_max_tokens < 1:
-            raise ValueError("--max-tokens must be >= 1; omit it to use the model context")
+            raise ValueError(
+                "--max-tokens must be >= 1; omit it to use the model context"
+            )
         requested_max = request_max_tokens
     effective_max = max(1, min(requested_max, remaining_context))
     return {
@@ -646,7 +663,17 @@ def _redact_secret_value(value: Any) -> Any:
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             lowered = str(key).lower()
-            if any(marker in lowered for marker in ("token", "api_key", "apikey", "auth", "secret", "password")):
+            if any(
+                marker in lowered
+                for marker in (
+                    "token",
+                    "api_key",
+                    "apikey",
+                    "auth",
+                    "secret",
+                    "password",
+                )
+            ):
                 redacted[str(key)] = "[redacted]"
             else:
                 redacted[str(key)] = _redact_secret_value(item)
@@ -657,7 +684,10 @@ def _redact_secret_value(value: Any) -> Any:
         return [_redact_secret_value(item) for item in value]
     if isinstance(value, str) and len(value) > 12:
         lowered = value.lower()
-        if any(marker in lowered for marker in ("hf_", "bearer ", "api-key", "password", "secret")):
+        if any(
+            marker in lowered
+            for marker in ("hf_", "bearer ", "api-key", "password", "secret")
+        ):
             return "[redacted]"
     return value
 
@@ -707,7 +737,8 @@ def _deep_doctor_report(args: Any, base: dict[str, Any]) -> dict[str, Any]:
         },
         "product_policy": {
             "fanmax_counts_for_product_gate": False,
-            "safe_mode_drops_per_cycle_events": os.environ.get("MTPLX_DROP_EVENTS") == "1",
+            "safe_mode_drops_per_cycle_events": os.environ.get("MTPLX_DROP_EVENTS")
+            == "1",
         },
     }
     return base
@@ -734,7 +765,9 @@ def _opencode_doctor_report(args: Any) -> dict[str, Any]:
         else None
     )
     model_ref = (parsed or {}).get("model") if isinstance(parsed, dict) else None
-    model_id = str(model_ref or "").split("/", 1)[-1] if model_ref else DEFAULT_PUBLIC_MODEL_ID
+    model_id = (
+        str(model_ref or "").split("/", 1)[-1] if model_ref else DEFAULT_PUBLIC_MODEL_ID
+    )
     model_config = None
     if isinstance(provider, dict):
         models = provider.get("models")
@@ -781,7 +814,9 @@ def _opencode_doctor_report(args: Any) -> dict[str, Any]:
 def _android_studio_doctor_report(args: Any) -> dict[str, Any]:
     host = str(getattr(args, "host", None) or "127.0.0.1")
     port = int(getattr(args, "port", None) or 8008)
-    base_url = str(getattr(args, "base_url", None) or f"http://{host}:{port}/v1").rstrip("/")
+    base_url = str(
+        getattr(args, "base_url", None) or f"http://{host}:{port}/v1"
+    ).rstrip("/")
     models = _http_json(f"{base_url}/models", timeout=3.0)
     model_id = DEFAULT_PUBLIC_MODEL_ID
     data = models.get("data") if isinstance(models, dict) else None
@@ -861,7 +896,9 @@ def _git_value(args: list[str], *, cwd: Path) -> str | None:
     return proc.stdout.strip()
 
 
-def _resolve_runtime_model_path(model: str, *, cache_dir: str | None = None) -> tuple[str, dict[str, Any] | None]:
+def _resolve_runtime_model_path(
+    model: str, *, cache_dir: str | None = None
+) -> tuple[str, dict[str, Any] | None]:
     from mtplx.hf_loader import resolve_model_path
 
     try:
@@ -880,7 +917,9 @@ def _exactness_profile_kwargs(args: Any) -> dict[str, Any]:
         "block_size": int(getattr(args, "exactness_block_size", 16)),
         "num_blocks": int(getattr(args, "exactness_num_blocks", 1024)),
         "partitioned": not bool(getattr(args, "exactness_no_partitioned", False)),
-        "partition_threshold": int(getattr(args, "exactness_partition_threshold", 2048)),
+        "partition_threshold": int(
+            getattr(args, "exactness_partition_threshold", 2048)
+        ),
         "partition_size": int(getattr(args, "exactness_partition_size", 512)),
     }
 
@@ -939,6 +978,7 @@ def _depth_sweep_native60(
         draft_top_k=None if draft_sampler is None else int(draft_sampler["top_k"]),
     )
 
+
 class _temporary_env:
     def __init__(self, updates: dict[str, str]) -> None:
         self.updates = updates
@@ -963,7 +1003,9 @@ def cmd_doctor(args: Any) -> int:
     from mtplx.diagnostics import build_diagnostics_payload, write_doctor_bundle
 
     smc_path_raw = getattr(args, "smc_path", None) or shutil.which("smc") or ""
-    sovereign_path_raw = getattr(args, "sovereign_path", None) or shutil.which("sovereign") or ""
+    sovereign_path_raw = (
+        getattr(args, "sovereign_path", None) or shutil.which("sovereign") or ""
+    )
     smc_path = Path(smc_path_raw) if smc_path_raw else None
     sovereign_path = Path(sovereign_path_raw) if sovereign_path_raw else None
     thermal_control = detect_thermal_control()
@@ -1030,7 +1072,9 @@ def cmd_doctor(args: Any) -> int:
         tools = report.get("tools") or {}
         print("MTPLX status")
         print(f"python: {tools.get('python') or sys.executable}")
-        print(f"platform: {env_info.get('platform') or env_info.get('system') or 'unknown'}")
+        print(
+            f"platform: {env_info.get('platform') or env_info.get('system') or 'unknown'}"
+        )
         print(f"project: {env_info.get('project_root') or os.getcwd()}")
         print(f"model cache: {hf.get('cache_dir') or 'default'}")
         print(f"cached models: {hf.get('cached_models', 'unknown')}")
@@ -1042,24 +1086,32 @@ def cmd_doctor(args: Any) -> int:
         if getattr(args, "deep", False):
             launchers = report.get("launchers") or {}
             config = report.get("config") or {}
-            print(f"launcher: {launchers.get('global_launcher') or launchers.get('global') or 'unknown'}")
+            print(
+                f"launcher: {launchers.get('global_launcher') or launchers.get('global') or 'unknown'}"
+            )
             print(f"config: {config.get('path') or 'default'}")
         if report.get("opencode"):
             opencode = report["opencode"]
             print("OpenCode:")
             print(f"  config: {opencode.get('config_path')}")
-            print(f"  provider: {'present' if opencode.get('provider_present') else 'missing'}")
+            print(
+                f"  provider: {'present' if opencode.get('provider_present') else 'missing'}"
+            )
             print(f"  model: {opencode.get('model_ref') or 'missing'}")
             print(f"  base URL: {opencode.get('base_url') or 'missing'}")
             print(f"  reasoning field: {opencode.get('reasoning_field') or 'missing'}")
-            print(f"  hidden maxTokens: {str(bool(opencode.get('has_hidden_max_tokens'))).lower()}")
+            print(
+                f"  hidden maxTokens: {str(bool(opencode.get('has_hidden_max_tokens'))).lower()}"
+            )
         if report.get("android_studio"):
             android = report["android_studio"]
             print("Android Studio:")
             print(f"  URL: {android.get('paste_url')}")
             print(f"  URL schema: {android.get('url_schema')}")
             print(f"  model: {android.get('model')}")
-            print(f"  /v1/models: {'ok' if android.get('models', {}).get('data') else 'check failed'}")
+            print(
+                f"  /v1/models: {'ok' if android.get('models', {}).get('data') else 'check failed'}"
+            )
             print(
                 "  /v1/chat/completions: "
                 f"{'ok' if android.get('chat_nonstream', {}).get('ok') else 'check failed'}"
@@ -1071,7 +1123,11 @@ def cmd_inspect_model_public(args: Any) -> int:
     model_args = list(getattr(args, "model_args", []) or [])
     if model_args and model_args[0] == "model":
         model_args = model_args[1:]
-    model = args.model or getattr(args, "model_arg", None) or (model_args[0] if model_args else None)
+    model = (
+        args.model
+        or getattr(args, "model_arg", None)
+        or (model_args[0] if model_args else None)
+    )
     if len(model_args) > 1:
         raise SystemExit("inspect accepts exactly one model path/repo id")
     if not model:
@@ -1095,7 +1151,9 @@ def cmd_inspect_model_public(args: Any) -> int:
 def _print_inspect_human(inspection: dict[str, Any]) -> None:
     compatibility = inspection.get("compatibility") or {}
     mtp = inspection.get("mtp") or {}
-    architecture = inspection.get("architecture") or inspection.get("model_type") or "unknown"
+    architecture = (
+        inspection.get("architecture") or inspection.get("model_type") or "unknown"
+    )
     tensor_count = mtp.get("tensor_count")
     mtp_layers = inspection.get("mtp_num_hidden_layers")
     runtime_contract_present = bool(
@@ -1120,7 +1178,9 @@ def _print_inspect_human(inspection: dict[str, Any]) -> None:
     if tensor_count is not None:
         print(f"mtp_tensors_present: {tensor_count}")
     print(f"runtime_contract: {str(runtime_contract_present).lower()}")
-    recommended = compatibility.get("recommended_profile") or inspection.get("recommended_profile")
+    recommended = compatibility.get("recommended_profile") or inspection.get(
+        "recommended_profile"
+    )
     if recommended:
         print(f"recommended_profile: {recommended}")
     message = compatibility.get("message")
@@ -1196,16 +1256,24 @@ def _cmd_tune(
     verbose_default: bool,
 ) -> int:
     try:
-        depths = _parse_tune_depths(getattr(args, "depths", None) or TUNE_DEFAULT_DEPTHS)
+        depths = _parse_tune_depths(
+            getattr(args, "depths", None) or TUNE_DEFAULT_DEPTHS
+        )
     except ValueError as exc:
         return _tune_error(str(exc), json_output=bool(getattr(args, "json", False)))
 
     model = getattr(args, "model", None) or DEFAULT_CHAMPION
     settings = _tune_settings(args, depths=depths)
     run_id = getattr(args, "run_id", None) or f"tune-{time.strftime('%Y%m%d-%H%M%S')}"
-    output_dir = _absolute_user_path(getattr(args, "output_dir", None) or "outputs/cli/tune")
+    output_dir = _absolute_user_path(
+        getattr(args, "output_dir", None) or "outputs/cli/tune"
+    )
     output_root = output_dir / run_id
-    output_path = _absolute_user_path(getattr(args, "output")) if getattr(args, "output", None) else output_root / "tune.json"
+    output_path = (
+        _absolute_user_path(getattr(args, "output"))
+        if getattr(args, "output", None)
+        else output_root / "tune.json"
+    )
     json_output = bool(getattr(args, "json", False))
     verbose = bool(getattr(args, "verbose", verbose_default) or verbose_default)
     collect_telemetry = _tune_collect_telemetry(args, action=action)
@@ -1254,7 +1322,9 @@ def _cmd_tune(
         software=software,
         backend=backend,
     )
-    cached = None if bool(getattr(args, "retune", False)) else _load_tune_record(state_key)
+    cached = (
+        None if bool(getattr(args, "retune", False)) else _load_tune_record(state_key)
+    )
     if save_default and cached is not None:
         payload = dict(cached.get("payload") or {})
         payload["from_cache"] = True
@@ -1276,10 +1346,16 @@ def _cmd_tune(
             _emit(note)
         if action == "bench tune":
             if collect_telemetry:
-                _emit("[tune] diagnostic telemetry active; use --no-telemetry for clean speed comparison")
+                _emit(
+                    "[tune] diagnostic telemetry active; use --no-telemetry for clean speed comparison"
+                )
             else:
-                _emit("[tune] diagnostic telemetry disabled; speed comparison is cleaner")
-        _emit("[tune] close heavy apps now for cleaner results before measurements start")
+                _emit(
+                    "[tune] diagnostic telemetry disabled; speed comparison is cleaner"
+                )
+        _emit(
+            "[tune] close heavy apps now for cleaner results before measurements start"
+        )
         _emit("[tune] fans may get loud during tuning and will be restored afterward")
     max_session = MaxSession(log=_emit)
     if not max_session.start():
@@ -1295,7 +1371,10 @@ def _cmd_tune(
     try:
         if not json_output:
             _emit(f"[tune] artifacts: {output_root}")
-            _emit("[tune] running isolated candidates: AR, " + ", ".join(f"D{depth}" for depth in depths))
+            _emit(
+                "[tune] running isolated candidates: AR, "
+                + ", ".join(f"D{depth}" for depth in depths)
+            )
         candidate_rows = _run_tune_candidates(
             args,
             runtime_model=runtime_model,
@@ -1331,7 +1410,11 @@ def _cmd_tune(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_json(output_path, payload)
 
-    if payload.get("best") and save_default and not bool(getattr(args, "no_save", False)):
+    if (
+        payload.get("best")
+        and save_default
+        and not bool(getattr(args, "no_save", False))
+    ):
         payload["saved"] = True
         payload["state_path"] = str(_tune_state_path())
         _save_tune_record(state_key, key_material=key_material, payload=payload)
@@ -1339,8 +1422,12 @@ def _cmd_tune(
     else:
         payload["saved"] = False
         payload["state_path"] = str(_tune_state_path())
-        if not any(isinstance(row.get("tok_s"), (int, float)) for row in candidate_rows):
-            payload["save_skipped_reason"] = "tune failed; no candidate produced usable tokens"
+        if not any(
+            isinstance(row.get("tok_s"), (int, float)) for row in candidate_rows
+        ):
+            payload["save_skipped_reason"] = (
+                "tune failed; no candidate produced usable tokens"
+            )
         elif not payload.get("best"):
             payload["save_skipped_reason"] = "no MTP depth beat AR"
         elif bool(getattr(args, "no_save", False)) or not save_default:
@@ -1351,7 +1438,9 @@ def _cmd_tune(
         _print(payload)
     else:
         _print_tune_human(payload, verbose=verbose)
-    if not candidate_rows or not any(isinstance(row.get("tok_s"), (int, float)) for row in candidate_rows):
+    if not candidate_rows or not any(
+        isinstance(row.get("tok_s"), (int, float)) for row in candidate_rows
+    ):
         return 1
     return 0
 
@@ -1386,7 +1475,10 @@ def _cmd_tune_candidate(args: Any) -> int:
         model=runtime_model,
         prompt_suite=prompt_suite_path(TUNE_DEFAULT_SUITE),
         depths="1" if candidate == "ar" else candidate,
-        max_tokens=int(getattr(args, "max_tokens", TUNE_DEFAULT_MAX_TOKENS) or TUNE_DEFAULT_MAX_TOKENS),
+        max_tokens=int(
+            getattr(args, "max_tokens", TUNE_DEFAULT_MAX_TOKENS)
+            or TUNE_DEFAULT_MAX_TOKENS
+        ),
         limit=int(getattr(args, "limit", TUNE_DEFAULT_LIMIT) or TUNE_DEFAULT_LIMIT),
         seed=int(getattr(args, "seed", TUNE_DEFAULT_SEED) or TUNE_DEFAULT_SEED),
         draft_lm_head=draft_lm_head,
@@ -1467,7 +1559,9 @@ def _normalize_model_ref_for_compare(value: str | Path | None) -> str:
 
 
 def _same_model_ref(left: str | Path | None, right: str | Path | None) -> bool:
-    return _normalize_model_ref_for_compare(left) == _normalize_model_ref_for_compare(right)
+    return _normalize_model_ref_for_compare(left) == _normalize_model_ref_for_compare(
+        right
+    )
 
 
 def _tune_model_source_notes(args: Any, *, runtime_model: str) -> list[str]:
@@ -1485,7 +1579,9 @@ def _tune_model_source_notes(args: Any, *, runtime_model: str) -> list[str]:
     default_model = default_selection.model
     if _same_model_ref(runtime_model, default_model):
         return []
-    config_path = config.get("path") if isinstance(config, dict) else "~/.mtplx/config.toml"
+    config_path = (
+        config.get("path") if isinstance(config, dict) else "~/.mtplx/config.toml"
+    )
     return [
         f"[tune] using configured model from {config_path}: {runtime_model}",
         f"[tune] verified default for this Mac is: {default_model}",
@@ -1498,7 +1594,10 @@ def _tune_settings(args: Any, *, depths: list[int]) -> dict[str, Any]:
         "profile": "performance-cold",
         "suite": TUNE_DEFAULT_SUITE,
         "depths": ",".join(str(depth) for depth in depths),
-        "max_tokens": int(getattr(args, "max_tokens", TUNE_DEFAULT_MAX_TOKENS) or TUNE_DEFAULT_MAX_TOKENS),
+        "max_tokens": int(
+            getattr(args, "max_tokens", TUNE_DEFAULT_MAX_TOKENS)
+            or TUNE_DEFAULT_MAX_TOKENS
+        ),
         "limit": int(getattr(args, "limit", TUNE_DEFAULT_LIMIT) or TUNE_DEFAULT_LIMIT),
         "seed": int(getattr(args, "seed", TUNE_DEFAULT_SEED) or TUNE_DEFAULT_SEED),
         "thinking": "disabled",
@@ -1550,7 +1649,9 @@ def _load_tune_record(state_key: str) -> dict[str, Any] | None:
     return record
 
 
-def _save_tune_record(state_key: str, *, key_material: dict[str, Any], payload: dict[str, Any]) -> None:
+def _save_tune_record(
+    state_key: str, *, key_material: dict[str, Any], payload: dict[str, Any]
+) -> None:
     state = _load_tune_state()
     records = state.setdefault("records", {})
     records[state_key] = {
@@ -1573,7 +1674,11 @@ def _tune_state_key(
     software: dict[str, Any],
     backend: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
-    model_identity = str(Path(model).expanduser().resolve()) if Path(model).expanduser().exists() else str(model)
+    model_identity = (
+        str(Path(model).expanduser().resolve())
+        if Path(model).expanduser().exists()
+        else str(model)
+    )
     key_material = {
         "model": model_identity,
         "hardware": {
@@ -1589,7 +1694,9 @@ def _tune_state_key(
         },
         "backend": {
             "mlx_core_path": backend.get("mlx_core_path"),
-            "optional_fast_mlx_fork_active": backend.get("optional_fast_mlx_fork_active"),
+            "optional_fast_mlx_fork_active": backend.get(
+                "optional_fast_mlx_fork_active"
+            ),
             "stock_mlx_likely": backend.get("stock_mlx_likely"),
         },
         "settings": settings,
@@ -1614,7 +1721,9 @@ def _tune_dry_run_payload(
 ) -> dict[str, Any]:
     commands = []
     for candidate in ["ar", *[str(depth) for depth in depths]]:
-        candidate_output = output_root / f"{_tune_candidate_label(candidate).lower()}.json"
+        candidate_output = (
+            output_root / f"{_tune_candidate_label(candidate).lower()}.json"
+        )
         commands.append(
             {
                 "candidate": _tune_candidate_label(candidate),
@@ -1963,52 +2072,39 @@ def _summarize_tune_telemetry_samples(
 
     power = {
         key: _series_stats(
-            [
-                ((sample.get("power_w") or {}).get(key))
-                for sample in samples
-            ]
+            [((sample.get("power_w") or {}).get(key)) for sample in samples]
         )
         for key in power_keys
     }
     frequency = {
         key: _series_stats(
-            [
-                ((sample.get("frequency_ghz") or {}).get(key))
-                for sample in samples
-            ]
+            [((sample.get("frequency_ghz") or {}).get(key)) for sample in samples]
         )
         for key in frequency_keys
     }
     temperature = {
         key: _series_stats(
-            [
-                ((sample.get("temperature_c") or {}).get(key))
-                for sample in samples
-            ]
+            [((sample.get("temperature_c") or {}).get(key)) for sample in samples]
         )
         for key in temperature_keys
     }
     utilization = {
         key: _series_stats(
-            [
-                ((sample.get("utilization_pct") or {}).get(key))
-                for sample in samples
-            ]
+            [((sample.get("utilization_pct") or {}).get(key)) for sample in samples]
         )
         for key in utilization_keys
     }
     fans = {
         key: _series_stats(
-            [
-                ((sample.get("fans_rpm") or {}).get(key))
-                for sample in samples
-            ]
+            [((sample.get("fans_rpm") or {}).get(key)) for sample in samples]
         )
         for key in ("avg", "min", "max")
     }
     summary["power_w"] = {key: value for key, value in power.items() if value}
     summary["frequency_ghz"] = {key: value for key, value in frequency.items() if value}
-    summary["temperature_c"] = {key: value for key, value in temperature.items() if value}
+    summary["temperature_c"] = {
+        key: value for key, value in temperature.items() if value
+    }
     summary["utilization_pct"] = {
         key: value for key, value in utilization.items() if value
     }
@@ -2038,7 +2134,9 @@ def _summarize_tune_telemetry_samples(
     return summary
 
 
-def _sample_in_any_window(sample: dict[str, Any], windows: list[dict[str, float]]) -> bool:
+def _sample_in_any_window(
+    sample: dict[str, Any], windows: list[dict[str, float]]
+) -> bool:
     timestamp = _float_or_none(sample.get("timestamp"))
     if timestamp is None:
         return False
@@ -2084,11 +2182,12 @@ def _attach_generation_telemetry(
     generation["windows"] = windows
     generation["window_count"] = len(windows)
     generation["window_duration_s"] = sum(
-        float(window["end"]) - float(window["start"])
-        for window in windows
+        float(window["end"]) - float(window["start"]) for window in windows
     )
     if not samples:
-        generation["note"] = "no powermetrics/thermalforge sample landed inside the generation window"
+        generation["note"] = (
+            "no powermetrics/thermalforge sample landed inside the generation window"
+        )
     telemetry["generation"] = generation
     return telemetry
 
@@ -2202,7 +2301,9 @@ def _run_tune_candidates(
                 progress(f"[tune] settling {settle_s:.1f}s before {label}")
             time.sleep(settle_s)
         if progress is not None:
-            progress(f"[tune] {label} ({len(rows) + 1}/{total}) starting; log: {stdout_path}")
+            progress(
+                f"[tune] {label} ({len(rows) + 1}/{total}) starting; log: {stdout_path}"
+            )
         started = time.monotonic()
         telemetry_sampler = _TuneTelemetrySampler(enabled=collect_telemetry)
         telemetry_sampler.start()
@@ -2232,9 +2333,13 @@ def _run_tune_candidates(
         rows.append(row)
         if progress is not None:
             if isinstance(row.get("tok_s"), (int, float)):
-                progress(f"[tune] {label} finished in {elapsed_s:.1f}s: {float(row['tok_s']):.2f} tok/s")
+                progress(
+                    f"[tune] {label} finished in {elapsed_s:.1f}s: {float(row['tok_s']):.2f} tok/s"
+                )
             else:
-                progress(f"[tune] {label} failed in {elapsed_s:.1f}s: {row.get('error') or 'no token rate'}")
+                progress(
+                    f"[tune] {label} failed in {elapsed_s:.1f}s: {row.get('error') or 'no token rate'}"
+                )
             telemetry_line = _format_tune_telemetry_inline(row.get("telemetry"))
             if telemetry_line:
                 progress(f"[tune] {label} telemetry: {telemetry_line}")
@@ -2301,6 +2406,9 @@ def _tune_candidate_summary(
         "command": command,
     }
     if not path.exists():
+        child_error = _tune_child_error_from_stdout(stdout_path)
+        if child_error is not None:
+            return {**base, **child_error}
         return {**base, "error": "candidate did not write an artifact"}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -2308,18 +2416,33 @@ def _tune_candidate_summary(
         return {**base, "error": f"candidate artifact is not valid JSON: {exc}"}
     if candidate == "ar":
         ar_rows = data.get("ar_rows") or []
-        tok_values = [
-            float(row["tok_s"])
-            for row in ar_rows
-            if isinstance(row.get("tok_s"), (int, float))
-        ]
+        tok_values = _row_metric_values(ar_rows, "decode_tok_s", "tok_s")
+        end_to_end_values = _row_metric_values(ar_rows, "end_to_end_tok_s")
+        elapsed_values = _row_metric_values(ar_rows, "elapsed_s")
+        prompt_values = _row_metric_values(ar_rows, "prompt_eval_time_s")
+        decode_elapsed_values = _row_metric_values(ar_rows, "decode_elapsed_s")
         generation_windows = _generation_windows_from_rows(ar_rows)
         return {
             **base,
             "tok_s": (sum(tok_values) / len(tok_values)) if tok_values else None,
-            "generated_tokens": sum(int(row.get("generated_tokens") or 0) for row in ar_rows),
+            "decode_tok_s": (sum(tok_values) / len(tok_values)) if tok_values else None,
+            "end_to_end_tok_s": (
+                (sum(end_to_end_values) / len(end_to_end_values))
+                if end_to_end_values
+                else None
+            ),
+            "generated_tokens": sum(
+                int(row.get("generated_tokens") or 0) for row in ar_rows
+            ),
+            "elapsed_s": sum(elapsed_values) if elapsed_values else None,
+            "prompt_eval_time_s": sum(prompt_values) if prompt_values else None,
+            "decode_elapsed_s": sum(decode_elapsed_values)
+            if decode_elapsed_values
+            else None,
             "generation_windows": generation_windows,
-            "generation_window_s": sum(window["duration_s"] for window in generation_windows),
+            "generation_window_s": sum(
+                window["duration_s"] for window in generation_windows
+            ),
             "verify_ms_per_call": None,
             "quality_passed": True if ar_rows else None,
         }
@@ -2332,6 +2455,8 @@ def _tune_candidate_summary(
         for result_row in depth_row.get("rows", [])
         if isinstance(result_row, dict)
     ]
+    prompt_values = _row_metric_values(generation_rows, "prompt_eval_time_s")
+    decode_elapsed_values = _row_metric_values(generation_rows, "decode_elapsed_s")
     generation_windows = _generation_windows_from_rows(generation_rows)
     verify_calls = int(summary.get("verify_calls") or 0)
     validations = [
@@ -2348,28 +2473,100 @@ def _tune_candidate_summary(
         )
     return {
         **base,
-        "tok_s": summary.get("mean_tok_s"),
+        "tok_s": _first_number(summary, "mean_decode_tok_s", "mean_tok_s"),
+        "decode_tok_s": _first_number(summary, "mean_decode_tok_s", "mean_tok_s"),
+        "end_to_end_tok_s": _first_number(summary, "mean_end_to_end_tok_s"),
         "generated_tokens": summary.get("generated_tokens"),
         "elapsed_s": summary.get("elapsed_s"),
+        "prompt_eval_time_s": sum(prompt_values) if prompt_values else None,
+        "decode_elapsed_s": sum(decode_elapsed_values)
+        if decode_elapsed_values
+        else None,
         "generation_windows": generation_windows,
-        "generation_window_s": sum(window["duration_s"] for window in generation_windows),
+        "generation_window_s": sum(
+            window["duration_s"] for window in generation_windows
+        ),
         "verify_time_s": summary.get("verify_time_s"),
         "verify_calls": verify_calls,
         "verify_ms_per_call": _ms_per_call(summary.get("verify_time_s"), verify_calls),
-        "verify_forward_ms_per_call": _ms_per_call(summary.get("verify_forward_time_s"), verify_calls),
-        "verify_eval_ms_per_call": _ms_per_call(summary.get("verify_eval_time_s"), verify_calls),
-        "verify_hidden_eval_ms_per_call": _ms_per_call(summary.get("verify_hidden_eval_time_s"), verify_calls),
+        "verify_forward_ms_per_call": _ms_per_call(
+            summary.get("verify_forward_time_s"), verify_calls
+        ),
+        "verify_eval_ms_per_call": _ms_per_call(
+            summary.get("verify_eval_time_s"), verify_calls
+        ),
+        "verify_hidden_eval_ms_per_call": _ms_per_call(
+            summary.get("verify_hidden_eval_time_s"), verify_calls
+        ),
         "accepted_by_depth": summary.get("accepted_by_depth"),
         "drafted_by_depth": summary.get("drafted_by_depth"),
         "acceptance_by_depth": acceptance,
         "acceptance_percent_by_depth": [
             (None if value is None else 100.0 * float(value)) for value in acceptance
         ],
-        "mean_accept_probability_by_depth": summary.get("mean_accept_probability_by_depth"),
-        "quality_passed": all(bool(v.get("passed")) for v in validations) if validations else None,
+        "mean_accept_probability_by_depth": summary.get(
+            "mean_accept_probability_by_depth"
+        ),
+        "quality_passed": all(bool(v.get("passed")) for v in validations)
+        if validations
+        else None,
         "validations_total": len(validations),
         "validations_passed": sum(1 for v in validations if v.get("passed")),
     }
+
+
+def _tune_child_error_from_stdout(stdout_path: Path) -> dict[str, Any] | None:
+    try:
+        text = stdout_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    data = _load_first_json_object(text)
+    if not isinstance(data, dict):
+        return None
+    error = str(data.get("error") or "").strip()
+    if not error:
+        return None
+    detail = str(data.get("detail") or "").strip()
+    model = data.get("model")
+    if isinstance(model, dict):
+        compatibility = (
+            model.get("compatibility")
+            if isinstance(model.get("compatibility"), dict)
+            else {}
+        )
+        detail = detail or str(compatibility.get("message") or "").strip()
+        model_ref = str(model.get("model_dir") or "").strip()
+    else:
+        model_ref = str(model or "").strip()
+    summary = error
+    if detail:
+        summary = f"{summary}: {detail}"
+    payload: dict[str, Any] = {
+        "error": summary,
+        "child_error": data,
+    }
+    if detail:
+        payload["detail"] = detail
+    if model_ref:
+        payload["model"] = model_ref
+    return payload
+
+
+def _load_first_json_object(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
 
 
 def _tune_payload(
@@ -2423,9 +2620,13 @@ def _annotate_multipliers(results: list[dict[str, Any]]) -> list[dict[str, Any]]
     for row in results:
         item = dict(row)
         if item.get("mode") == "AR":
-            item["multiplier_vs_ar"] = 1.0 if isinstance(item.get("tok_s"), (int, float)) else None
+            item["multiplier_vs_ar"] = (
+                1.0 if isinstance(item.get("tok_s"), (int, float)) else None
+            )
         else:
-            item["multiplier_vs_ar"] = item.get("speedup_vs_ar") or _safe_ratio(item.get("tok_s"), ar_tok_s)
+            item["multiplier_vs_ar"] = item.get("speedup_vs_ar") or _safe_ratio(
+                item.get("tok_s"), ar_tok_s
+            )
         annotated.append(item)
     return annotated
 
@@ -2447,7 +2648,9 @@ def _best_multiplier_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         and isinstance(row.get("multiplier_vs_ar"), (int, float))
         and float(row["multiplier_vs_ar"]) > 1.0
     ]
-    raw_winner = max(candidates, key=lambda row: float(row["multiplier_vs_ar"]), default=None)
+    raw_winner = max(
+        candidates, key=lambda row: float(row["multiplier_vs_ar"]), default=None
+    )
     winner = raw_winner
     tie_margin_pct = max(
         0.0,
@@ -2481,10 +2684,9 @@ def _best_multiplier_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
             "winner": None,
             "verdict": "no_mtp_depth_beat_ar",
         }
-    raw_winner_changed = (
-        raw_winner is not None
-        and raw_winner.get("mode") != winner.get("mode")
-    )
+    raw_winner_changed = raw_winner is not None and raw_winner.get(
+        "mode"
+    ) != winner.get("mode")
     return {
         "available": True,
         "ar_tok_s": ar.get("tok_s") if ar else None,
@@ -2538,7 +2740,12 @@ def _format_tune_telemetry_inline(telemetry: Any) -> str | None:
     parts: list[str] = []
     power = display.get("power_w") or {}
     power_parts = []
-    for label, key in (("pkg", "package"), ("cpu", "cpu"), ("ane", "ane"), ("gpu", "gpu")):
+    for label, key in (
+        ("pkg", "package"),
+        ("cpu", "cpu"),
+        ("ane", "ane"),
+        ("gpu", "gpu"),
+    ):
         value = _stat_avg(power.get(key))
         if value is not None:
             power_parts.append(f"{label}={value:.1f}W")
@@ -2615,6 +2822,7 @@ def _print_tune_human(payload: dict[str, Any], *, verbose: bool = False) -> None
         multiplier = _fmt_metric(row.get("multiplier_vs_ar"), digits=2)
         marker = "  BEST" if best.get("mode") == mode else ""
         print(f"{mode:<4} {tok_s:>6} tok/s   {multiplier}x{marker}")
+    print("Speed shown is decode tok/s; prefill is tracked separately.")
     print()
     errors = [row for row in payload.get("results", []) if row.get("error")]
     if errors:
@@ -2638,7 +2846,9 @@ def _print_tune_human(payload: dict[str, Any], *, verbose: bool = False) -> None
     else:
         print("No MTP depth beat AR on this run")
     if payload.get("saved") and best:
-        print(f"Saved: Web UI starts will use depth {best.get('depth')} for this model.")
+        print(
+            f"Saved: Web UI starts will use depth {best.get('depth')} for this model."
+        )
     elif payload.get("save_skipped_reason"):
         print(f"Not saved: {payload.get('save_skipped_reason')}.")
     if verbose:
@@ -2681,6 +2891,7 @@ def _tune_error(
         if actionable:
             print(f"action: {actionable}", file=sys.stderr)
     return 1
+
 
 def cmd_pull_public(args: Any) -> int:
     from mtplx.hf_loader import pull_model, repo_id_from_model_ref
@@ -2726,7 +2937,9 @@ def cmd_pull_public(args: Any) -> int:
         print(f"model: {result.get('repo_id')}")
         print(f"path: {result.get('path')}")
         print(f"size: {_format_bytes(result.get('size_bytes'))}")
-        print(f"runtime contract: {str(bool(result.get('has_runtime_contract'))).lower()}")
+        print(
+            f"runtime contract: {str(bool(result.get('has_runtime_contract'))).lower()}"
+        )
     return 0
 
 
@@ -2788,8 +3001,14 @@ def _cmd_bench_run(args: Any) -> int:
     runtime_env = _runtime_env_with_external_overrides(runtime_env)
     harness = getattr(args, "harness", "auto")
     if harness == "auto":
-        harness = "depth-sweep" if selected_profile.name == "performance-cold" else "direct-http"
-    benchmark_seed = _benchmark_seed(args, runtime_profile=runtime_profile, harness=harness)
+        harness = (
+            "depth-sweep"
+            if selected_profile.name == "performance-cold"
+            else "direct-http"
+        )
+    benchmark_seed = _benchmark_seed(
+        args, runtime_profile=runtime_profile, harness=harness
+    )
     depths = _depths_for_bench_run(args)
 
     if args.dry_run:
@@ -2822,7 +3041,9 @@ def _cmd_bench_run(args: Any) -> int:
                 "profile": selected_profile.to_dict(),
                 "runtime_profile": runtime_profile,
                 "runtime_env": runtime_env,
-                "direct_http_command": direct_command if harness == "direct-http" else None,
+                "direct_http_command": direct_command
+                if harness == "direct-http"
+                else None,
                 "exact_paged_env": exact_paged_env,
                 "output": str(output),
                 "envelope": str(envelope_output),
@@ -2859,7 +3080,10 @@ def _cmd_bench_run(args: Any) -> int:
         **_exactness_profile_kwargs(args),
     )
     if not smoke["passed"]:
-        write_json(envelope_output, {"run_id": run_id, "correctness": {"exactness_smoke": smoke}})
+        write_json(
+            envelope_output,
+            {"run_id": run_id, "correctness": {"exactness_smoke": smoke}},
+        )
         _print({"error": "Phase 0H exactness smoke failed", "exactness_smoke": smoke})
         return EXIT_EXACTNESS
 
@@ -2974,10 +3198,17 @@ def _direct_http_bench_command(
         test_name = "long_code"
     else:
         test_name = suite
-    if test_name not in {"flappy", "python_modules_long", "long_code_uncapped", "long_code"}:
+    if test_name not in {
+        "flappy",
+        "python_modules_long",
+        "long_code_uncapped",
+        "long_code",
+    }:
         test_name = "flappy"
     generation_mode = _generation_mode_from_args(args)
-    load_mtp_flag = "--no-load-mtp" if bool(getattr(args, "stock_ar", False)) else "--load-mtp"
+    load_mtp_flag = (
+        "--no-load-mtp" if bool(getattr(args, "stock_ar", False)) else "--load-mtp"
+    )
     ablation_profile = (
         "sustained"
         if getattr(args, "profile", None) == "sustained"
@@ -3036,8 +3267,17 @@ def _direct_http_bench_command(
 
 
 def _validation_dicts_for_text(text: str, *, suite: str) -> list[dict[str, Any]]:
-    validations = [validate_no_degenerate_loop(text), validate_balanced_delimiters(text)]
-    if suite in {"python_modules_long", "python-modules-long", "long_code", "long-code", "cold-long-code-192"}:
+    validations = [
+        validate_no_degenerate_loop(text),
+        validate_balanced_delimiters(text),
+    ]
+    if suite in {
+        "python_modules_long",
+        "python-modules-long",
+        "long_code",
+        "long-code",
+        "cold-long-code-192",
+    }:
         validations.append(validate_python_syntax(text))
     return [validation.__dict__ for validation in validations]
 
@@ -3123,7 +3363,8 @@ def _cmd_bench_run_direct_http(
         "available": bool(trace_summary),
         "buckets": trace_summary.get("trace_rows"),
         "positive_buckets": trace_summary.get("trace_usable_rows"),
-        "generated_tokens": trace_summary.get("trace_generated_tokens") or row.get("completion_tokens"),
+        "generated_tokens": trace_summary.get("trace_generated_tokens")
+        or row.get("completion_tokens"),
         "first64_tok_s": row.get("first64"),
         "last64_tok_s": row.get("last64"),
         "last64_over_first64": row.get("last64_over_first64"),
@@ -3136,10 +3377,21 @@ def _cmd_bench_run_direct_http(
     strict_gates: dict[str, bool] = {}
     if args.strict:
         strict_gates = {
-            "flappy_tok_s_ge_50": bool(runtime["tok_s"] is not None and float(runtime["tok_s"]) >= 50.0),
-            "last64_over_first64_ge_0_90": bool(trace["last64_over_first64"] is not None and float(trace["last64_over_first64"]) >= 0.90),
-            "last10_over_first10_ge_0_85": bool(trace["last10_over_first10"] is not None and float(trace["last10_over_first10"]) >= 0.85),
-            "late_verify_le_75ms": bool(trace["late_verify_ms"] is not None and float(trace["late_verify_ms"]) <= 75.0),
+            "flappy_tok_s_ge_50": bool(
+                runtime["tok_s"] is not None and float(runtime["tok_s"]) >= 50.0
+            ),
+            "last64_over_first64_ge_0_90": bool(
+                trace["last64_over_first64"] is not None
+                and float(trace["last64_over_first64"]) >= 0.90
+            ),
+            "last10_over_first10_ge_0_85": bool(
+                trace["last10_over_first10"] is not None
+                and float(trace["last10_over_first10"]) >= 0.85
+            ),
+            "late_verify_le_75ms": bool(
+                trace["late_verify_ms"] is not None
+                and float(trace["late_verify_ms"]) <= 75.0
+            ),
             "telemetry_available": False,
             "no_fan_control": not bool(args.fanmax),
         }
@@ -3162,7 +3414,10 @@ def _cmd_bench_run_direct_http(
             "issues": preflight.get("issues"),
             "deep_smc_trace_attached": False,
         },
-        "dispatch": {"dispatch_trace_attached": False, "command_buffers_per_token": None},
+        "dispatch": {
+            "dispatch_trace_attached": False,
+            "command_buffers_per_token": None,
+        },
         "quality": {
             "passed": not quality_failures,
             "failures": quality_failures,
@@ -3189,7 +3444,11 @@ def _cmd_bench_run_direct_http(
     (output_dir / "direct-http-command.log").write_text(proc.stdout, encoding="utf-8")
     write_json(envelope_output, envelope)
     _print(_bench_run_console_summary(envelope))
-    if proc.returncode != 0 or row_error is not None or runtime["generated_tokens"] is None:
+    if (
+        proc.returncode != 0
+        or row_error is not None
+        or runtime["generated_tokens"] is None
+    ):
         return EXIT_STRICT_GATE
     if not envelope["quality"]["passed"]:
         return EXIT_QUALITY
@@ -3199,7 +3458,9 @@ def _cmd_bench_run_direct_http(
 
 
 def _nightly_tasks(args: Any) -> list[dict[str, Any]]:
-    sustained_profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME).name
+    sustained_profile = get_profile(
+        getattr(args, "profile", None) or DEFAULT_PROFILE_NAME
+    ).name
     return [
         {
             "label": "cold-long-code-192",
@@ -3282,7 +3543,9 @@ def _cmd_bench_nightly(args: Any) -> int:
                         output_dir=task_root / child.run_id,
                         seed=_benchmark_seed(
                             child,
-                            runtime_profile=get_profile(task["profile"]).runtime_profile,
+                            runtime_profile=get_profile(
+                                task["profile"]
+                            ).runtime_profile,
                             harness=task["harness"],
                         ),
                     )
@@ -3385,8 +3648,12 @@ def _cmd_bench_nightly(args: Any) -> int:
         "full_exactness_passed": exact_proc.returncode == 0,
         "cold_tok_s_ge_59": bool(cold_tok_s is not None and float(cold_tok_s) >= 59.0),
         "flappy_6k_tok_s_ge_45": bool(f6_tok_s is not None and float(f6_tok_s) >= 45.0),
-        "flappy_10k_tok_s_ge_45": bool(f10_tok_s is not None and float(f10_tok_s) >= 45.0),
-        "flappy_10k_decay_ratio_ge_0_85": bool(f10_ratio is not None and float(f10_ratio) >= 0.85),
+        "flappy_10k_tok_s_ge_45": bool(
+            f10_tok_s is not None and float(f10_tok_s) >= 45.0
+        ),
+        "flappy_10k_decay_ratio_ge_0_85": bool(
+            f10_ratio is not None and float(f10_ratio) >= 0.85
+        ),
         "quality_passed": quality_passed,
         "no_fan_product_gate": not bool(getattr(args, "fanmax", False)),
     }
@@ -3420,7 +3687,11 @@ def _cmd_bench_nightly(args: Any) -> int:
             "passed": summary["passed"],
             "gates": gates,
             "task_outputs": [
-                {"label": row["label"], "exit_code": row["exit_code"], "envelope": row["envelope_path"]}
+                {
+                    "label": row["label"],
+                    "exit_code": row["exit_code"],
+                    "envelope": row["envelope_path"],
+                }
                 for row in results
             ],
         }
@@ -3509,13 +3780,21 @@ def _cmd_bench_compare_envelopes(args: Any) -> int:
             "exactness_after": exactness_after,
         }
         if getattr(args, "strict_cold", False) and "cold" in label:
-            label_gates["cold_floor_ge_59"] = bool(after_tok_s is not None and after_tok_s >= 59.0)
+            label_gates["cold_floor_ge_59"] = bool(
+                after_tok_s is not None and after_tok_s >= 59.0
+            )
             label_gates["cold_regression_within_tolerance"] = bool(
                 tok_s_delta_pct is not None and tok_s_delta_pct >= -tolerance_pct
             )
-        if getattr(args, "strict", False) and ("flappy" in label or "10k" in label or "6k" in label):
-            label_gates["sustained_tok_s_ge_45"] = bool(after_tok_s is not None and after_tok_s >= 45.0)
-            label_gates["decay_ratio_ge_0_85"] = bool(after_ratio is not None and after_ratio >= 0.85)
+        if getattr(args, "strict", False) and (
+            "flappy" in label or "10k" in label or "6k" in label
+        ):
+            label_gates["sustained_tok_s_ge_45"] = bool(
+                after_tok_s is not None and after_tok_s >= 45.0
+            )
+            label_gates["decay_ratio_ge_0_85"] = bool(
+                after_ratio is not None and after_ratio >= 0.85
+            )
         if getattr(args, "strict_exactness", False):
             label_gates["strict_exactness_after"] = exactness_after
         gates[label] = all(label_gates.values())
@@ -3614,7 +3893,9 @@ def _cmd_bench_compare(args: Any) -> int:
             child.strict = task["strict"]
             child.strict_cold = task["strict_cold"]
             child.run_id = f"{run_id}-{Path(model).name}-{task['label']}"
-            child.output_dir = str(Path(args.output_dir or "outputs/cli/compare") / run_id)
+            child.output_dir = str(
+                Path(args.output_dir or "outputs/cli/compare") / run_id
+            )
             code = _cmd_bench_run(child)
             envelope_path = Path(child.output_dir) / child.run_id / "envelope.json"
             envelope = (
@@ -3637,13 +3918,12 @@ def _cmd_bench_compare(args: Any) -> int:
         model_rows = [row for row in results if row["model"] == model]
         by_label = {row["task"]["label"]: row for row in model_rows}
         quality_passed = all(
-            row.get("envelope", {}).get("quality", {}).get("passed") for row in model_rows
+            row.get("envelope", {}).get("quality", {}).get("passed")
+            for row in model_rows
         )
         cold_row = by_label.get("cold-long-code-192", {})
         cold_gate = (
-            cold_row.get("envelope", {})
-            .get("strict_gates", {})
-            .get("cold_tok_s_ge_55")
+            cold_row.get("envelope", {}).get("strict_gates", {}).get("cold_tok_s_ge_55")
         )
         metrics = {
             label: row.get("envelope", {}).get("runtime", {})
@@ -3666,7 +3946,9 @@ def _cmd_bench_compare(args: Any) -> int:
             eligible_scorecards,
             key=lambda row: (
                 float(row["metrics"].get("flappy-10k", {}).get("tok_s") or 0.0),
-                float(row["metrics"].get("python-modules-long", {}).get("tok_s") or 0.0),
+                float(
+                    row["metrics"].get("python-modules-long", {}).get("tok_s") or 0.0
+                ),
                 float(row["metrics"].get("cold-long-code-192", {}).get("tok_s") or 0.0),
             ),
         )
@@ -3679,7 +3961,10 @@ def _cmd_bench_compare(args: Any) -> int:
         "champion_policy": "No-fan sustained and quality outrank fanmax tie-breakers.",
     }
     champion_path = Path("mtplx/champion.json")
-    write_json(Path(args.output or Path("outputs/cli/compare") / run_id / "summary.json"), summary)
+    write_json(
+        Path(args.output or Path("outputs/cli/compare") / run_id / "summary.json"),
+        summary,
+    )
     if args.record_champion and recommended:
         write_json(
             champion_path,
@@ -3808,7 +4093,9 @@ def _ssh_command(host: str, remote_script: str) -> list[str]:
     ]
 
 
-def _run_ssh(host: str, remote_script: str, *, timeout_s: int) -> subprocess.CompletedProcess[str]:
+def _run_ssh(
+    host: str, remote_script: str, *, timeout_s: int
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         _ssh_command(host, remote_script),
         cwd=repo_root(),
@@ -3820,7 +4107,9 @@ def _run_ssh(host: str, remote_script: str, *, timeout_s: int) -> subprocess.Com
     )
 
 
-def _remote_read_text(host: str, path: str, *, timeout_s: int = 30) -> tuple[str | None, str | None]:
+def _remote_read_text(
+    host: str, path: str, *, timeout_s: int = 30
+) -> tuple[str | None, str | None]:
     proc = _run_ssh(host, f"cat {shlex.quote(path)}", timeout_s=timeout_s)
     if proc.returncode != 0:
         return None, proc.stdout[-2000:]
@@ -3895,14 +4184,18 @@ def _remote_reference_prompt_line(args: Any) -> str:
     row["max_tokens"] = int(args.max_tokens)
     row.setdefault("id", f"reference_{args.suite or 'prompt'}")
     if "prompt" not in row:
-        raise SystemExit(f"remote vLLM reference requires prompt field in {prompt_path}")
+        raise SystemExit(
+            f"remote vLLM reference requires prompt field in {prompt_path}"
+        )
     return json.dumps(row, ensure_ascii=False, sort_keys=True)
 
 
 def _remote_capture_script(args: Any, *, remote_run_cmd: str) -> str:
     prompt_line = _remote_reference_prompt_line(args)
     prompt_file = str(Path(args.remote_phase_dir) / "profile_prompt.jsonl")
-    backup_file = str(Path(args.remote_phase_dir) / ".profile_prompt.jsonl.mtplx_backup")
+    backup_file = str(
+        Path(args.remote_phase_dir) / ".profile_prompt.jsonl.mtplx_backup"
+    )
     return "\n".join(
         [
             "set -e",
@@ -3919,7 +4212,7 @@ def _remote_capture_script(args: Any, *, remote_run_cmd: str) -> str:
 
 def _remote_offline_capture_script(args: Any, *, remote_out_dir: str) -> str:
     prompt_line = _remote_reference_prompt_line(args)
-    offline_python = r'''from __future__ import annotations
+    offline_python = r"""from __future__ import annotations
 
 import argparse
 import json
@@ -4017,7 +4310,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-'''
+"""
     return f"""set -e
 OUT_DIR={shlex.quote(remote_out_dir)}
 rm -rf "$OUT_DIR"
@@ -4073,10 +4366,15 @@ exit "$NSYS_STATUS"
 
 
 def _cmd_bench_reference_vllm(args: Any) -> int:
-    run_id = args.run_id or f"vllm-reference-{args.remote_mode}-{time.strftime('%Y%m%d-%H%M%S')}"
+    run_id = (
+        args.run_id
+        or f"vllm-reference-{args.remote_mode}-{time.strftime('%Y%m%d-%H%M%S')}"
+    )
     local_dir = Path(args.remote_output_dir or "outputs/cli/reference-vllm") / run_id
     remote_kind = getattr(args, "remote_capture_kind", "offline")
-    remote_out_dir = str(Path(args.remote_phase_dir) / f"nsys-v4-{remote_kind}-{args.remote_mode}")
+    remote_out_dir = str(
+        Path(args.remote_phase_dir) / f"nsys-v4-{remote_kind}-{args.remote_mode}"
+    )
     remote_script = str(Path(args.remote_phase_dir) / args.remote_run_script)
     remote_run_cmd = (
         f"cd {shlex.quote(args.remote_phase_dir)} && "
@@ -4094,9 +4392,13 @@ def _cmd_bench_reference_vllm(args: Any) -> int:
                 "action": "bench reference-vllm",
                 "ssh_host": args.ssh_host,
                 "remote_capture_kind": remote_kind,
-                "probe_command": _ssh_command(args.ssh_host, _remote_probe_script(args)),
+                "probe_command": _ssh_command(
+                    args.ssh_host, _remote_probe_script(args)
+                ),
                 "capture_command": _ssh_command(args.ssh_host, capture_script),
-                "remote_prompt_override": json.loads(_remote_reference_prompt_line(args)),
+                "remote_prompt_override": json.loads(
+                    _remote_reference_prompt_line(args)
+                ),
                 "local_output_dir": str(local_dir),
                 "product_gate": False,
             }
@@ -4124,12 +4426,16 @@ def _cmd_bench_reference_vllm(args: Any) -> int:
     if args.capture_dispatch:
         capture_started_epoch = _remote_epoch(args.ssh_host)
         try:
-            capture = _run_ssh(args.ssh_host, capture_script, timeout_s=int(args.remote_timeout_s))
+            capture = _run_ssh(
+                args.ssh_host, capture_script, timeout_s=int(args.remote_timeout_s)
+            )
         except subprocess.TimeoutExpired as exc:
             capture_error = {
                 "error": "remote capture timed out",
                 "timeout_s": args.remote_timeout_s,
-                "stdout_tail": (exc.stdout or "")[-4000:] if isinstance(exc.stdout, str) else None,
+                "stdout_tail": (exc.stdout or "")[-4000:]
+                if isinstance(exc.stdout, str)
+                else None,
             }
         else:
             _write_remote_artifact(local_dir, "remote-capture.txt", capture.stdout)
@@ -4160,8 +4466,12 @@ def _cmd_bench_reference_vllm(args: Any) -> int:
         args.ssh_host,
         str(Path(remote_out_dir) / "stdout.log"),
     )
-    kernel_stat = _remote_stat(args.ssh_host, str(Path(remote_out_dir) / "cuda_gpu_kern_sum.txt"))
-    cuda_api_stat = _remote_stat(args.ssh_host, str(Path(remote_out_dir) / "cuda_api_sum.txt"))
+    kernel_stat = _remote_stat(
+        args.ssh_host, str(Path(remote_out_dir) / "cuda_gpu_kern_sum.txt")
+    )
+    cuda_api_stat = _remote_stat(
+        args.ssh_host, str(Path(remote_out_dir) / "cuda_api_sum.txt")
+    )
     bench_stat = _remote_stat(args.ssh_host, str(Path(remote_out_dir) / "bench.json"))
     kernel_stale = bool(
         args.capture_dispatch
@@ -4247,7 +4557,11 @@ def cmd_qa_public(args: Any) -> int:
 
 def _run_exactness_command(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(repo_root() / "scripts" / "phase0h_paged_verifier_exactness.py"), *args],
+        [
+            sys.executable,
+            str(repo_root() / "scripts" / "phase0h_paged_verifier_exactness.py"),
+            *args,
+        ],
         cwd=repo_root(),
         text=True,
         stdout=subprocess.PIPE,
@@ -4299,7 +4613,12 @@ def _cmd_qa_exactness(args: Any) -> int:
             for line in output_text.splitlines()
             if any(
                 marker in line.lower()
-                for marker in ("runtimeerror:", "error:", "failed", "undeclared identifier")
+                for marker in (
+                    "runtimeerror:",
+                    "error:",
+                    "failed",
+                    "undeclared identifier",
+                )
             )
         ]
         for line in reversed(candidate_lines or output_text.splitlines()):
@@ -4317,7 +4636,10 @@ def _cmd_qa_distribution(args: Any) -> int:
     rows = []
     worst = 0
     for suite_name in suite_names:
-        output = Path(args.output_dir or "outputs/cli/qa-distribution") / f"{suite_name}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+        output = (
+            Path(args.output_dir or "outputs/cli/qa-distribution")
+            / f"{suite_name}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+        )
         proc = _run_exactness_command(
             [
                 "--model",
@@ -4381,7 +4703,9 @@ def cmd_profile_public(args: Any) -> int:
 
 def _cmd_profile_dispatch(args: Any) -> int:
     if args.trace:
-        out_dir = Path(args.output_dir or "outputs/cli/dispatch") / time.strftime("%Y%m%d-%H%M%S")
+        out_dir = Path(args.output_dir or "outputs/cli/dispatch") / time.strftime(
+            "%Y%m%d-%H%M%S"
+        )
         proc = subprocess.run(
             [
                 sys.executable,
@@ -4427,9 +4751,13 @@ def _cmd_profile_thermal(args: Any) -> int:
 
 def _cmd_profile_compile_audit(args: Any) -> int:
     inspection, gate_exit = _model_gate(args.model)
-    output = Path(args.output) if args.output else (
-        Path(args.output_dir or "outputs/cli/compile-audit")
-        / f"compile-audit-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    output = (
+        Path(args.output)
+        if args.output
+        else (
+            Path(args.output_dir or "outputs/cli/compile-audit")
+            / f"compile-audit-{time.strftime('%Y%m%d-%H%M%S')}.json"
+        )
     )
     cmd = [
         sys.executable,
@@ -4494,7 +4822,9 @@ def _cmd_profile_compile_audit(args: Any) -> int:
                 output.with_name(output.stem + "-failed.json"),
                 {"error": "Phase 0H exactness smoke failed", "exactness_smoke": smoke},
             )
-            _print({"error": "Phase 0H exactness smoke failed", "exactness_smoke": smoke})
+            _print(
+                {"error": "Phase 0H exactness smoke failed", "exactness_smoke": smoke}
+            )
             return EXIT_EXACTNESS
     proc = subprocess.run(
         cmd,
@@ -4511,9 +4841,13 @@ def _cmd_profile_compile_audit(args: Any) -> int:
 
 def _cmd_profile_eval_attribution(args: Any) -> int:
     inspection, gate_exit = _model_gate(args.model)
-    output = Path(args.output) if args.output else (
-        Path(args.output_dir or "outputs/cli/eval-attribution")
-        / f"eval-attribution-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    output = (
+        Path(args.output)
+        if args.output
+        else (
+            Path(args.output_dir or "outputs/cli/eval-attribution")
+            / f"eval-attribution-{time.strftime('%Y%m%d-%H%M%S')}.json"
+        )
     )
     cmd = [
         sys.executable,
@@ -4649,12 +4983,16 @@ def cmd_max_public(args: Any) -> int:
         # Also clear the marker so `--status` doesn't report stale state.
         from mtplx.thermal import _clear_max_marker
 
-        payload = set_thermal_profile("silent", dry_run=bool(getattr(args, "dry_run", False)))
+        payload = set_thermal_profile(
+            "silent", dry_run=bool(getattr(args, "dry_run", False))
+        )
         if payload.get("ok") and not getattr(args, "dry_run", False):
             _clear_max_marker()
         code = 0 if payload.get("ok") or getattr(args, "dry_run", False) else 1
     else:
-        payload = set_thermal_profile(action, dry_run=bool(getattr(args, "dry_run", False)))
+        payload = set_thermal_profile(
+            action, dry_run=bool(getattr(args, "dry_run", False))
+        )
         code = 0 if payload.get("ok") or getattr(args, "dry_run", False) else 1
     if getattr(args, "json", False):
         _print(payload)
@@ -4668,16 +5006,17 @@ def cmd_max_public(args: Any) -> int:
             tool = selected.get("kind", "none")
             print(f"thermal tool: {tool}")
             if action == "status":
-                print(f"available: {str(bool((payload.get('detection') or {}).get('available'))).lower()}")
+                print(
+                    f"available: {str(bool((payload.get('detection') or {}).get('available'))).lower()}"
+                )
             else:
                 print(f"profile: {action}")
                 print(f"ok: {str(bool(payload.get('ok'))).lower()}")
             if payload.get("message"):
                 print(payload["message"])
-            elif (
-                not bool((payload.get("detection") or {}).get("available"))
-                and (payload.get("detection") or {}).get("instructions")
-            ):
+            elif not bool((payload.get("detection") or {}).get("available")) and (
+                payload.get("detection") or {}
+            ).get("instructions"):
                 print((payload.get("detection") or {})["instructions"])
     return code
 
@@ -4748,13 +5087,17 @@ def _connect_host_for_bind(host: str) -> str:
 
 def _port_is_busy(host: str, port: int) -> bool:
     try:
-        with socket.create_connection((_connect_host_for_bind(host), int(port)), timeout=0.2):
+        with socket.create_connection(
+            (_connect_host_for_bind(host), int(port)), timeout=0.2
+        ):
             return True
     except OSError:
         return False
 
 
-def _active_mlx_fork_status(*, expected_fragment: str, expected_commit: str | None) -> dict[str, Any]:
+def _active_mlx_fork_status(
+    *, expected_fragment: str, expected_commit: str | None
+) -> dict[str, Any]:
     try:
         spec = importlib.util.find_spec("mlx.core")
     except Exception as exc:
@@ -4822,6 +5165,7 @@ def _apple_hardware_context() -> dict[str, Any]:
         "arm64": _sysctl_int("hw.optional.arm64"),
     }
 
+
 def _software_context() -> dict[str, Any]:
     env = collect_environment(".").to_dict()
     return {
@@ -4834,6 +5178,7 @@ def _software_context() -> dict[str, Any]:
         "git_branch": env.get("git_branch"),
         "git_status": env.get("git_status"),
     }
+
 
 def _mlx_backend_context(profile: Any) -> dict[str, Any]:
     path = None
@@ -4870,23 +5215,46 @@ def _mlx_backend_context(profile: Any) -> dict[str, Any]:
         "custom_qmv_or_qmm_env": custom_env,
     }
 
+
 def _ms_per_call(seconds: Any, calls: int) -> float | None:
     if not isinstance(seconds, (int, float)) or not calls:
         return None
     return 1000.0 * float(seconds) / calls
 
+
 def _safe_ratio(numerator: Any, denominator: Any) -> float | None:
-    if not isinstance(numerator, (int, float)) or not isinstance(denominator, (int, float)):
+    if not isinstance(numerator, (int, float)) or not isinstance(
+        denominator, (int, float)
+    ):
         return None
     if float(denominator) == 0.0:
         return None
     return float(numerator) / float(denominator)
+
+
+def _first_number(mapping: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
+def _row_metric_values(rows: list[dict[str, Any]], *keys: str) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        value = _first_number(row, *keys)
+        if value is not None:
+            values.append(value)
+    return values
+
 
 def _package_version(name: str) -> str | None:
     try:
         return importlib.metadata.version(name)
     except Exception:
         return None
+
 
 def _command_text(args: list[str]) -> str | None:
     try:
@@ -4899,8 +5267,10 @@ def _command_text(args: list[str]) -> str | None:
     except Exception:
         return None
 
+
 def _sysctl_text(name: str) -> str | None:
     return _command_text(["sysctl", "-n", name])
+
 
 def _sysctl_int(name: str) -> int | None:
     text = _sysctl_text(name)
@@ -4908,6 +5278,7 @@ def _sysctl_int(name: str) -> int | None:
         return int(text) if text is not None else None
     except ValueError:
         return None
+
 
 def _apple_chip_family(chip: str | None) -> str | None:
     if not chip:
@@ -4917,12 +5288,14 @@ def _apple_chip_family(chip: str | None) -> str | None:
         return " ".join(words[:3]) if len(words) >= 3 else " ".join(words[:2])
     return chip
 
+
 def _rate_lists(numerators: list[Any], denominators: list[Any]) -> list[float | None]:
     rates: list[float | None] = []
     for numerator, denominator in zip(numerators, denominators):
         den = float(denominator or 0)
         rates.append((float(numerator) / den) if den else None)
     return rates
+
 
 def _format_depth_acceptance(row: dict[str, Any]) -> str:
     accepted = row.get("accepted_by_depth") or []
@@ -4935,10 +5308,12 @@ def _format_depth_acceptance(row: dict[str, Any]) -> str:
         parts.append(f"MTP{index} {acc}/{draft} ({pct_text}%)")
     return " | ".join(parts) if parts else "n/a"
 
+
 def _fmt_metric(value: Any, *, digits: int) -> str:
     if isinstance(value, (int, float)):
         return f"{float(value):.{digits}f}"
     return "n/a"
+
 
 def _print_serve_start_line(text: str = "") -> None:
     print(text, flush=True)
@@ -5027,7 +5402,9 @@ def _print_serve_handoff(args: Any, runtime_model: str, profile_name: str) -> No
         )
     _print_serve_start_line(f"[2/6] Model resolved: {runtime_model}")
     _print_serve_start_line("[3/6] Runtime contract verified")
-    _print_serve_start_line("      Loading the model can take about a minute on first start.")
+    _print_serve_start_line(
+        "      Loading the model can take about a minute on first start."
+    )
     _print_serve_start_line()
 
 
@@ -5153,27 +5530,50 @@ def cmd_serve_public(args: Any) -> int:
         str(getattr(args, "model", "")),
     )
     _print_serve_start_banner(args)
-    if _port_is_busy(str(getattr(args, "host", "127.0.0.1")), int(getattr(args, "port", 8000))):
+    if _port_is_busy(
+        str(getattr(args, "host", "127.0.0.1")), int(getattr(args, "port", 8000))
+    ):
         if bool(getattr(args, "quickstart_pi", False)):
-            base = _server_url(str(getattr(args, "host", "127.0.0.1")), int(getattr(args, "port", 8000)))
+            base = _server_url(
+                str(getattr(args, "host", "127.0.0.1")),
+                int(getattr(args, "port", 8000)),
+            )
             health = _http_json(base + "/health", timeout=1.5)
             if health.get("ok"):
                 from mtplx.pi import pi_launch_command, pi_model_ref
 
-                model_id = health.get("model") or getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
+                model_id = (
+                    health.get("model")
+                    or getattr(args, "model_id", None)
+                    or DEFAULT_PUBLIC_MODEL_ID
+                )
                 _print_serve_start_line("MTPLX is already running.")
                 _print_serve_start_line(f"OpenAI API Base URL: {base}/v1")
                 _print_serve_start_line(f"Pi model: {pi_model_ref(str(model_id))}")
                 _quickstart_launch_pi_now(model_id=str(model_id))
-                _print_serve_start_line(f"Manual fallback: {pi_launch_command(str(model_id))}")
-                _print_serve_start_line("Use the existing server, or stop that terminal with Ctrl-C to restart.")
+                _print_serve_start_line(
+                    f"Manual fallback: {pi_launch_command(str(model_id))}"
+                )
+                _print_serve_start_line(
+                    "Use the existing server, or stop that terminal with Ctrl-C to restart."
+                )
                 return 0
         if bool(getattr(args, "quickstart_openwebui", False)):
-            base = _server_url(str(getattr(args, "host", "127.0.0.1")), int(getattr(args, "port", 8000)))
+            base = _server_url(
+                str(getattr(args, "host", "127.0.0.1")),
+                int(getattr(args, "port", 8000)),
+            )
             health = _http_json(base + "/health", timeout=1.5)
             if health.get("ok"):
-                model_id = health.get("model") or getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
-                chat_url = _chat_url(str(getattr(args, "host", "127.0.0.1")), int(getattr(args, "port", 8000)))
+                model_id = (
+                    health.get("model")
+                    or getattr(args, "model_id", None)
+                    or DEFAULT_PUBLIC_MODEL_ID
+                )
+                chat_url = _chat_url(
+                    str(getattr(args, "host", "127.0.0.1")),
+                    int(getattr(args, "port", 8000)),
+                )
                 _print_serve_start_line("MTPLX is already running.")
                 _print_serve_start_line(f"Chat URL: {chat_url}")
                 _print_serve_start_line(f"OpenAI API Base URL: {base}/v1")
@@ -5181,26 +5581,44 @@ def cmd_serve_public(args: Any) -> int:
                 _print_serve_start_line("API key: leave blank for localhost")
                 _print_serve_start_line("Opening chat UI in your browser...")
                 _open_browser_url(chat_url)
-                _print_serve_start_line("Use the existing server, or stop that terminal with Ctrl-C to restart.")
+                _print_serve_start_line(
+                    "Use the existing server, or stop that terminal with Ctrl-C to restart."
+                )
                 return 0
         if bool(getattr(args, "quickstart_opencode", False)):
-            base = _server_url(str(getattr(args, "host", "127.0.0.1")), int(getattr(args, "port", 8000)))
+            base = _server_url(
+                str(getattr(args, "host", "127.0.0.1")),
+                int(getattr(args, "port", 8000)),
+            )
             health = _http_json(base + "/health", timeout=1.5)
             if health.get("ok"):
-                model_id = health.get("model") or getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
+                model_id = (
+                    health.get("model")
+                    or getattr(args, "model_id", None)
+                    or DEFAULT_PUBLIC_MODEL_ID
+                )
                 _print_serve_start_line("MTPLX is already running.")
                 _print_serve_start_line(f"OpenAI API Base URL: {base}/v1")
                 _print_serve_start_line(f"OpenCode model: mtplx/{model_id}")
                 _quickstart_launch_opencode_now()
-                _print_serve_start_line("Use the existing server, or stop that terminal with Ctrl-C to restart.")
+                _print_serve_start_line(
+                    "Use the existing server, or stop that terminal with Ctrl-C to restart."
+                )
                 return 0
         if bool(getattr(args, "quickstart_swival", False)):
-            base = _server_url(str(getattr(args, "host", "127.0.0.1")), int(getattr(args, "port", 8000)))
+            base = _server_url(
+                str(getattr(args, "host", "127.0.0.1")),
+                int(getattr(args, "port", 8000)),
+            )
             health = _http_json(base + "/health", timeout=1.5)
             if health.get("ok"):
                 from mtplx.swival import shell_swival_command
 
-                model_id = health.get("model") or getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
+                model_id = (
+                    health.get("model")
+                    or getattr(args, "model_id", None)
+                    or DEFAULT_PUBLIC_MODEL_ID
+                )
                 context_window = int(health.get("context_window") or 262144)
                 _print_serve_start_line("MTPLX is already running.")
                 _print_serve_start_line(f"OpenAI API Base URL: {base}/v1")
@@ -5212,12 +5630,16 @@ def cmd_serve_public(args: Any) -> int:
                         context_window=context_window,
                     )
                 )
-                _print_serve_start_line("Use the existing server, or stop that terminal with Ctrl-C to restart.")
+                _print_serve_start_line(
+                    "Use the existing server, or stop that terminal with Ctrl-C to restart."
+                )
                 return 0
         _print_serve_start_line(f"error: port {int(args.port)} is already in use")
         _print_serve_start_line("try: mtplx status")
         server_command = _server_command_name(args)
-        _print_serve_start_line(f"try: stop the old mtplx {server_command} terminal with Ctrl-C")
+        _print_serve_start_line(
+            f"try: stop the old mtplx {server_command} terminal with Ctrl-C"
+        )
         profile_arg = (
             f" --profile {getattr(args, 'profile')}"
             if getattr(args, "profile", None)
@@ -5304,18 +5726,32 @@ def cmd_serve_public(args: Any) -> int:
         )
         if not fork_status.get("ok"):
             if strict_fast_path:
-                _print_serve_start_line("[3/6] Fast MLX fork is required but not active")
+                _print_serve_start_line(
+                    "[3/6] Fast MLX fork is required but not active"
+                )
                 _print_serve_start_line(
                     f"      Expected: {profile.required_mlx_fork_fragment}"
-                    + (f" @ {profile.required_mlx_fork_commit}" if profile.required_mlx_fork_commit else "")
+                    + (
+                        f" @ {profile.required_mlx_fork_commit}"
+                        if profile.required_mlx_fork_commit
+                        else ""
+                    )
                 )
-                observed = fork_status.get("path") or fork_status.get("error") or "unknown"
+                observed = (
+                    fork_status.get("path") or fork_status.get("error") or "unknown"
+                )
                 _print_serve_start_line(f"      Found: {observed}")
                 server_command = _server_command_name(args)
-                _print_serve_start_line(f"try: mtplx {server_command} --profile sustained")
+                _print_serve_start_line(
+                    f"try: mtplx {server_command} --profile sustained"
+                )
                 _print_serve_start_line(f"try: mtplx {server_command} --profile stable")
-                _print_serve_start_line(f"try: mtplx {server_command} --profile performance-cold --max")
-                _print_serve_start_line("     (without --strict-fast-path, MTPLX starts in stock-MLX compatibility)")
+                _print_serve_start_line(
+                    f"try: mtplx {server_command} --profile performance-cold --max"
+                )
+                _print_serve_start_line(
+                    "     (without --strict-fast-path, MTPLX starts in stock-MLX compatibility)"
+                )
                 return 2
             relax_mlx_fork_assert = True
     model_id = _public_model_id_for_args(args, str(runtime_model))
@@ -5381,7 +5817,9 @@ def cmd_serve_public(args: Any) -> int:
                 "--launch-pi",
                 "--server-console",
                 "--pi-launch-command",
-                pi_launch_command(str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID)),
+                pi_launch_command(
+                    str(getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID)
+                ),
             ]
         )
     if bool(getattr(args, "quickstart_opencode", False)):
@@ -5461,7 +5899,9 @@ class _MaxIdleWatchdog:
     ``last_request_at`` / ``idle_seconds`` published by the OpenAI server.
     """
 
-    def __init__(self, *, host: str, port: int, idle_seconds: int, poll_seconds: int = 30) -> None:
+    def __init__(
+        self, *, host: str, port: int, idle_seconds: int, poll_seconds: int = 30
+    ) -> None:
         self.url = f"http://{host}:{port}/health"
         self.idle_seconds = int(idle_seconds)
         self.poll_seconds = max(1, int(poll_seconds))
@@ -5472,7 +5912,9 @@ class _MaxIdleWatchdog:
     def start(self) -> None:
         if self._thread is not None:
             return
-        self._thread = threading.Thread(target=self._run, name="mtplx-max-watchdog", daemon=True)
+        self._thread = threading.Thread(
+            target=self._run, name="mtplx-max-watchdog", daemon=True
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -5528,19 +5970,25 @@ class _MaxIdleWatchdog:
                 self._is_max = False
 
 
-def _generate_one_shot_public(args: Any, *, command: str) -> tuple[int, dict[str, Any], list[Any]]:
+def _generate_one_shot_public(
+    args: Any, *, command: str
+) -> tuple[int, dict[str, Any], list[Any]]:
     prompt = getattr(args, "prompt", None) or getattr(args, "prompt_arg", None)
     if not prompt:
         raise SystemExit(f"mtplx {command} requires a prompt")
     depth_error = _validate_public_depth(args, printer=lambda _line: None)
     if depth_error is not None:
-        return depth_error, {
-            "error": "invalid depth",
-            "detail": (
-                "--depth must be between "
-                f"1 and {MAX_PUBLIC_SPECULATIVE_DEPTH} for the current MTPLX runtime"
-            ),
-        }, []
+        return (
+            depth_error,
+            {
+                "error": "invalid depth",
+                "detail": (
+                    "--depth must be between "
+                    f"1 and {MAX_PUBLIC_SPECULATIVE_DEPTH} for the current MTPLX runtime"
+                ),
+            },
+            [],
+        )
     runtime_model, resolve_error = _resolve_runtime_model_path(
         args.model,
         cache_dir=getattr(args, "cache_dir", None),
@@ -5553,7 +6001,11 @@ def _generate_one_shot_public(args: Any, *, command: str) -> tuple[int, dict[str
         yes=bool(getattr(args, "yes", False)),
     )
     if gate_exit is not None:
-        return gate_exit, {"error": "model failed MTP primary gate", "model": inspection}, []
+        return (
+            gate_exit,
+            {"error": "model failed MTP primary gate", "model": inspection},
+            [],
+        )
     profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
     apply_profile_env(profile.name)
     generation_mode = _generation_mode_from_args(args)
@@ -5640,7 +6092,9 @@ def _generate_one_shot_public(args: Any, *, command: str) -> tuple[int, dict[str
             explicit_max_tokens=requested_max_tokens,
         )
         max_tokens_value = int(budget["effective_max_tokens"])
-        sampler = SamplerConfig(temperature=args.temperature, top_p=args.top_p, top_k=args.top_k)
+        sampler = SamplerConfig(
+            temperature=args.temperature, top_p=args.top_p, top_k=args.top_k
+        )
         if generation_mode == GENERATION_MODE_AR:
             out = generate_ar(
                 rt,
@@ -5692,7 +6146,9 @@ def _generate_one_shot_public(args: Any, *, command: str) -> tuple[int, dict[str
             "mtp_depth": (
                 0
                 if generation_mode == GENERATION_MODE_AR
-                else int(getattr(out.stats, "speculative_depth", args.depth) or args.depth)
+                else int(
+                    getattr(out.stats, "speculative_depth", args.depth) or args.depth
+                )
             ),
             "requested_mtp_depth": 0
             if generation_mode == GENERATION_MODE_AR
@@ -5705,12 +6161,16 @@ def _generate_one_shot_public(args: Any, *, command: str) -> tuple[int, dict[str
                 if generation_mode == GENERATION_MODE_AR
                 else dict(getattr(out.stats, "long_context_mtp_depth_policy", {}) or {})
             ),
-            "tok_s": out.stats.tok_s,
+            "tok_s": getattr(out.stats, "decode_tok_s", out.stats.tok_s),
+            "decode_tok_s": getattr(out.stats, "decode_tok_s", out.stats.tok_s),
+            "decode_elapsed_s": getattr(out.stats, "decode_elapsed_s", None),
+            "end_to_end_tok_s": getattr(out.stats, "end_to_end_tok_s", out.stats.tok_s),
+            "elapsed_s": getattr(out.stats, "elapsed_s", None),
+            "prompt_eval_time_s": getattr(out.stats, "prompt_eval_time_s", None),
             "verify_ms_per_call": (
                 None
                 if generation_mode == GENERATION_MODE_AR
-                else
-                1000.0 * out.stats.verify_time_s / out.stats.verify_calls
+                else 1000.0 * out.stats.verify_time_s / out.stats.verify_calls
                 if out.stats.verify_calls
                 else None
             ),
@@ -5744,7 +6204,11 @@ def _generate_one_shot_public(args: Any, *, command: str) -> tuple[int, dict[str
     }
     if thermal is not None:
         payload["thermal"] = thermal
-    return 0 if all(v.passed for v in validations) else EXIT_QUALITY, payload, validations
+    return (
+        0 if all(v.passed for v in validations) else EXIT_QUALITY,
+        payload,
+        validations,
+    )
 
 
 def cmd_run_public(args: Any) -> int:
@@ -5825,7 +6289,9 @@ def _handle_quickstart_reasoning_command(args: Any, prompt: str) -> bool:
     return True
 
 
-def _handle_quickstart_mtp_command(args: Any, prompt: str, *, runtime: Any | None = None) -> bool:
+def _handle_quickstart_mtp_command(
+    args: Any, prompt: str, *, runtime: Any | None = None
+) -> bool:
     parts = prompt.strip().split()
     if not parts or parts[0].lower() not in {"/mtp", "--mtp"}:
         return False
@@ -5837,7 +6303,9 @@ def _handle_quickstart_mtp_command(args: Any, prompt: str, *, runtime: Any | Non
         )
         return True
     if len(parts) == 2 and parts[1].lower() in {"on", "off"}:
-        requested = GENERATION_MODE_MTP if parts[1].lower() == "on" else GENERATION_MODE_AR
+        requested = (
+            GENERATION_MODE_MTP if parts[1].lower() == "on" else GENERATION_MODE_AR
+        )
         if (
             requested == GENERATION_MODE_MTP
             and runtime is not None
@@ -5944,7 +6412,9 @@ class _QuickstartHeartbeat:
             proc.wait(timeout=1.0)
 
 
-def _quickstart_heartbeat(label: str, *, interval_s: float = 5.0) -> _QuickstartHeartbeat:
+def _quickstart_heartbeat(
+    label: str, *, interval_s: float = 5.0
+) -> _QuickstartHeartbeat:
     return _QuickstartHeartbeat(label, interval_s=interval_s)
 
 
@@ -5981,7 +6451,9 @@ def _quickstart_download_ref(model: str) -> str:
     )
 
 
-def _quickstart_choose_model(args: Any, *, target: str = "terminal") -> tuple[str, bool]:
+def _quickstart_choose_model(
+    args: Any, *, target: str = "terminal"
+) -> tuple[str, bool]:
     model = _quickstart_current_model(args)
     download = bool(getattr(args, "download", False))
     if (
@@ -6001,7 +6473,9 @@ def _quickstart_choose_model(args: Any, *, target: str = "terminal") -> tuple[st
     quality_ref = optimized_quality_model_ref()
     _quickstart_line(f"  2. Optimized Quality ({OPTIMIZED_QUALITY_DESCRIPTION})")
     _quickstart_line("  3. Choose a local model folder")
-    _quickstart_line(f"  4. Download verified default from Hugging Face ({selection.hf_model})")
+    _quickstart_line(
+        f"  4. Download verified default from Hugging Face ({selection.hf_model})"
+    )
     choice = input("Select [1]: ").strip()
     if choice == "2":
         return quality_ref, download
@@ -6013,8 +6487,12 @@ def _quickstart_choose_model(args: Any, *, target: str = "terminal") -> tuple[st
     return model, download
 
 
-def _quickstart_resolve_model(model: str, *, cache_dir: str | None, download: bool) -> tuple[str | None, dict[str, Any]]:
-    runtime_model, resolve_error = _resolve_runtime_model_path(model, cache_dir=cache_dir)
+def _quickstart_resolve_model(
+    model: str, *, cache_dir: str | None, download: bool
+) -> tuple[str | None, dict[str, Any]]:
+    runtime_model, resolve_error = _resolve_runtime_model_path(
+        model, cache_dir=cache_dir
+    )
     if resolve_error is None:
         return runtime_model, {
             "model": model,
@@ -6086,7 +6564,9 @@ def _quickstart_resolve_model(model: str, *, cache_dir: str | None, download: bo
             }
     finally:
         finalize()
-    runtime_model, resolve_error = _resolve_runtime_model_path(download_ref, cache_dir=cache_dir)
+    runtime_model, resolve_error = _resolve_runtime_model_path(
+        download_ref, cache_dir=cache_dir
+    )
     if resolve_error is not None:
         return None, {
             "model": model,
@@ -6113,15 +6593,21 @@ def _quickstart_number(value: Any) -> float | None:
     return None
 
 
-def _quickstart_decode_timing(stats: dict[str, Any]) -> tuple[float | None, float | None]:
+def _quickstart_decode_timing(
+    stats: dict[str, Any],
+) -> tuple[float | None, float | None]:
     generated_tokens = int(stats.get("generated_tokens") or 0)
     elapsed_s = _quickstart_number(stats.get("elapsed_s")) or 0.0
     prompt_eval_time_s = _quickstart_number(stats.get("prompt_eval_time_s"))
     if prompt_eval_time_s is None:
-        target_forward_time_s = _quickstart_number(stats.get("target_forward_time_s")) or 0.0
+        target_forward_time_s = (
+            _quickstart_number(stats.get("target_forward_time_s")) or 0.0
+        )
         verify_time_s = _quickstart_number(stats.get("verify_time_s")) or 0.0
         repair_time_s = _quickstart_number(stats.get("repair_time_s")) or 0.0
-        prompt_eval_time_s = max(0.0, target_forward_time_s - verify_time_s - repair_time_s)
+        prompt_eval_time_s = max(
+            0.0, target_forward_time_s - verify_time_s - repair_time_s
+        )
     decode_elapsed_s = max(0.0, elapsed_s - prompt_eval_time_s)
     if generated_tokens <= 0 or decode_elapsed_s <= 0.0:
         return None, decode_elapsed_s
@@ -6236,13 +6722,17 @@ class _QuickstartTerminalStreamer:
             self._print_label()
             self.started = True
         if self._console is not None:
-            self._console.print(text, end="", soft_wrap=True, highlight=False, markup=False)
+            self._console.print(
+                text, end="", soft_wrap=True, highlight=False, markup=False
+            )
         else:
             print(text, end="", flush=True)
 
     def _print_label(self) -> None:
         if self._console is not None:
-            self._console.print(f"[bold cyan]{self._label}[/bold cyan]", highlight=False)
+            self._console.print(
+                f"[bold cyan]{self._label}[/bold cyan]", highlight=False
+            )
         else:
             print(f"{self._label}:")
 
@@ -6257,7 +6747,11 @@ def _quickstart_stats_line(payload: dict[str, Any]) -> str:
     if decode_tok_s is None:
         decode_tok_s, decode_elapsed_s = _quickstart_decode_timing(stats)
     verify_ms = stats.get("verify_ms_per_call")
-    verify_text = f"{verify_ms:.1f} ms/verify" if isinstance(verify_ms, (int, float)) else "verify n/a"
+    verify_text = (
+        f"{verify_ms:.1f} ms/verify"
+        if isinstance(verify_ms, (int, float))
+        else "verify n/a"
+    )
     if decode_tok_s is not None:
         speed_text = f"{decode_tok_s:.2f} tok/s"
         if stream_tok_s is not None and abs(decode_tok_s - stream_tok_s) >= 0.1:
@@ -6328,7 +6822,9 @@ def _quickstart_generate(
     if include_history:
         messages.extend(history)
     messages.append({"role": "user", "content": prompt})
-    requested_max_tokens = max_tokens if max_tokens is not None else getattr(args, "max_tokens", None)
+    requested_max_tokens = (
+        max_tokens if max_tokens is not None else getattr(args, "max_tokens", None)
+    )
     case = PromptCase(
         id=f"quickstart_{turn_index}",
         category="quickstart",
@@ -6435,15 +6931,23 @@ def _quickstart_generate(
             if generation_mode == GENERATION_MODE_AR
             else dict(getattr(out.stats, "long_context_mtp_depth_policy", {}) or {})
         ),
-        "tok_s": out.stats.tok_s,
-        "end_to_end_tok_s": out.stats.tok_s,
+        "tok_s": getattr(out.stats, "decode_tok_s", out.stats.tok_s),
+        "decode_tok_s": getattr(out.stats, "decode_tok_s", out.stats.tok_s),
+        "decode_elapsed_s": getattr(out.stats, "decode_elapsed_s", None),
+        "end_to_end_tok_s": getattr(out.stats, "end_to_end_tok_s", out.stats.tok_s),
         "elapsed_s": out.stats.elapsed_s,
         "prompt_eval_time_s": out.stats.prompt_eval_time_s,
-        "verify_time_s": 0.0 if generation_mode == GENERATION_MODE_AR else out.stats.verify_time_s,
+        "verify_time_s": 0.0
+        if generation_mode == GENERATION_MODE_AR
+        else out.stats.verify_time_s,
         "target_forward_time_s": out.stats.target_forward_time_s,
         "repair_time_s": out.stats.repair_time_s,
-        "draft_time_s": 0.0 if generation_mode == GENERATION_MODE_AR else out.stats.draft_time_s,
-        "verify_calls": 0 if generation_mode == GENERATION_MODE_AR else out.stats.verify_calls,
+        "draft_time_s": 0.0
+        if generation_mode == GENERATION_MODE_AR
+        else out.stats.draft_time_s,
+        "verify_calls": 0
+        if generation_mode == GENERATION_MODE_AR
+        else out.stats.verify_calls,
         "accepted_by_depth": (
             []
             if generation_mode == GENERATION_MODE_AR
@@ -6461,8 +6965,7 @@ def _quickstart_generate(
         "verify_ms_per_call": (
             None
             if generation_mode == GENERATION_MODE_AR
-            else
-            1000.0 * out.stats.verify_time_s / out.stats.verify_calls
+            else 1000.0 * out.stats.verify_time_s / out.stats.verify_calls
             if out.stats.verify_calls
             else None
         ),
@@ -6560,9 +7063,8 @@ def _quickstart_pi_payload(args: Any, *, write_config: bool = False) -> dict[str
         "api_key": api_key,
         "config_path": str(pi_models_json_path()),
         "provider": provider,
-        "no_hidden_max_tokens": "maxTokens" not in json.dumps(
-            provider.get("models", [])
-        ),
+        "no_hidden_max_tokens": "maxTokens"
+        not in json.dumps(provider.get("models", [])),
         "launch_command": pi_launch_command(model_id),
         "server_console": True,
         "server_controls": [
@@ -6767,9 +7269,13 @@ def _quickstart_print_openwebui_handoff(args: Any, *, runtime_model: str) -> Non
     _quickstart_line()
 
 
-def _quickstart_print_pi_handoff(args: Any, *, runtime_model: str, pi: dict[str, Any]) -> None:
+def _quickstart_print_pi_handoff(
+    args: Any, *, runtime_model: str, pi: dict[str, Any]
+) -> None:
     _quickstart_line("[2/3] Connecting MTPLX to Pi...")
-    config_write = pi.get("config_write") if isinstance(pi.get("config_write"), dict) else {}
+    config_write = (
+        pi.get("config_write") if isinstance(pi.get("config_write"), dict) else {}
+    )
     config_path = config_write.get("config_path") or pi.get("config_path")
     backup_path = config_write.get("backup_path")
     _quickstart_line(f"      Pi config: {config_path}")
@@ -6793,7 +7299,9 @@ def _quickstart_launch_pi_now(*, model_id: str) -> None:
     if result.get("ok"):
         _print_serve_start_line("Opening Pi in Terminal...")
     else:
-        _print_serve_start_line(f"Could not open Pi automatically: {result.get('error')}")
+        _print_serve_start_line(
+            f"Could not open Pi automatically: {result.get('error')}"
+        )
         _print_serve_start_line(f"Run manually: {command}")
 
 
@@ -6813,7 +7321,9 @@ def _quickstart_print_opencode_handoff(
     backup_path = config_write.get("backup_path")
     _quickstart_line(f"      OpenCode config: {config_path}")
     if backup_path:
-        _quickstart_line(f"      Backed up unreadable old OpenCode config: {backup_path}")
+        _quickstart_line(
+            f"      Backed up unreadable old OpenCode config: {backup_path}"
+        )
     _quickstart_line(f"      OpenCode model: {opencode.get('model_ref')}")
     _quickstart_line(f"      API base URL: {opencode.get('api_base_url')}")
     _quickstart_line("      Reasoning: raw reasoning_content stream")
@@ -6831,7 +7341,9 @@ def _quickstart_launch_opencode_now() -> None:
     if result.get("ok"):
         _print_serve_start_line("Opening OpenCode Desktop...")
     else:
-        _print_serve_start_line(f"Could not open OpenCode automatically: {result.get('error')}")
+        _print_serve_start_line(
+            f"Could not open OpenCode automatically: {result.get('error')}"
+        )
         _print_serve_start_line("Open OpenCode manually and select the MTPLX model.")
 
 
@@ -6849,7 +7361,9 @@ def _quickstart_print_swival_handoff(
     _quickstart_line("      Response cap: none hidden by MTPLX")
     _quickstart_line(f"      Loading model: {runtime_model}")
     _quickstart_line("      Keep this terminal open for the MTPLX server.")
-    _quickstart_line(f"      Run Swival in another terminal: {swival.get('launch_command')}")
+    _quickstart_line(
+        f"      Run Swival in another terminal: {swival.get('launch_command')}"
+    )
     _quickstart_line()
 
 
@@ -6864,7 +7378,9 @@ def _quickstart_require_pi_cli(args: Any) -> bool:
     _quickstart_line()
     _quickstart_line("[2/3] Pi is not installed")
     _quickstart_line("      MTPLX has not loaded the model yet.")
-    _quickstart_line("      Install Pi first, then MTPLX will connect it to the local server.")
+    _quickstart_line(
+        "      Install Pi first, then MTPLX will connect it to the local server."
+    )
     _quickstart_line()
     _quickstart_line(f"      Install command: {pi_install_command()}")
     _quickstart_line(f"      Then re-run: {_start_invocation(args, ' pi')}")
@@ -6879,19 +7395,25 @@ def _quickstart_require_pi_cli(args: Any) -> bool:
         _quickstart_line("aborted")
         return False
     if answer not in {"", "y", "yes"}:
-        _quickstart_line("Pi install skipped. Re-run `mtplx start pi` after installing Pi.")
+        _quickstart_line(
+            "Pi install skipped. Re-run `mtplx start pi` after installing Pi."
+        )
         return False
 
     npm = shutil.which("npm")
     if not npm:
-        _quickstart_line("error: npm is not on PATH, so MTPLX cannot install Pi automatically.")
+        _quickstart_line(
+            "error: npm is not on PATH, so MTPLX cannot install Pi automatically."
+        )
         _quickstart_line("Install Node.js/npm, then run:")
         _quickstart_line(f"  {pi_install_command()}")
         return False
 
     _quickstart_line(f"Running: {pi_install_command()}")
     try:
-        result = subprocess.run([npm, "install", "-g", "@earendil-works/pi-coding-agent"], check=False)
+        result = subprocess.run(
+            [npm, "install", "-g", "@earendil-works/pi-coding-agent"], check=False
+        )
     except KeyboardInterrupt:
         _quickstart_line("Pi install cancelled.")
         return False
@@ -6911,7 +7433,9 @@ def _quickstart_require_pi_cli(args: Any) -> bool:
     return True
 
 
-def _quickstart_run_openwebui(args: Any, *, runtime_model: str, inspection: dict[str, Any]) -> int:
+def _quickstart_run_openwebui(
+    args: Any, *, runtime_model: str, inspection: dict[str, Any]
+) -> int:
     _quickstart_print_openwebui_handoff(args, runtime_model=runtime_model)
     serve_args = SimpleNamespace(
         model=runtime_model,
@@ -6945,7 +7469,9 @@ def _quickstart_run_openwebui(args: Any, *, runtime_model: str, inspection: dict
     return cmd_serve_public(serve_args)
 
 
-def _quickstart_run_pi(args: Any, *, runtime_model: str, inspection: dict[str, Any]) -> int:
+def _quickstart_run_pi(
+    args: Any, *, runtime_model: str, inspection: dict[str, Any]
+) -> int:
     if not getattr(args, "api_key", None):
         from mtplx.pi import PI_LOCAL_API_KEY
 
@@ -6985,7 +7511,9 @@ def _quickstart_run_pi(args: Any, *, runtime_model: str, inspection: dict[str, A
     return cmd_serve_public(serve_args)
 
 
-def _quickstart_run_opencode(args: Any, *, runtime_model: str, inspection: dict[str, Any]) -> int:
+def _quickstart_run_opencode(
+    args: Any, *, runtime_model: str, inspection: dict[str, Any]
+) -> int:
     if _reasoning_mode(args, default="auto") in {"auto", "on"}:
         args.reasoning = "on"
     opencode = _quickstart_opencode_payload(
@@ -7032,7 +7560,9 @@ def _quickstart_run_opencode(args: Any, *, runtime_model: str, inspection: dict[
     return cmd_serve_public(serve_args)
 
 
-def _quickstart_run_swival(args: Any, *, runtime_model: str, inspection: dict[str, Any]) -> int:
+def _quickstart_run_swival(
+    args: Any, *, runtime_model: str, inspection: dict[str, Any]
+) -> int:
     swival = _quickstart_swival_payload(args, inspection=inspection)
     _quickstart_print_swival_handoff(
         args,
@@ -7074,7 +7604,9 @@ def _quickstart_run_swival(args: Any, *, runtime_model: str, inspection: dict[st
     return cmd_serve_public(serve_args)
 
 
-def _quickstart_run_terminal_chat(args: Any, *, runtime_model: str, inspection: dict[str, Any]) -> int:
+def _quickstart_run_terminal_chat(
+    args: Any, *, runtime_model: str, inspection: dict[str, Any]
+) -> int:
     max_session: Any | None = None
     if getattr(args, "max", False):
         from mtplx.thermal import MaxSession
@@ -7083,7 +7615,9 @@ def _quickstart_run_terminal_chat(args: Any, *, runtime_model: str, inspection: 
         if not max_session.start():
             verified = max_session.thermal.get("verified") or {}
             _quickstart_line()
-            _quickstart_line("[max] fan boost unavailable; terminal chat will continue without fan boost.")
+            _quickstart_line(
+                "[max] fan boost unavailable; terminal chat will continue without fan boost."
+            )
             if verified.get("message"):
                 _quickstart_line(f"[max] reason: {verified.get('message')}")
             _quickstart_line()
@@ -7100,7 +7634,9 @@ def _quickstart_run_terminal_chat(args: Any, *, runtime_model: str, inspection: 
             max_session.stop()
 
 
-def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspection: dict[str, Any]) -> int:
+def _quickstart_run_terminal_chat_body(
+    args: Any, *, runtime_model: str, inspection: dict[str, Any]
+) -> int:
     profile = get_profile(getattr(args, "profile", None) or DEFAULT_PROFILE_NAME)
     apply_profile_env(profile.name)
     generation_mode = _generation_mode_from_args(args)
@@ -7122,20 +7658,22 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
             mode_label=(
                 "AR target-only"
                 if generation_mode == GENERATION_MODE_AR
-                else
-                _runtime_mode_display(
+                else _runtime_mode_display(
                     profile.name,
                     max_mode=bool(getattr(args, "max", False)),
                     generation_mode=generation_mode,
                 )
             ),
             extra_lines=[
-                ("Sampler", (
-                    f"temp={float(getattr(args, 'temperature', 0.6)):.2f} "
-                    f"top_p={float(getattr(args, 'top_p', 0.95)):.2f} "
-                    f"top_k={int(getattr(args, 'top_k', 20))} "
-                    f"depth={int(getattr(args, 'depth', 3))}"
-                )),
+                (
+                    "Sampler",
+                    (
+                        f"temp={float(getattr(args, 'temperature', 0.6)):.2f} "
+                        f"top_p={float(getattr(args, 'top_p', 0.95)):.2f} "
+                        f"top_k={int(getattr(args, 'top_k', 20))} "
+                        f"depth={int(getattr(args, 'depth', 3))}"
+                    ),
+                ),
                 ("Reasoning", _reasoning_mode(args)),
             ],
         )
@@ -7163,7 +7701,9 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
             group_size=int(draft_lm_head["group_size"]),
             mode=str(draft_lm_head["mode"]),
         )
-        _quickstart_line(f"      draft head ready in {time.perf_counter() - draft_started:.1f}s")
+        _quickstart_line(
+            f"      draft head ready in {time.perf_counter() - draft_started:.1f}s"
+        )
     _quickstart_line(
         f"Sampler: temp={float(getattr(args, 'temperature', 0.6)):.2f} "
         f"top_p={float(getattr(args, 'top_p', 0.95)):.2f} "
@@ -7172,7 +7712,9 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
     _quickstart_line(f"Reasoning: {_reasoning_mode(args)}")
     if draft_report is not None:
         if generation_mode == GENERATION_MODE_AR:
-            _quickstart_line("Draft-only LM head loaded for /mtp on; current AR mode bypasses it.")
+            _quickstart_line(
+                "Draft-only LM head loaded for /mtp on; current AR mode bypasses it."
+            )
         else:
             _quickstart_line("Native-MTP speed path: draft-only LM head is active.")
     if draft_sampler is not None and generation_mode == GENERATION_MODE_MTP:
@@ -7228,12 +7770,11 @@ def _quickstart_run_terminal_chat_body(args: Any, *, runtime_model: str, inspect
         if record_history:
             history.append({"role": "user", "content": prompt})
             history.append({"role": "assistant", "content": text})
-        failures = [
-            row for row in payload["validations"]
-            if not row.get("passed")
-        ]
+        failures = [row for row in payload["validations"] if not row.get("passed")]
         if failures and quality_gate:
-            _quickstart_line("[mtplx] quality warning: response failed a basic output validator")
+            _quickstart_line(
+                "[mtplx] quality warning: response failed a basic output validator"
+            )
             return EXIT_QUALITY
         return 0
 
@@ -7386,6 +7927,7 @@ def _quickstart_apply_tuned_depth(
     if isinstance(depth, int):
         args.depth = depth
 
+
 def cmd_quickstart_public(args: Any) -> int:
     raw_target = getattr(args, "target", None)
 
@@ -7525,7 +8067,9 @@ def cmd_quickstart_public(args: Any) -> int:
         default_selection = None
     cache_dir = getattr(args, "cache_dir", None)
     if getattr(args, "dry_run", False):
-        openwebui = _quickstart_openwebui_payload(args) if target == "openwebui" else None
+        openwebui = (
+            _quickstart_openwebui_payload(args) if target == "openwebui" else None
+        )
         pi = _quickstart_pi_payload(args) if target == "pi" else None
         opencode = _quickstart_opencode_payload(args) if target == "opencode" else None
         swival = _quickstart_swival_payload(args) if target == "swival" else None
@@ -7577,10 +8121,14 @@ def cmd_quickstart_public(args: Any) -> int:
                     generation_mode=str(payload["generation_mode"]),
                 )
             )
-            _quickstart_line(f"generation: {_generation_mode_label(payload['generation_mode'])}")
+            _quickstart_line(
+                f"generation: {_generation_mode_label(payload['generation_mode'])}"
+            )
             _quickstart_line(f"download if missing: {str(download).lower()}")
             if target == "openwebui":
-                _quickstart_line(f"then: start local server -> open browser chat at {openwebui['chat_url']}")
+                _quickstart_line(
+                    f"then: start local server -> open browser chat at {openwebui['chat_url']}"
+                )
             elif target == "opencode":
                 _quickstart_line(
                     f"then: write OpenCode config -> start local server -> open {opencode['model_ref']}"
@@ -7594,7 +8142,9 @@ def cmd_quickstart_public(args: Any) -> int:
                     f"then: write Pi config -> start local server -> run {pi['launch_command']}"
                 )
             else:
-                _quickstart_line("then: load once -> chat in this terminal -> stream output -> show speed stats")
+                _quickstart_line(
+                    "then: load once -> chat in this terminal -> stream output -> show speed stats"
+                )
         return 0
 
     if target == "pi" and not _quickstart_require_pi_cli(args):
@@ -7609,7 +8159,9 @@ def cmd_quickstart_public(args: Any) -> int:
         )
     _quickstart_line(f"[1/4] Checking model: {model}")
     try:
-        runtime_model, resolution = _quickstart_resolve_model(model, cache_dir=cache_dir, download=download)
+        runtime_model, resolution = _quickstart_resolve_model(
+            model, cache_dir=cache_dir, download=download
+        )
     except KeyboardInterrupt:
         _quickstart_line("download cancelled")
         return 130
@@ -7630,10 +8182,10 @@ def cmd_quickstart_public(args: Any) -> int:
             compatibility = gate_inspection.get("compatibility") or {}
             return int(compatibility.get("exit_code") or 1)
         resolution_error = resolution.get("error")
-        if (
-            isinstance(resolution_error, dict)
-            and resolution_error.get("error") not in {None, "model is not available locally"}
-        ):
+        if isinstance(resolution_error, dict) and resolution_error.get("error") not in {
+            None,
+            "model is not available locally",
+        }:
             _print_command_error(
                 resolution_error,
                 command="start",
@@ -7643,14 +8195,24 @@ def cmd_quickstart_public(args: Any) -> int:
         if sys.stdin.isatty() and not getattr(args, "prompt", None):
             try:
                 download_model = _quickstart_download_ref(model)
-                label = "selected model" if download_model == model else "verified default"
+                label = (
+                    "selected model" if download_model == model else "verified default"
+                )
             except ValueError:
                 download_model = select_default_model().hf_model
                 label = "verified default"
-            answer = input(f"Model is missing. Download the {label} ({download_model}) now? [Y/n] ").strip().lower()
+            answer = (
+                input(
+                    f"Model is missing. Download the {label} ({download_model}) now? [Y/n] "
+                )
+                .strip()
+                .lower()
+            )
             if answer in {"", "y", "yes"}:
                 try:
-                    runtime_model, resolution = _quickstart_resolve_model(download_model, cache_dir=cache_dir, download=True)
+                    runtime_model, resolution = _quickstart_resolve_model(
+                        download_model, cache_dir=cache_dir, download=True
+                    )
                 except KeyboardInterrupt:
                     _quickstart_line("download cancelled")
                     return 130
@@ -7673,7 +8235,8 @@ def cmd_quickstart_public(args: Any) -> int:
         if (
             runtime_model is None
             and isinstance(resolution_error, dict)
-            and resolution_error.get("error") not in {None, "model is not available locally"}
+            and resolution_error.get("error")
+            not in {None, "model is not available locally"}
         ):
             _print_command_error(
                 resolution_error,
@@ -7687,7 +8250,9 @@ def cmd_quickstart_public(args: Any) -> int:
                 _quickstart_line(f"downloaded: {resolution.get('download_ref')}")
             inspection, gate_exit = _model_gate(
                 runtime_model,
-                unsafe_force_unverified=bool(getattr(args, "unsafe_force_unverified", False)),
+                unsafe_force_unverified=bool(
+                    getattr(args, "unsafe_force_unverified", False)
+                ),
                 yes=bool(getattr(args, "yes", False)),
             )
             if gate_exit is not None:
@@ -7702,22 +8267,38 @@ def cmd_quickstart_public(args: Any) -> int:
                 args,
                 runtime_model=runtime_model,
                 target=target,
-                can_prompt=bool(getattr(args, "_onboarded", False) and is_tty and not is_yes),
+                can_prompt=bool(
+                    getattr(args, "_onboarded", False) and is_tty and not is_yes
+                ),
             )
             if target == "openwebui":
                 args.model = runtime_model
-                return _quickstart_run_openwebui(args, runtime_model=runtime_model, inspection=inspection)
+                return _quickstart_run_openwebui(
+                    args, runtime_model=runtime_model, inspection=inspection
+                )
             if target == "pi":
                 args.model = runtime_model
-                return _quickstart_run_pi(args, runtime_model=runtime_model, inspection=inspection)
+                return _quickstart_run_pi(
+                    args, runtime_model=runtime_model, inspection=inspection
+                )
             if target == "opencode":
                 args.model = runtime_model
-                return _quickstart_run_opencode(args, runtime_model=runtime_model, inspection=inspection)
+                return _quickstart_run_opencode(
+                    args, runtime_model=runtime_model, inspection=inspection
+                )
             if target == "swival":
                 args.model = runtime_model
-                return _quickstart_run_swival(args, runtime_model=runtime_model, inspection=inspection)
-            return _quickstart_run_terminal_chat(args, runtime_model=runtime_model, inspection=inspection)
-        detail = (resolution.get("error") or {}).get("detail") if isinstance(resolution.get("error"), dict) else None
+                return _quickstart_run_swival(
+                    args, runtime_model=runtime_model, inspection=inspection
+                )
+            return _quickstart_run_terminal_chat(
+                args, runtime_model=runtime_model, inspection=inspection
+            )
+        detail = (
+            (resolution.get("error") or {}).get("detail")
+            if isinstance(resolution.get("error"), dict)
+            else None
+        )
         _quickstart_line("model is not available locally")
         if detail:
             _quickstart_line(f"detail: {detail}")
@@ -7754,17 +8335,27 @@ def cmd_quickstart_public(args: Any) -> int:
         _quickstart_line(f"downloaded: {resolution.get('download_ref')}")
     if target == "openwebui":
         args.model = runtime_model
-        return _quickstart_run_openwebui(args, runtime_model=runtime_model, inspection=inspection)
+        return _quickstart_run_openwebui(
+            args, runtime_model=runtime_model, inspection=inspection
+        )
     if target == "pi":
         args.model = runtime_model
-        return _quickstart_run_pi(args, runtime_model=runtime_model, inspection=inspection)
+        return _quickstart_run_pi(
+            args, runtime_model=runtime_model, inspection=inspection
+        )
     if target == "opencode":
         args.model = runtime_model
-        return _quickstart_run_opencode(args, runtime_model=runtime_model, inspection=inspection)
+        return _quickstart_run_opencode(
+            args, runtime_model=runtime_model, inspection=inspection
+        )
     if target == "swival":
         args.model = runtime_model
-        return _quickstart_run_swival(args, runtime_model=runtime_model, inspection=inspection)
-    return _quickstart_run_terminal_chat(args, runtime_model=runtime_model, inspection=inspection)
+        return _quickstart_run_swival(
+            args, runtime_model=runtime_model, inspection=inspection
+        )
+    return _quickstart_run_terminal_chat(
+        args, runtime_model=runtime_model, inspection=inspection
+    )
 
 
 def cmd_metrics_public(args: Any) -> int:
@@ -7775,7 +8366,9 @@ def cmd_metrics_public(args: Any) -> int:
     interval = float(getattr(args, "interval", 1.0))
     seen = 0
     while True:
-        payload = _http_json(base + "/metrics", timeout=float(getattr(args, "timeout", 5.0)))
+        payload = _http_json(
+            base + "/metrics", timeout=float(getattr(args, "timeout", 5.0))
+        )
         latest = payload.get("latest") if isinstance(payload, dict) else None
         row = {
             "url": base + "/metrics",
@@ -7790,9 +8383,17 @@ def cmd_metrics_public(args: Any) -> int:
                 if isinstance(payload, dict) and payload.get("detail"):
                     print(f"detail: {payload.get('detail')}")
             elif latest:
-                tok_s = latest.get("tok_s") or latest.get("decode_tok_s") or latest.get("server_tok_s")
-                generated = latest.get("completion_tokens") or latest.get("generated_tokens")
-                verify_ms = latest.get("verify_ms_per_call") or latest.get("late_verify_ms")
+                tok_s = (
+                    latest.get("tok_s")
+                    or latest.get("decode_tok_s")
+                    or latest.get("server_tok_s")
+                )
+                generated = latest.get("completion_tokens") or latest.get(
+                    "generated_tokens"
+                )
+                verify_ms = latest.get("verify_ms_per_call") or latest.get(
+                    "late_verify_ms"
+                )
                 cache_ratio = latest.get("cache_ratio")
                 print(
                     "tok_s={tok_s} tokens={tokens} verify_ms={verify_ms} cache_ratio={cache_ratio}".format(
@@ -7897,7 +8498,9 @@ def cmd_integrate_public(args: Any) -> int:
                         "name": "MTPLX (local)",
                         "options": {
                             "baseURL": api_base_url,
-                            "apiKey": str(getattr(args, "api_key", None) or "mtplx-local"),
+                            "apiKey": str(
+                                getattr(args, "api_key", None) or "mtplx-local"
+                            ),
                             "timeout": False,
                             "chunkTimeout": 900000,
                         },
@@ -7933,7 +8536,11 @@ def cmd_integrate_public(args: Any) -> int:
             ],
         }
     elif action == "swival":
-        from mtplx.swival import build_swival_command, detect_swival_cli, shell_swival_command
+        from mtplx.swival import (
+            build_swival_command,
+            detect_swival_cli,
+            shell_swival_command,
+        )
 
         context_window = int(getattr(args, "context_window", None) or 262144)
         payload = {
@@ -7975,7 +8582,9 @@ def cmd_integrate_public(args: Any) -> int:
         _print(payload)
     else:
         print(f"MTPLX connect: {action}")
-        print(f"base URL: {api_base_url if action in {'openwebui', 'opencode'} else server_url}")
+        print(
+            f"base URL: {api_base_url if action in {'openwebui', 'opencode'} else server_url}"
+        )
         print(f"model: {model_id}")
         print(f"start server: {payload.get('server_command')}")
         if action == "openwebui":
@@ -8001,8 +8610,12 @@ def cmd_integrate_public(args: Any) -> int:
                 print(f"  {key}={value}")
         smoke = payload.get("smoke_result")
         if isinstance(smoke, dict):
-            health = smoke.get("health") if isinstance(smoke.get("health"), dict) else {}
-            models = smoke.get("models") if isinstance(smoke.get("models"), dict) else {}
+            health = (
+                smoke.get("health") if isinstance(smoke.get("health"), dict) else {}
+            )
+            models = (
+                smoke.get("models") if isinstance(smoke.get("models"), dict) else {}
+            )
             print("smoke:")
             print(f"  health: {'ok' if health.get('ok') else 'failed'}")
             data = models.get("data") if isinstance(models, dict) else None
@@ -8043,13 +8656,17 @@ def cmd_openwebui_public(args: Any) -> int:
     else:
         print(payload["docker_command"])
         print(f"Open WebUI: {payload['openwebui_url']}")
-        print(f"MTPLX API from container: {payload['mtplx_api_base_url_for_container']}")
+        print(
+            f"MTPLX API from container: {payload['mtplx_api_base_url_for_container']}"
+        )
         if payload["single_user_warning"]:
             print(f"warning: {payload['single_user_warning']}")
     return 0
 
 
-def _write_fixture_runtime_contract(path: Path, *, arch_id: str, profile: str = DEFAULT_PROFILE_NAME) -> None:
+def _write_fixture_runtime_contract(
+    path: Path, *, arch_id: str, profile: str = DEFAULT_PROFILE_NAME
+) -> None:
     write_json(
         path / "mtplx_runtime.json",
         {
@@ -8396,11 +9013,15 @@ def _compact_qa_observed(inspection: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _qa_expectation_passed(observed: dict[str, Any], expected: dict[str, Any]) -> tuple[bool, list[str]]:
+def _qa_expectation_passed(
+    observed: dict[str, Any], expected: dict[str, Any]
+) -> tuple[bool, list[str]]:
     failures = []
     for key, expected_value in expected.items():
         if observed.get(key) != expected_value:
-            failures.append(f"{key}: expected {expected_value!r}, got {observed.get(key)!r}")
+            failures.append(
+                f"{key}: expected {expected_value!r}, got {observed.get(key)!r}"
+            )
     return not failures, failures
 
 
@@ -8413,7 +9034,9 @@ def _run_architecture_fixture_qa() -> list[dict[str, Any]]:
             model_dir.mkdir(parents=True, exist_ok=True)
             write_json(model_dir / "config.json", spec["config"])
             if spec.get("contract"):
-                _write_fixture_runtime_contract(model_dir, arch_id=str(spec["contract"]))
+                _write_fixture_runtime_contract(
+                    model_dir, arch_id=str(spec["contract"])
+                )
             for filename, keys in (spec.get("safetensors") or {}).items():
                 _write_fixture_weights(model_dir / filename, list(keys))
             try:
@@ -8500,12 +9123,12 @@ def _cmd_model_qa_architectures(args: Any) -> int:
     )
     gates = {
         "catalog_has_main_families": required_catalog.issubset(ids),
-        "verified_contract_gated_families_listed": required_verified.issubset(verified_ids),
+        "verified_contract_gated_families_listed": required_verified.issubset(
+            verified_ids
+        ),
         "fixture_inspections_passed": all(row["passed"] for row in fixture_rows),
         "runtime_import_smoke_passed": (
-            all(row["passed"] for row in runtime_smokes)
-            if runtime_smokes
-            else True
+            all(row["passed"] for row in runtime_smokes) if runtime_smokes else True
         ),
     }
     payload = {
@@ -8558,7 +9181,9 @@ def cmd_model_public(args: Any) -> int:
         else:
             print("MTPLX architecture support")
             for row in rows:
-                status = "runnable" if row.get("can_run_verified") else "backend-pending"
+                status = (
+                    "runnable" if row.get("can_run_verified") else "backend-pending"
+                )
                 print(
                     f"- {row['arch_id']}: {row['display_name']} "
                     f"({status}, backend={row.get('backend') or 'none'})"
@@ -8571,7 +9196,11 @@ def cmd_model_public(args: Any) -> int:
     staging = Path(args.staging_dir)
     manifest_path = staging / "MTPLX_PUBLISH_MANIFEST.json"
     runtime_contract_path = staging / "mtplx_runtime.json"
-    symlinks = [str(path) for path in staging.iterdir() if path.is_symlink()] if staging.exists() else []
+    symlinks = (
+        [str(path) for path in staging.iterdir() if path.is_symlink()]
+        if staging.exists()
+        else []
+    )
     manifest: dict[str, Any] | None = None
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -8637,7 +9266,9 @@ def cmd_config_public(args: Any) -> int:
     }
     key = str(args.key).strip()
     if key not in values:
-        raise SystemExit("config set key must be one of: model, model_dir, profile, thermal_control")
+        raise SystemExit(
+            "config set key must be one of: model, model_dir, profile, thermal_control"
+        )
     value = str(args.value).strip()
     if key == "profile":
         value = resolve_profile_name(value)
@@ -8677,8 +9308,16 @@ def _hotpath_boundary_report() -> dict[str, Any]:
         "paged_cache": root / "mtplx" / "cache_state.py",
         "paged_sdpa": root / "mtplx" / "kernels" / "sdpa_2pass_paged.py",
         "verify_qmv": root / "mtplx" / "verify_qmv.py",
-        "native_mlp_cpp": root / "native_extensions" / "verify_mlp" / "gate_up" / "gate_up.cpp",
-        "native_gdn_cpp": root / "native_extensions" / "verify_mlp" / "gdn_tail" / "gdn_tail.cpp",
+        "native_mlp_cpp": root
+        / "native_extensions"
+        / "verify_mlp"
+        / "gate_up"
+        / "gate_up.cpp",
+        "native_gdn_cpp": root
+        / "native_extensions"
+        / "verify_mlp"
+        / "gdn_tail"
+        / "gdn_tail.cpp",
         "logits_topk": root / "mtplx" / "kernels" / "logits_topk.py",
     }
     boundaries = [
@@ -8764,10 +9403,18 @@ def _hotpath_boundary_report() -> dict[str, Any]:
         },
     ]
     raw_sync_markers = {
-        "explicit_mx_synchronize_in_cache_state": _source_contains(paths["paged_cache"], "mx.synchronize()"),
-        "external_partitioned_raw_call_present": _source_contains(paths["paged_cache"], "paged_attention_v2_online_partitioned"),
-        "native_mlp_is_mlx_primitive": _source_contains(paths["native_mlp_cpp"], "std::make_shared<GateUpSwiGLU"),
-        "native_gdn_is_mlx_primitive": _source_contains(paths["native_gdn_cpp"], "std::make_shared<GdnNormGateOutQMV8"),
+        "explicit_mx_synchronize_in_cache_state": _source_contains(
+            paths["paged_cache"], "mx.synchronize()"
+        ),
+        "external_partitioned_raw_call_present": _source_contains(
+            paths["paged_cache"], "paged_attention_v2_online_partitioned"
+        ),
+        "native_mlp_is_mlx_primitive": _source_contains(
+            paths["native_mlp_cpp"], "std::make_shared<GateUpSwiGLU"
+        ),
+        "native_gdn_is_mlx_primitive": _source_contains(
+            paths["native_gdn_cpp"], "std::make_shared<GdnNormGateOutQMV8"
+        ),
     }
     return {
         "action": "debug hotpath",
@@ -8826,7 +9473,10 @@ def cmd_debug_public(args: Any) -> int:
     }
     doctor = _deep_doctor_report(doctor_args, doctor)
     _write_json_redacted(out_dir / "doctor.json", doctor)
-    _write_json_redacted(out_dir / "metrics.json", _http_json(args.url.rstrip("/") + "/metrics") if args.url else {})
+    _write_json_redacted(
+        out_dir / "metrics.json",
+        _http_json(args.url.rstrip("/") + "/metrics") if args.url else {},
+    )
     _write_json_redacted(
         out_dir / "summary.json",
         {

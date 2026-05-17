@@ -526,6 +526,38 @@ def test_set_thermal_profile_verified_fails_when_daemon_ignores_command(monkeypa
     thermal.detect_thermal_control.cache_clear()
 
 
+def test_set_thermal_profile_verified_warns_not_to_run_tune_with_sudo(monkeypatch):
+    thermal.detect_thermal_control.cache_clear()
+    monkeypatch.setattr(thermal, "_find_thermalforge", lambda: "/usr/local/bin/thermalforge")
+    status = (
+        '{"fans": ['
+        '{"actual_rpm": 1850, "target_rpm": 2317, "max_rpm": 7826, "mode": "auto", "index": 0}'
+        ']}'
+    )
+
+    def fake_run(command, *, timeout_s=None, cwd=None):
+        if command and command[-1] == "status":
+            return {"command": command, "returncode": 0, "ok": True, "stdout": status, "stderr": ""}
+        return {
+            "command": command,
+            "returncode": 1,
+            "ok": False,
+            "stdout": "",
+            "stderr": "Error: Fan unlock failed: Failed to write Ftst=1. Run with sudo.",
+        }
+
+    monkeypatch.setattr(thermal, "_run_probe", fake_run)
+
+    result = thermal.set_thermal_profile_verified("performance", settle_seconds=0)
+
+    actionable = result.get("actionable") or ""
+    assert result["ok"] is False
+    assert "Do not run `sudo mtplx tune`" in actionable
+    assert "mtplx max --grant-sudo" in actionable
+    assert "Then re-run `mtplx tune` as your normal user" in actionable
+    thermal.detect_thermal_control.cache_clear()
+
+
 def test_set_thermal_profile_verified_handles_no_tool(monkeypatch):
     monkeypatch.setattr(thermal, "_find_thermalforge", lambda: None)
     monkeypatch.setattr(thermal.shutil, "which", lambda name: None)

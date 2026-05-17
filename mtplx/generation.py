@@ -73,7 +73,9 @@ def _eval_value_summary(value: Any) -> dict[str, Any]:
         return {
             "type": "dict",
             "keys": [str(key) for key in value.keys()],
-            "items": {str(key): _eval_value_summary(item) for key, item in value.items()},
+            "items": {
+                str(key): _eval_value_summary(item) for key, item in value.items()
+            },
         }
     if isinstance(value, (list, tuple)):
         return {
@@ -133,6 +135,26 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name, str(default)))
     except (TypeError, ValueError):
         return int(default)
+
+
+def _generation_rate_fields(
+    *,
+    generated_tokens: int,
+    elapsed_s: float,
+    prompt_eval_time_s: float,
+) -> dict[str, float]:
+    end_to_end_tok_s = generated_tokens / elapsed_s if elapsed_s > 0.0 else 0.0
+    prompt_elapsed_s = min(max(0.0, prompt_eval_time_s), max(0.0, elapsed_s))
+    decode_elapsed_s = max(0.0, elapsed_s - prompt_elapsed_s)
+    decode_tok_s = (
+        generated_tokens / decode_elapsed_s if decode_elapsed_s > 0.0 else 0.0
+    )
+    return {
+        "tok_s": decode_tok_s,
+        "decode_elapsed_s": decode_elapsed_s,
+        "decode_tok_s": decode_tok_s,
+        "end_to_end_tok_s": end_to_end_tok_s,
+    }
 
 
 def _normalize_mtp_history_policy(policy: str | None) -> str:
@@ -202,8 +224,7 @@ def _runtime_counter_delta(
     current = getattr(rt, "diagnostic_counters", {})
     keys = set(before) | set(current)
     return {
-        str(key): int(current.get(key, 0)) - int(before.get(key, 0))
-        for key in keys
+        str(key): int(current.get(key, 0)) - int(before.get(key, 0)) for key in keys
     }
 
 
@@ -224,8 +245,12 @@ def _attach_runtime_diagnostics(
     stats.make_mtp_cache_calls = int(counters.get("make_mtp_cache_calls", 0))
     stats.update_mtp_cache_calls = int(counters.get("update_mtp_cache_calls", 0))
     stats.mtp_history_append_calls = int(counters.get("mtp_history_append_calls", 0))
-    stats.full_logits_tokens_emitted = int(counters.get("full_logits_tokens_emitted", 0))
-    stats.final_logits_tokens_emitted = int(counters.get("final_logits_tokens_emitted", 0))
+    stats.full_logits_tokens_emitted = int(
+        counters.get("full_logits_tokens_emitted", 0)
+    )
+    stats.final_logits_tokens_emitted = int(
+        counters.get("final_logits_tokens_emitted", 0)
+    )
     stats.logits_tokens_emitted = int(counters.get("logits_tokens_emitted", 0))
     stats.prefill_chunks = int(counters.get("prefill_chunks", 0))
     stats.prefill_chunk_size = _prefill_chunk_size()
@@ -242,9 +267,7 @@ def _attach_runtime_diagnostics(
     stats.prefill_omlx_external_calls = int(
         counters.get("prefill_omlx_external_calls", 0)
     )
-    stats.prefill_external_emit_logits_enabled = (
-        _prefill_external_emit_logits_enabled()
-    )
+    stats.prefill_external_emit_logits_enabled = _prefill_external_emit_logits_enabled()
     stats.prefill_external_cache_only_calls = int(
         counters.get("prefill_external_cache_only_calls", 0)
     )
@@ -261,9 +284,7 @@ def _attach_runtime_diagnostics(
     stats.decode_dense_fallback_calls = int(
         owned_attn.get("decode_dense_fallback_calls") or 0
     )
-    stats.ar_dense_fallback_calls = int(
-        owned_attn.get("ar_dense_fallback_calls") or 0
-    )
+    stats.ar_dense_fallback_calls = int(owned_attn.get("ar_dense_fallback_calls") or 0)
     stats.postcommit_dense_fallback_calls = int(
         owned_attn.get("postcommit_dense_fallback_calls") or 0
     )
@@ -294,9 +315,7 @@ def _attach_runtime_diagnostics(
     stats.decode_large_q_split_sdpa_fallback_calls = int(
         owned_attn.get("decode_large_q_split_sdpa_fallback_calls") or 0
     )
-    stats.partitioned_paged_calls = int(
-        owned_attn.get("partitioned_paged_calls") or 0
-    )
+    stats.partitioned_paged_calls = int(owned_attn.get("partitioned_paged_calls") or 0)
     partitioned_by_phase = owned_attn.get("partitioned_paged_calls_by_phase") or {}
     stats.partitioned_paged_calls_by_phase = (
         dict(partitioned_by_phase) if isinstance(partitioned_by_phase, dict) else {}
@@ -340,9 +359,9 @@ def _prefill_chunk_cache_cleanup(rt: MTPLXRuntime) -> float:
     if not _prefill_chunk_cache_cleanup_enabled():
         return 0.0
     every = _prefill_chunk_cache_cleanup_every()
-    pending = int(
-        rt.diagnostic_counters.get("_prefill_chunks_since_cache_cleanup", 0)
-    ) + 1
+    pending = (
+        int(rt.diagnostic_counters.get("_prefill_chunks_since_cache_cleanup", 0)) + 1
+    )
     rt.diagnostic_counters["_prefill_chunks_since_cache_cleanup"] = pending
     if pending < every:
         return 0.0
@@ -457,7 +476,10 @@ def _iter_prefill_chunks(token_ids: list[int]) -> list[list[int]]:
     if not _sustained_prefill_enabled():
         return [token_ids]
     chunk_size = _prefill_chunk_size()
-    return [token_ids[start : start + chunk_size] for start in range(0, len(token_ids), chunk_size)]
+    return [
+        token_ids[start : start + chunk_size]
+        for start in range(0, len(token_ids), chunk_size)
+    ]
 
 
 def _iter_prefill_chunk_spans(token_count: int) -> list[tuple[int, int]]:
@@ -499,8 +521,11 @@ def _defer_verify_hidden_eval_enabled() -> bool:
 
 def _verify_hidden_mode() -> str:
     raw = (
-        os.environ.get("MTPLX_VERIFY_HIDDEN_MODE") or "default"
-    ).strip().lower().replace("-", "_")
+        (os.environ.get("MTPLX_VERIFY_HIDDEN_MODE") or "default")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
     return raw or "default"
 
 
@@ -596,7 +621,9 @@ def _eval_cache_roots(cache: Any) -> None:
         _eval(*deduped, _caller_depth=2)
 
 
-def _eval_verify_outputs(verify_logits: mx.array, verify_hidden: mx.array, captures: Any | None = None) -> dict[str, float]:
+def _eval_verify_outputs(
+    verify_logits: mx.array, verify_hidden: mx.array, captures: Any | None = None
+) -> dict[str, float]:
     # Keep capture tensors lazy; commit_captured_prefix materializes only the selected prefix slice.
     timings = {
         "verify_logits_eval_time_s": 0.0,
@@ -643,7 +670,9 @@ def _tree_nbytes(value: Any, seen: set[int] | None = None) -> int:
     if isinstance(value, (list, tuple, set)):
         return sum(_tree_nbytes(item, seen) for item in value)
     if is_dataclass(value) and not isinstance(value, type):
-        return sum(_tree_nbytes(getattr(value, item.name), seen) for item in fields(value))
+        return sum(
+            _tree_nbytes(getattr(value, item.name), seen) for item in fields(value)
+        )
     attrs = getattr(value, "__dict__", None)
     if isinstance(attrs, dict):
         return sum(_tree_nbytes(item, seen) for item in attrs.values())
@@ -788,10 +817,7 @@ class _DecodeTrace:
         value = totals[key]
         previous = self.last_totals[key]
         if isinstance(value, list):
-            return [
-                (float(item) - float(prev))
-                for item, prev in zip(value, previous)
-            ]
+            return [(float(item) - float(prev)) for item, prev in zip(value, previous)]
         return value - previous
 
     def maybe_emit(
@@ -823,20 +849,16 @@ class _DecodeTrace:
             for item in self._delta(totals, "accept_probability_sum_by_depth")
         ]
         acceptance_rate_by_depth_delta = [
-            (
-                float(accepted) / int(drafted)
-                if drafted
-                else None
+            (float(accepted) / int(drafted) if drafted else None)
+            for accepted, drafted in zip(
+                accepted_by_depth_delta, drafted_by_depth_delta
             )
-            for accepted, drafted in zip(accepted_by_depth_delta, drafted_by_depth_delta)
         ]
         mean_accept_probability_by_depth_delta = [
-            (
-                float(total) / int(drafted)
-                if drafted
-                else None
+            (float(total) / int(drafted) if drafted else None)
+            for total, drafted in zip(
+                accept_probability_sum_delta, drafted_by_depth_delta
             )
-            for total, drafted in zip(accept_probability_sum_delta, drafted_by_depth_delta)
         ]
         verify_calls_delta = int(self._delta(totals, "verify_calls"))
         accepted_drafts_delta = int(self._delta(totals, "accepted_drafts"))
@@ -844,9 +866,15 @@ class _DecodeTrace:
         verify_time_delta = float(self._delta(totals, "verify_time_s"))
         verify_forward_time_delta = float(self._delta(totals, "verify_forward_time_s"))
         verify_eval_time_delta = float(self._delta(totals, "verify_eval_time_s"))
-        verify_logits_eval_time_delta = float(self._delta(totals, "verify_logits_eval_time_s"))
-        verify_hidden_eval_time_delta = float(self._delta(totals, "verify_hidden_eval_time_s"))
-        verify_joint_eval_time_delta = float(self._delta(totals, "verify_joint_eval_time_s"))
+        verify_logits_eval_time_delta = float(
+            self._delta(totals, "verify_logits_eval_time_s")
+        )
+        verify_hidden_eval_time_delta = float(
+            self._delta(totals, "verify_hidden_eval_time_s")
+        )
+        verify_joint_eval_time_delta = float(
+            self._delta(totals, "verify_joint_eval_time_s")
+        )
         verify_target_distribution_time_delta = float(
             self._delta(totals, "verify_target_distribution_time_s")
         )
@@ -866,10 +894,18 @@ class _DecodeTrace:
         dirty_detach_time_delta = float(self._delta(totals, "dirty_detach_time_s"))
         dirty_detach_arrays_delta = int(self._delta(totals, "dirty_detach_arrays"))
         dirty_detach_bytes_delta = int(self._delta(totals, "dirty_detach_bytes"))
-        live_output_detach_events_delta = int(self._delta(totals, "live_output_detach_events"))
-        live_output_detach_time_delta = float(self._delta(totals, "live_output_detach_time_s"))
-        live_output_detach_arrays_delta = int(self._delta(totals, "live_output_detach_arrays"))
-        live_output_detach_bytes_delta = int(self._delta(totals, "live_output_detach_bytes"))
+        live_output_detach_events_delta = int(
+            self._delta(totals, "live_output_detach_events")
+        )
+        live_output_detach_time_delta = float(
+            self._delta(totals, "live_output_detach_time_s")
+        )
+        live_output_detach_arrays_delta = int(
+            self._delta(totals, "live_output_detach_arrays")
+        )
+        live_output_detach_bytes_delta = int(
+            self._delta(totals, "live_output_detach_bytes")
+        )
         state_rebase_events_delta = int(self._delta(totals, "state_rebase_events"))
         state_rebase_time_delta = float(self._delta(totals, "state_rebase_time_s"))
         state_root_eval_events_delta = int(
@@ -881,11 +917,19 @@ class _DecodeTrace:
         state_root_eval_arrays_delta = int(
             self._delta(totals, "state_root_eval_arrays")
         )
-        trace_accounting_time_delta = float(self._delta(totals, "trace_accounting_time_s"))
+        trace_accounting_time_delta = float(
+            self._delta(totals, "trace_accounting_time_s")
+        )
         bytes_delta = {
-            "verify_output_nbytes_delta": int(self._delta(totals, "verify_output_nbytes")),
-            "draft_output_nbytes_delta": int(self._delta(totals, "draft_output_nbytes")),
-            "mtp_history_append_nbytes_delta": int(self._delta(totals, "mtp_history_append_nbytes")),
+            "verify_output_nbytes_delta": int(
+                self._delta(totals, "verify_output_nbytes")
+            ),
+            "draft_output_nbytes_delta": int(
+                self._delta(totals, "draft_output_nbytes")
+            ),
+            "mtp_history_append_nbytes_delta": int(
+                self._delta(totals, "mtp_history_append_nbytes")
+            ),
         }
         materialized_nbytes = sum(bytes_delta.values())
         row = {
@@ -920,9 +964,13 @@ class _DecodeTrace:
                 if drafted_tokens_delta
                 else None
             ),
-            "accepted_by_depth_total": [int(item) for item in totals["accepted_by_depth"]],
+            "accepted_by_depth_total": [
+                int(item) for item in totals["accepted_by_depth"]
+            ],
             "accepted_by_depth_delta": accepted_by_depth_delta,
-            "drafted_by_depth_total": [int(item) for item in totals["drafted_by_depth"]],
+            "drafted_by_depth_total": [
+                int(item) for item in totals["drafted_by_depth"]
+            ],
             "drafted_by_depth_delta": drafted_by_depth_delta,
             "acceptance_rate_by_depth_delta": acceptance_rate_by_depth_delta,
             "mean_accept_probability_by_depth_delta": mean_accept_probability_by_depth_delta,
@@ -941,7 +989,9 @@ class _DecodeTrace:
             "accept_time_s_delta": float(self._delta(totals, "accept_time_s")),
             "repair_time_s_delta": float(self._delta(totals, "repair_time_s")),
             "commit_time_s_delta": float(self._delta(totals, "commit_time_s")),
-            "capture_commit_time_s_delta": float(self._delta(totals, "capture_commit_time_s")),
+            "capture_commit_time_s_delta": float(
+                self._delta(totals, "capture_commit_time_s")
+            ),
             "snapshot_time_s_delta": float(self._delta(totals, "snapshot_time_s")),
             "bonus_time_s_delta": float(self._delta(totals, "bonus_time_s")),
             "verify_ms_per_call_delta": (
@@ -992,9 +1042,7 @@ class _DecodeTrace:
             **bytes_delta,
             "estimated_materialized_nbytes_delta": materialized_nbytes,
             "estimated_materialized_gib_s": (
-                (materialized_nbytes / (1024**3)) / elapsed_s
-                if elapsed_s > 0
-                else None
+                (materialized_nbytes / (1024**3)) / elapsed_s if elapsed_s > 0 else None
             ),
             "cache_state_nbytes": _tree_nbytes(cache),
             "mtp_cache_state_nbytes": _tree_nbytes(mtp_cache),
@@ -1003,7 +1051,9 @@ class _DecodeTrace:
             "defer_verify_hidden_eval": _defer_verify_hidden_eval_enabled(),
             "verify_hidden_mode": _verify_hidden_mode(),
             "split_verify_eval": bool(os.environ.get("MTPLX_SPLIT_VERIFY_EVAL")),
-            "lazy_mtp_history_append": bool(os.environ.get("MTPLX_LAZY_MTP_HISTORY_APPEND")),
+            "lazy_mtp_history_append": bool(
+                os.environ.get("MTPLX_LAZY_MTP_HISTORY_APPEND")
+            ),
             "batch_target_arrays": bool(os.environ.get("MTPLX_BATCH_TARGET_ARRAYS")),
             "drop_events": bool(os.environ.get("MTPLX_DROP_EVENTS")),
             "skip_verify_snapshot": bool(os.environ.get("MTPLX_SKIP_VERIFY_SNAPSHOT")),
@@ -1027,9 +1077,15 @@ class _DecodeTrace:
             "trunk_cache_materialize_time_s_delta": trunk_cache_materialize_time_delta,
             "dirty_detach_components": os.environ.get("MTPLX_DETACH_COMPONENTS"),
             "dirty_detach_mode": os.environ.get("MTPLX_DETACH_MODE"),
-            "dirty_detach_gdn_every": int(os.environ.get("MTPLX_DETACH_GDN_EVERY") or 0),
-            "dirty_detach_conv_every": int(os.environ.get("MTPLX_DETACH_CONV_EVERY") or 0),
-            "dirty_detach_attn_every": int(os.environ.get("MTPLX_DETACH_ATTN_EVERY") or 0),
+            "dirty_detach_gdn_every": int(
+                os.environ.get("MTPLX_DETACH_GDN_EVERY") or 0
+            ),
+            "dirty_detach_conv_every": int(
+                os.environ.get("MTPLX_DETACH_CONV_EVERY") or 0
+            ),
+            "dirty_detach_attn_every": int(
+                os.environ.get("MTPLX_DETACH_ATTN_EVERY") or 0
+            ),
             "dirty_detach_events_total": int(totals["dirty_detach_events"]),
             "dirty_detach_events_delta": dirty_detach_events_delta,
             "dirty_detach_time_s_total": float(totals["dirty_detach_time_s"]),
@@ -1038,11 +1094,15 @@ class _DecodeTrace:
             "dirty_detach_arrays_delta": dirty_detach_arrays_delta,
             "dirty_detach_bytes_total": int(totals["dirty_detach_bytes"]),
             "dirty_detach_bytes_delta": dirty_detach_bytes_delta,
-            "live_output_detach_enabled": bool(os.environ.get("MTPLX_DETACH_LIVE_OUTPUTS")),
+            "live_output_detach_enabled": bool(
+                os.environ.get("MTPLX_DETACH_LIVE_OUTPUTS")
+            ),
             "live_output_detach_mode": os.environ.get("MTPLX_DETACH_LIVE_OUTPUTS_MODE"),
             "live_output_detach_events_total": int(totals["live_output_detach_events"]),
             "live_output_detach_events_delta": live_output_detach_events_delta,
-            "live_output_detach_time_s_total": float(totals["live_output_detach_time_s"]),
+            "live_output_detach_time_s_total": float(
+                totals["live_output_detach_time_s"]
+            ),
             "live_output_detach_time_s_delta": live_output_detach_time_delta,
             "live_output_detach_arrays_total": int(totals["live_output_detach_arrays"]),
             "live_output_detach_arrays_delta": live_output_detach_arrays_delta,
@@ -1077,7 +1137,9 @@ class _DecodeTrace:
             "sampler": {
                 "temperature": float(self.sampler.temperature),
                 "top_p": float(self.sampler.top_p),
-                "top_k": int(self.sampler.top_k) if self.sampler.top_k is not None else None,
+                "top_k": int(self.sampler.top_k)
+                if self.sampler.top_k is not None
+                else None,
             },
             "metadata": self.metadata,
         }
@@ -1115,6 +1177,9 @@ class GenerationStats:
     generated_tokens: int
     elapsed_s: float
     tok_s: float
+    decode_elapsed_s: float = 0.0
+    decode_tok_s: float = 0.0
+    end_to_end_tok_s: float = 0.0
     benchmark_mode: str | None = None
     load_mtp: bool | None = None
     runtime_mtp_enabled: bool = False
@@ -1148,7 +1213,9 @@ class GenerationStats:
     decode_dense_fallback_calls: int = 0
     ar_dense_fallback_calls: int = 0
     postcommit_dense_fallback_calls: int = 0
-    paged_attention_bailouts_by_phase_reason: dict[str, int] = field(default_factory=dict)
+    paged_attention_bailouts_by_phase_reason: dict[str, int] = field(
+        default_factory=dict
+    )
     paged_attention_large_q_path: str = ""
     prefill_route: str = ""
     large_q_split_sdpa_fallback_calls: int = 0
@@ -1484,9 +1551,15 @@ def _entry_matches_restore_lookup(
 ) -> bool:
     if getattr(entry, "model_path", None) != str(rt.model_path):
         return False
-    if hidden_variant is not None and getattr(entry, "hidden_variant", None) != hidden_variant:
+    if (
+        hidden_variant is not None
+        and getattr(entry, "hidden_variant", None) != hidden_variant
+    ):
         return False
-    if template_hash is not None and getattr(entry, "template_hash", None) != template_hash:
+    if (
+        template_hash is not None
+        and getattr(entry, "template_hash", None) != template_hash
+    ):
         return False
     entry_policy = getattr(entry, "mtp_history_policy", None)
     if mtp_history_policy is not None:
@@ -1494,14 +1567,19 @@ def _entry_matches_restore_lookup(
             committed = {"committed", "last_window"}
             if entry_policy not in committed or mtp_history_policy not in committed:
                 return False
-    if draft_head_identity is not None and getattr(entry, "draft_head_identity", None) != draft_head_identity:
-        return False
-    if policy_fingerprint is not None and getattr(entry, "policy_fingerprint", None) != policy_fingerprint:
+    if (
+        draft_head_identity is not None
+        and getattr(entry, "draft_head_identity", None) != draft_head_identity
+    ):
         return False
     if (
-        getattr(entry, "mtp_snapshot_epoch", None) is not None
-        and int(getattr(entry, "mtp_snapshot_epoch")) != int(getattr(entry, "snapshot_epoch", 0))
+        policy_fingerprint is not None
+        and getattr(entry, "policy_fingerprint", None) != policy_fingerprint
     ):
+        return False
+    if getattr(entry, "mtp_snapshot_epoch", None) is not None and int(
+        getattr(entry, "mtp_snapshot_epoch")
+    ) != int(getattr(entry, "snapshot_epoch", 0)):
         return False
     return True
 
@@ -1658,9 +1736,7 @@ def restore_or_prefill_prompt_state(
         len(prompt_ids),
     )
     mtp_history_window_tokens = (
-        _mtp_history_last_window_tokens()
-        if mtp_history_policy == "last_window"
-        else 0
+        _mtp_history_last_window_tokens() if mtp_history_policy == "last_window" else 0
     )
     _check_postcommit_abort(abort_check)
     if session_bank is not None:
@@ -1765,9 +1841,11 @@ def restore_or_prefill_prompt_state(
         else:
             _assert_safe_long_context_prefill(len(prompt_ids))
             _check_postcommit_abort(abort_check)
-            cache, logits, hidden, prompt_hidden, target_time = _prefill_with_hidden_sequence(
-                rt,
-                prompt_ids,
+            cache, logits, hidden, prompt_hidden, target_time = (
+                _prefill_with_hidden_sequence(
+                    rt,
+                    prompt_ids,
+                )
             )
             _check_postcommit_abort(abort_check)
             prompt_eval_time = target_time
@@ -1847,7 +1925,9 @@ def _strip_terminal_stop(tokens: list[int], stop_token_ids: set[int]) -> list[in
     return stripped
 
 
-def _truncate_after_first_stop(tokens: list[int], stop_token_ids: set[int]) -> list[int]:
+def _truncate_after_first_stop(
+    tokens: list[int], stop_token_ids: set[int]
+) -> list[int]:
     for index, token in enumerate(tokens):
         if _is_stop(token, stop_token_ids):
             return list(tokens[: index + 1])
@@ -1967,15 +2047,19 @@ def _sample_adapter_ensemble_q(
         )
         token = sample_from_distribution(q, rng)
         selected = "adapter" if token == adapter_token else "base"
-    return token, q, {
-        "base_token": base_token,
-        "adapter_token": adapter_token,
-        "epsilon": float(epsilon),
-        "changed": bool(adapter_token != base_token),
-        "selected": selected,
-        "q_token_ids": [int(token_id) for token_id in q.token_ids],
-        "q_probs": [float(prob) for prob in q.probs],
-    }
+    return (
+        token,
+        q,
+        {
+            "base_token": base_token,
+            "adapter_token": adapter_token,
+            "epsilon": float(epsilon),
+            "changed": bool(adapter_token != base_token),
+            "selected": selected,
+            "q_token_ids": [int(token_id) for token_id in q.token_ids],
+            "q_probs": [float(prob) for prob in q.probs],
+        },
+    )
 
 
 def _distribution_argmax(distribution: np.ndarray | SparseDistribution) -> int:
@@ -1993,7 +2077,9 @@ def _online_correction_cache_key(
     draft_prefix: list[int],
 ) -> tuple[int, ...]:
     if policy == "local_prefix":
-        return tuple([int(depth), int(primary), *[int(token) for token in draft_prefix]])
+        return tuple(
+            [int(depth), int(primary), *[int(token) for token in draft_prefix]]
+        )
     if policy == "source_token":
         return (int(depth), int(source_token))
     if policy == "primary_source":
@@ -2230,8 +2316,7 @@ def _prefill_committed_mtp_history_streaming(
         token_start_index = cursor + 1
         token_end_index = token_start_index + chunk_len
         needs_history_hidden = (
-            history_window_tokens is None
-            or token_end_index > history_start_token_index
+            history_window_tokens is None or token_end_index > history_start_token_index
         )
         started = time.perf_counter()
         with attention_phase("prefill"):
@@ -2391,7 +2476,9 @@ def _add_timing(event: dict, key: str, elapsed_s: float) -> None:
     timings[key] = timings.get(key, 0.0) + elapsed_s
 
 
-def _reject_repair_breakdown(events: list[dict[str, Any]]) -> tuple[dict[str, int], dict[str, float]]:
+def _reject_repair_breakdown(
+    events: list[dict[str, Any]],
+) -> tuple[dict[str, int], dict[str, float]]:
     counts: dict[str, int] = {}
     repair_times: dict[str, float] = {}
     for event in events:
@@ -2459,7 +2546,9 @@ def generate_ar(
 ) -> GenerationOutput:
     counter_start = _runtime_counter_snapshot(rt)
     rng = np.random.default_rng(seed)
-    stop_token_ids = _default_stop_tokens(rt.tokenizer) if stop_token_ids is None else stop_token_ids
+    stop_token_ids = (
+        _default_stop_tokens(rt.tokenizer) if stop_token_ids is None else stop_token_ids
+    )
     started_all = time.perf_counter()
     ar_return_hidden = bool(
         rt.mtp_enabled
@@ -2598,7 +2687,11 @@ def generate_ar(
         mode="ar",
         generated_tokens=len(tokens),
         elapsed_s=elapsed,
-        tok_s=len(tokens) / elapsed if elapsed else 0.0,
+        **_generation_rate_fields(
+            generated_tokens=len(tokens),
+            elapsed_s=elapsed,
+            prompt_eval_time_s=prompt_eval_time,
+        ),
         target_forward_time_s=prompt_eval_time + target_decode_time,
         prompt_eval_time_s=prompt_eval_time,
         prompt_tps=(
@@ -2663,9 +2756,12 @@ def generate_mtp1(
 
     rng = np.random.default_rng(seed)
     draft_sampler = _env_scaled_draft_sampler(sampler, draft_sampler)
-    stop_token_ids = _default_stop_tokens(rt.tokenizer) if stop_token_ids is None else stop_token_ids
+    stop_token_ids = (
+        _default_stop_tokens(rt.tokenizer) if stop_token_ids is None else stop_token_ids
+    )
     started_all = time.perf_counter()
     cache, logits, hidden, target_time = _prefill(rt, prompt_ids, return_hidden=True)
+    prompt_eval_time = target_time
     graphbank = (
         SpecDecodeGraphBank(rt, capture_backend=verify_core_backend)
         if verify_strategy in {"graphbank", "graphbank_capture_commit"}
@@ -2777,12 +2873,16 @@ def generate_mtp1(
             target_logits_for_draft = verify_logits[:, -1, :]
             started_accept = time.perf_counter()
             if sampler.temperature <= 0:
-                target_token = int(mx.argmax(target_logits_for_draft[0], axis=-1).item())
+                target_token = int(
+                    mx.argmax(target_logits_for_draft[0], axis=-1).item()
+                )
                 accepted_now = draft_token == target_token
                 correction = target_token
                 accept_probability = 1.0 if accepted_now else 0.0
             else:
-                target_p = _distribution_from_mlx_logits(target_logits_for_draft[0], sampler)
+                target_p = _distribution_from_mlx_logits(
+                    target_logits_for_draft[0], sampler
+                )
                 if draft_q is None:
                     raise RuntimeError("non-greedy MTP requires a draft distribution")
                 accept_prob = compute_acceptance_probability(
@@ -2794,14 +2894,18 @@ def generate_mtp1(
                 correction = (
                     draft_token
                     if accepted_now
-                    else sample_from_distribution(residual_distribution(target_p, draft_q), rng)
+                    else sample_from_distribution(
+                        residual_distribution(target_p, draft_q), rng
+                    )
                 )
             elapsed_accept = time.perf_counter() - started_accept
             accept_time += elapsed_accept
             _add_timing(event, "accept", elapsed_accept)
 
             event["accepted"] = accepted_now
-            event["accept_probability"] = float(accept_prob if sampler.temperature > 0 else accept_probability)
+            event["accept_probability"] = float(
+                accept_prob if sampler.temperature > 0 else accept_probability
+            )
             event["correction"] = int(correction)
             event["verify_strategy"] = verify_strategy
             accept_probability_sum_by_depth[0] += float(event["accept_probability"])
@@ -2866,10 +2970,12 @@ def generate_mtp1(
             started = time.perf_counter()
             with attention_phase("decode_verify"):
                 if graphbank is not None:
-                    verify_logits, verify_hidden, captures = graphbank.forward_ar_capture(
-                        mx.array([[primary, draft_token]]),
-                        cache=cache,
-                        return_hidden=True,
+                    verify_logits, verify_hidden, captures = (
+                        graphbank.forward_ar_capture(
+                            mx.array([[primary, draft_token]]),
+                            cache=cache,
+                            return_hidden=True,
+                        )
                     )
                 else:
                     verify_logits, verify_hidden, captures = rt.forward_ar_capture(
@@ -2889,12 +2995,16 @@ def generate_mtp1(
             target_logits_for_draft = verify_logits[:, 0, :]
             started_accept = time.perf_counter()
             if sampler.temperature <= 0:
-                target_token = int(mx.argmax(target_logits_for_draft[0], axis=-1).item())
+                target_token = int(
+                    mx.argmax(target_logits_for_draft[0], axis=-1).item()
+                )
                 accepted_now = draft_token == target_token
                 correction = target_token
                 accept_probability = 1.0 if accepted_now else 0.0
             else:
-                target_p = _distribution_from_mlx_logits(target_logits_for_draft[0], sampler)
+                target_p = _distribution_from_mlx_logits(
+                    target_logits_for_draft[0], sampler
+                )
                 if draft_q is None:
                     raise RuntimeError("non-greedy MTP requires a draft distribution")
                 accept_prob = compute_acceptance_probability(
@@ -2906,14 +3016,18 @@ def generate_mtp1(
                 correction = (
                     draft_token
                     if accepted_now
-                    else sample_from_distribution(residual_distribution(target_p, draft_q), rng)
+                    else sample_from_distribution(
+                        residual_distribution(target_p, draft_q), rng
+                    )
                 )
             elapsed_accept = time.perf_counter() - started_accept
             accept_time += elapsed_accept
             _add_timing(event, "accept", elapsed_accept)
 
             event["accepted"] = accepted_now
-            event["accept_probability"] = float(accept_prob if sampler.temperature > 0 else accept_probability)
+            event["accept_probability"] = float(
+                accept_prob if sampler.temperature > 0 else accept_probability
+            )
             event["correction"] = int(correction)
             event["verify_strategy"] = verify_strategy
             accept_probability_sum_by_depth[0] += float(event["accept_probability"])
@@ -2943,7 +3057,10 @@ def generate_mtp1(
                 rejected += 1
                 if sampler.temperature <= 0:
                     committed = False
-                    if verify_strategy in {"capture_commit", "graphbank_capture_commit"}:
+                    if verify_strategy in {
+                        "capture_commit",
+                        "graphbank_capture_commit",
+                    }:
                         from .gdn_capture import commit_captured_prefix
 
                         started_commit = time.perf_counter()
@@ -2985,7 +3102,10 @@ def generate_mtp1(
                     correction_tokens += 1
                     tokens.append(int(correction))
                     committed = False
-                    if verify_strategy in {"capture_commit", "graphbank_capture_commit"}:
+                    if verify_strategy in {
+                        "capture_commit",
+                        "graphbank_capture_commit",
+                    }:
                         from .gdn_capture import commit_captured_prefix
 
                         started_commit = time.perf_counter()
@@ -3019,7 +3139,9 @@ def generate_mtp1(
                                 cache=cache,
                                 return_hidden=True,
                             )
-                        event["capture_repair"] = "standard_primary_correction_reforward"
+                        event["capture_repair"] = (
+                            "standard_primary_correction_reforward"
+                        )
                         _eval(logits_next, hidden_next)
                         elapsed_repair = time.perf_counter() - started
                         target_time += elapsed_repair
@@ -3067,7 +3189,9 @@ def generate_mtp1(
             correction = target_token
             accept_probability = 1.0 if accepted_now else 0.0
         else:
-            target_p = _distribution_from_mlx_logits(target_logits_for_draft[0], sampler)
+            target_p = _distribution_from_mlx_logits(
+                target_logits_for_draft[0], sampler
+            )
             if draft_q is None:
                 raise RuntimeError("non-greedy MTP requires a draft distribution")
             accept_prob = compute_acceptance_probability(
@@ -3079,14 +3203,18 @@ def generate_mtp1(
             correction = (
                 draft_token
                 if accepted_now
-                else sample_from_distribution(residual_distribution(target_p, draft_q), rng)
+                else sample_from_distribution(
+                    residual_distribution(target_p, draft_q), rng
+                )
             )
         elapsed_accept = time.perf_counter() - started_accept
         accept_time += elapsed_accept
         _add_timing(event, "accept", elapsed_accept)
 
         event["accepted"] = accepted_now
-        event["accept_probability"] = float(accept_prob if sampler.temperature > 0 else accept_probability)
+        event["accept_probability"] = float(
+            accept_prob if sampler.temperature > 0 else accept_probability
+        )
         event["correction"] = int(correction)
         event["verify_strategy"] = verify_strategy
         accept_probability_sum_by_depth[0] += float(event["accept_probability"])
@@ -3168,7 +3296,11 @@ def generate_mtp1(
         mode="mtp1",
         generated_tokens=len(tokens),
         elapsed_s=elapsed,
-        tok_s=len(tokens) / elapsed if elapsed else 0.0,
+        **_generation_rate_fields(
+            generated_tokens=len(tokens),
+            elapsed_s=elapsed,
+            prompt_eval_time_s=prompt_eval_time,
+        ),
         accepted_drafts=accepted,
         rejected_drafts=rejected,
         drafted_tokens=drafted,
@@ -3178,6 +3310,14 @@ def generate_mtp1(
         verify_eval_time_s=verify_eval_time,
         draft_time_s=draft_time,
         target_forward_time_s=target_time,
+        prompt_eval_time_s=prompt_eval_time,
+        prompt_tps=(
+            len(prompt_ids) / prompt_eval_time if prompt_eval_time > 0 else 0.0
+        ),
+        prompt_target_prefill_time_s=prompt_eval_time,
+        prompt_target_prefill_tok_s=(
+            len(prompt_ids) / prompt_eval_time if prompt_eval_time > 0 else 0.0
+        ),
         snapshot_time_s=snapshot_time,
         accept_time_s=accept_time,
         rollback_time_s=rollback_time,
@@ -3299,7 +3439,11 @@ def generate_mtpk(
         raise ValueError("online_correction_cache_min_depth must be >= 1")
     if prompt_correction_cache_min_depth < 1:
         raise ValueError("prompt_correction_cache_min_depth must be >= 1")
-    if online_correction_cache_key not in {"local_prefix", "source_token", "primary_source"}:
+    if online_correction_cache_key not in {
+        "local_prefix",
+        "source_token",
+        "primary_source",
+    }:
         raise ValueError(
             "online_correction_cache_key must be 'local_prefix', "
             "'source_token', or 'primary_source'"
@@ -3310,7 +3454,12 @@ def generate_mtpk(
         raise ValueError("adapter_ensemble_epsilon must be in [0, 1]")
     if adapter_ensemble_min_depth < 1:
         raise ValueError("adapter_ensemble_min_depth must be >= 1")
-    if verify_strategy not in {"batched", "capture_commit", "graphbank", "graphbank_capture_commit"}:
+    if verify_strategy not in {
+        "batched",
+        "capture_commit",
+        "graphbank",
+        "graphbank_capture_commit",
+    }:
         raise ValueError(
             "verify_strategy must be 'batched', 'capture_commit', "
             "'graphbank', or 'graphbank_capture_commit'"
@@ -3333,7 +3482,9 @@ def generate_mtpk(
                 f"MTP corrector expects hidden variant {corrector_variant!r}, "
                 f"but mtp_hidden_variant is {mtp_hidden_variant!r}"
             )
-    stop_token_ids = _default_stop_tokens(rt.tokenizer) if stop_token_ids is None else stop_token_ids
+    stop_token_ids = (
+        _default_stop_tokens(rt.tokenizer) if stop_token_ids is None else stop_token_ids
+    )
     started_all = time.perf_counter()
     draft_time = verify_time = 0.0
     verify_forward_time = 0.0
@@ -3384,7 +3535,9 @@ def generate_mtpk(
                 policy_fingerprint=session_policy_fingerprint,
                 mtp_history_snapshot=mtp_snapshot,
                 snapshot_epoch=len(prompt_ids),
-                mtp_snapshot_epoch=len(prompt_ids) if mtp_snapshot is not None else None,
+                mtp_snapshot_epoch=len(prompt_ids)
+                if mtp_snapshot is not None
+                else None,
             )
             prompt_prefix_bank_commit = {
                 "stored": entry is not None,
@@ -3394,7 +3547,9 @@ def generate_mtpk(
                     if entry is not None
                     else "sessionbank_snapshot_skipped"
                 ),
-                "prefix_len": int(entry.prefix_len if entry is not None else len(prompt_ids)),
+                "prefix_len": int(
+                    entry.prefix_len if entry is not None else len(prompt_ids)
+                ),
                 "nbytes": int(entry.nbytes if entry is not None else 0),
                 "elapsed_s": time.perf_counter() - commit_started,
                 "cached_tokens": int(prompt_state.cached_tokens),
@@ -3487,8 +3642,11 @@ def generate_mtpk(
         os.environ.get("MTPLX_LATE_DEPTH_AFTER") or speculative_depth
     )
     mtp_position_mode = (
-        os.environ.get("MTPLX_MTP_POSITION_MODE") or "default"
-    ).strip().lower().replace("-", "_")
+        (os.environ.get("MTPLX_MTP_POSITION_MODE") or "default")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
     mtp_position_cap = max(
         0,
         int(os.environ.get("MTPLX_MTP_POSITION_CAP") or 4096),
@@ -3549,26 +3707,23 @@ def generate_mtpk(
     state_rebase_events = 0
     state_rebase_time_s = 0.0
     state_root_eval_enabled = bool(os.environ.get("MTPLX_EVAL_STATE_ROOTS_ON_COMMIT"))
-    state_root_eval_include_mtp = (
-        os.environ.get("MTPLX_EVAL_STATE_ROOTS_INCLUDE_MTP", "1")
-        .strip()
-        .lower()
-        not in {"0", "false", "no", "off"}
-    )
-    state_root_eval_include_live = (
-        os.environ.get("MTPLX_EVAL_STATE_ROOTS_INCLUDE_LIVE", "1")
-        .strip()
-        .lower()
-        not in {"0", "false", "no", "off"}
-    )
+    state_root_eval_include_mtp = os.environ.get(
+        "MTPLX_EVAL_STATE_ROOTS_INCLUDE_MTP", "1"
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    state_root_eval_include_live = os.environ.get(
+        "MTPLX_EVAL_STATE_ROOTS_INCLUDE_LIVE", "1"
+    ).strip().lower() not in {"0", "false", "no", "off"}
     defer_verify_hidden_eval = _defer_verify_hidden_eval_enabled()
     verify_hidden_mode = _verify_hidden_mode()
     state_root_eval_events = 0
     state_root_eval_time_s = 0.0
     state_root_eval_arrays = 0
     dirty_detach_mode = (
-        os.environ.get("MTPLX_DETACH_MODE") or "selected_slice_contiguous_eval"
-    ).strip().lower().replace("-", "_")
+        (os.environ.get("MTPLX_DETACH_MODE") or "selected_slice_contiguous_eval")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
     dirty_detach_components_env = os.environ.get("MTPLX_DETACH_COMPONENTS") or ""
     dirty_detach_component_filter = {
         item.strip().lower().replace("-", "_")
@@ -3614,18 +3769,25 @@ def generate_mtpk(
     dirty_detach_bytes = 0
     live_output_detach_enabled = bool(os.environ.get("MTPLX_DETACH_LIVE_OUTPUTS"))
     live_output_detach_mode = (
-        os.environ.get("MTPLX_DETACH_LIVE_OUTPUTS_MODE")
-        or os.environ.get("MTPLX_DETACH_MODE")
-        or "contiguous_eval"
-    ).strip().lower().replace("-", "_")
+        (
+            os.environ.get("MTPLX_DETACH_LIVE_OUTPUTS_MODE")
+            or os.environ.get("MTPLX_DETACH_MODE")
+            or "contiguous_eval"
+        )
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
     live_output_detach_events = 0
     live_output_detach_time_s = 0.0
     live_output_detach_arrays = 0
     live_output_detach_bytes = 0
     capture_commit_detach_mode = (
-        os.environ.get("MTPLX_CAPTURE_COMMIT_DETACH_MODE")
-        or dirty_detach_mode
-    ).strip().lower().replace("-", "_")
+        (os.environ.get("MTPLX_CAPTURE_COMMIT_DETACH_MODE") or dirty_detach_mode)
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
     capture_commit_detach_components_env = (
         os.environ.get("MTPLX_CAPTURE_COMMIT_DETACH_COMPONENTS") or ""
     )
@@ -3736,7 +3898,9 @@ def generate_mtpk(
             return 0.0
         if trace.enabled:
             trace_accounting_started = time.perf_counter()
-            trace_mtp_history_append_nbytes += _tree_nbytes(hidden_states) + (8 * len(token_ids))
+            trace_mtp_history_append_nbytes += _tree_nbytes(hidden_states) + (
+                8 * len(token_ids)
+            )
             trace_accounting_time_s += time.perf_counter() - trace_accounting_started
         hidden_states = own_live_output_leaf(hidden_states)
         mtp_history_tokens_since_materialize += len(token_ids)
@@ -3811,7 +3975,9 @@ def generate_mtpk(
         state_rebase_tokens_since += delta_tokens
         if state_rebase_tokens_since < state_rebase_every:
             return
-        prefix_tokens = list(prompt_ids) + [int(token) for token in tokens[:current_tokens]]
+        prefix_tokens = list(prompt_ids) + [
+            int(token) for token in tokens[:current_tokens]
+        ]
         started_rebase = time.perf_counter()
         rebased = restore_or_prefill_prompt_state(
             rt,
@@ -3828,7 +3994,9 @@ def generate_mtpk(
         hidden = rebased.hidden
         mtp_history_cache = rebased.committed_mtp_cache
         trace_current_mtp_cache = mtp_history_cache
-        target_time += max(0.0, rebased.prompt_eval_time_s - rebased.prompt_mtp_history_time_s)
+        target_time += max(
+            0.0, rebased.prompt_eval_time_s - rebased.prompt_mtp_history_time_s
+        )
         draft_time += rebased.prompt_mtp_history_time_s
 
     def maybe_clear_mlx_cache() -> None:
@@ -3935,10 +4103,7 @@ def generate_mtpk(
         for component in capture_commit_detach_enabled_components:
             capture_commit_detach_tokens_since[component] += delta_tokens
             cadence = capture_commit_detach_cadences[component]
-            if (
-                cadence > 0
-                and capture_commit_detach_tokens_since[component] >= cadence
-            ):
+            if cadence > 0 and capture_commit_detach_tokens_since[component] >= cadence:
                 due_components.add(component)
                 capture_commit_detach_tokens_since[component] = 0
         return due_components
@@ -4136,9 +4301,13 @@ def generate_mtpk(
             mtp_cache = mtp_history_cache
             cycle_mtp_offset = _mtp_cache_offset(mtp_cache)
         else:
-            mtp_cache = rt.make_mtp_cache() if mtp_cache_policy == "persistent" else None
+            mtp_cache = (
+                rt.make_mtp_cache() if mtp_cache_policy == "persistent" else None
+            )
             cycle_mtp_offset = None
-        trace_current_mtp_cache = mtp_cache if mtp_cache is not None else mtp_history_cache
+        trace_current_mtp_cache = (
+            mtp_cache if mtp_cache is not None else mtp_history_cache
+        )
         draft_hidden = hidden
         next_token = primary
 
@@ -4173,7 +4342,9 @@ def generate_mtpk(
                     event["draft_core_compile"] = {
                         "kind": "device-d2",
                         "mtp_cache_promoted": int(device_d2_core["promoted"]),
-                        "promotion_failures": dict(device_d2_core["promotion_failures"]),
+                        "promotion_failures": dict(
+                            device_d2_core["promotion_failures"]
+                        ),
                     }
                 started = time.perf_counter()
                 draft_tokens = _run_device_d2_draft_core(
@@ -4201,7 +4372,9 @@ def generate_mtpk(
                             "depth": depth_index + 1,
                             "token": int(draft_token),
                             "timing_s": {
-                                "draft": elapsed_draft if depth_index == len(draft_tokens) - 1 else 0.0,
+                                "draft": elapsed_draft
+                                if depth_index == len(draft_tokens) - 1
+                                else 0.0,
                             },
                             "mtp_corrector": None,
                             "draft_core": "device-d2",
@@ -4222,7 +4395,9 @@ def generate_mtpk(
                 }
         for depth_index in range(0 if used_device_d2_core else cycle_depth):
             source_token = int(next_token)
-            step_mtp_cache = mtp_cache if mtp_cache_policy == "persistent" else rt.make_mtp_cache()
+            step_mtp_cache = (
+                mtp_cache if mtp_cache_policy == "persistent" else rt.make_mtp_cache()
+            )
             draft_position_offset = mtp_position_offset_for_cache(step_mtp_cache)
             started = time.perf_counter()
             cache_depth = depth_index + 1
@@ -4323,7 +4498,9 @@ def generate_mtpk(
                 )
             )
             reranker_info = None
-            cached_token = correction_cache.get(cache_key) if cache_enabled_for_depth else None
+            cached_token = (
+                correction_cache.get(cache_key) if cache_enabled_for_depth else None
+            )
             if cached_token is not None:
                 draft_token = int(cached_token)
                 draft_q = (
@@ -4334,7 +4511,11 @@ def generate_mtpk(
                 correction_cache_hits += 1
                 if cache_key in prompt_seeded_cache_keys:
                     prompt_correction_cache_hits += 1
-            elif ensemble_eligible and ensemble_base_logits is not None and ensemble_adapter_logits is not None:
+            elif (
+                ensemble_eligible
+                and ensemble_base_logits is not None
+                and ensemble_adapter_logits is not None
+            ):
                 draft_token, draft_q, ensemble_info = _sample_adapter_ensemble_q(
                     ensemble_base_logits[:, -1, :][0],
                     ensemble_adapter_logits[:, -1, :][0],
@@ -4376,7 +4557,9 @@ def generate_mtpk(
                         topk_reranker_calls += 1
                         if bool(reranker_info["changed"]):
                             topk_reranker_changed += 1
-                        topk_reranker_selected_rank_sum += int(reranker_info["selected_rank"])
+                        topk_reranker_selected_rank_sum += int(
+                            reranker_info["selected_rank"]
+                        )
                     else:
                         topk_reranker_fallbacks += 1
                         draft_token, draft_q = _sample_draft_from_logits(
@@ -4396,12 +4579,22 @@ def generate_mtpk(
             draft_time += elapsed_draft
             if trace.enabled:
                 trace_accounting_started = time.perf_counter()
-                trace_draft_output_nbytes += _tree_nbytes(draft_logits) + _tree_nbytes(draft_hidden_next)
-                if ensemble_base_logits is not None and ensemble_base_logits is not draft_logits:
+                trace_draft_output_nbytes += _tree_nbytes(draft_logits) + _tree_nbytes(
+                    draft_hidden_next
+                )
+                if (
+                    ensemble_base_logits is not None
+                    and ensemble_base_logits is not draft_logits
+                ):
                     trace_draft_output_nbytes += _tree_nbytes(ensemble_base_logits)
-                if ensemble_base_hidden is not None and ensemble_base_hidden is not draft_hidden_next:
+                if (
+                    ensemble_base_hidden is not None
+                    and ensemble_base_hidden is not draft_hidden_next
+                ):
                     trace_draft_output_nbytes += _tree_nbytes(ensemble_base_hidden)
-                trace_accounting_time_s += time.perf_counter() - trace_accounting_started
+                trace_accounting_time_s += (
+                    time.perf_counter() - trace_accounting_started
+                )
             draft_tokens.append(draft_token)
             draft_probs.append(draft_q)
             draft_cache_keys.append(cache_key)
@@ -4440,7 +4633,9 @@ def generate_mtpk(
                     online_draft_event = {
                         "feed_depth": feed_depth,
                         "key": online_hidden_corrector_key,
-                        "source_token": source_token if online_hidden_corrector_key == "token" else None,
+                        "source_token": source_token
+                        if online_hidden_corrector_key == "token"
+                        else None,
                         "applied": True,
                         "updates": update_count,
                         "apply_count": online_hidden_apply_counts[online_key],
@@ -4449,7 +4644,9 @@ def generate_mtpk(
                     online_draft_event = {
                         "feed_depth": feed_depth,
                         "key": online_hidden_corrector_key,
-                        "source_token": source_token if online_hidden_corrector_key == "token" else None,
+                        "source_token": source_token
+                        if online_hidden_corrector_key == "token"
+                        else None,
                         "applied": False,
                         "updates": update_count,
                     }
@@ -4461,7 +4658,9 @@ def generate_mtpk(
                 "depth": depth_index + 1,
                 "token": draft_token,
                 "timing_s": {"draft": elapsed_draft},
-                "mtp_corrector": getattr(mtp_corrector, "kind", None) if mtp_corrector is not None else None,
+                "mtp_corrector": getattr(mtp_corrector, "kind", None)
+                if mtp_corrector is not None
+                else None,
                 **draft_metrics,
             }
             if draft_position_offset is not None:
@@ -4472,7 +4671,9 @@ def generate_mtpk(
                     "enabled_for_depth": cache_enabled_for_depth,
                     "key_policy": online_correction_cache_key,
                     "key": list(cache_key),
-                    "cached_token": int(cached_token) if cached_token is not None else None,
+                    "cached_token": int(cached_token)
+                    if cached_token is not None
+                    else None,
                     "prompt_seeded": cache_key in prompt_seeded_cache_keys,
                 }
             if ensemble_info is not None:
@@ -4482,7 +4683,9 @@ def generate_mtpk(
             if online_draft_event is not None:
                 draft_event["online_hidden_corrector"] = online_draft_event
             event["drafts"].append(draft_event)
-            if adaptive_policy is not None and hasattr(adaptive_policy, "should_continue_after_draft"):
+            if adaptive_policy is not None and hasattr(
+                adaptive_policy, "should_continue_after_draft"
+            ):
                 policy_continue = adaptive_policy.should_continue_after_draft(
                     drafted_depth=depth_index + 1,
                     max_depth=cycle_depth,
@@ -4510,10 +4713,12 @@ def generate_mtpk(
         with attention_phase("decode_verify"):
             if verify_strategy in {"capture_commit", "graphbank_capture_commit"}:
                 if graphbank is not None:
-                    verify_logits, verify_hidden, captures = graphbank.forward_ar_capture(
-                        mx.array([verify_input]),
-                        cache=cache,
-                        return_hidden=True,
+                    verify_logits, verify_hidden, captures = (
+                        graphbank.forward_ar_capture(
+                            mx.array([verify_input]),
+                            cache=cache,
+                            return_hidden=True,
+                        )
                     )
                 else:
                     verify_logits, verify_hidden, captures = rt.forward_ar_capture(
@@ -4545,7 +4750,9 @@ def generate_mtpk(
         if (
             defer_verify_hidden_eval
             and sampler.temperature > 0
-            and (_batch_target_arrays_enabled() or _batch_target_distributions_enabled())
+            and (
+                _batch_target_arrays_enabled() or _batch_target_distributions_enabled()
+            )
         ):
             target_distribution_logits = verify_logits[:, : len(draft_tokens) + 1, :]
             started_distribution = time.perf_counter()
@@ -4559,7 +4766,9 @@ def generate_mtpk(
                     target_distribution_logits,
                     sampler,
                 )
-            elapsed_target_distribution_eval = time.perf_counter() - started_distribution
+            elapsed_target_distribution_eval = (
+                time.perf_counter() - started_distribution
+            )
             verify_eval_timings = {
                 "verify_logits_eval_time_s": elapsed_target_distribution_eval,
                 "verify_hidden_eval_time_s": 0.0,
@@ -4571,18 +4780,28 @@ def generate_mtpk(
                 "mode": "target_distribution_first",
                 "verify_hidden_mode": verify_hidden_mode,
                 "batch_target_arrays": bool(_batch_target_arrays_enabled()),
-                "batch_target_distributions": bool(_batch_target_distributions_enabled()),
+                "batch_target_distributions": bool(
+                    _batch_target_distributions_enabled()
+                ),
                 "rows": int(len(draft_tokens) + 1),
             }
         elif captures is not None:
-            verify_eval_timings = _eval_verify_outputs(verify_logits, verify_hidden, captures)
+            verify_eval_timings = _eval_verify_outputs(
+                verify_logits, verify_hidden, captures
+            )
         else:
             verify_eval_timings = _eval_verify_outputs(verify_logits, verify_hidden)
         elapsed_verify_eval = time.perf_counter() - started_eval
         eval_attributed = sum(float(value) for value in verify_eval_timings.values())
-        elapsed_verify_eval_unattributed = max(0.0, elapsed_verify_eval - eval_attributed)
-        verify_logits_eval_time += float(verify_eval_timings["verify_logits_eval_time_s"])
-        verify_hidden_eval_time += float(verify_eval_timings["verify_hidden_eval_time_s"])
+        elapsed_verify_eval_unattributed = max(
+            0.0, elapsed_verify_eval - eval_attributed
+        )
+        verify_logits_eval_time += float(
+            verify_eval_timings["verify_logits_eval_time_s"]
+        )
+        verify_hidden_eval_time += float(
+            verify_eval_timings["verify_hidden_eval_time_s"]
+        )
         verify_joint_eval_time += float(verify_eval_timings["verify_joint_eval_time_s"])
         verify_eval_unattributed_time += elapsed_verify_eval_unattributed
         verify_eval_time += elapsed_verify_eval
@@ -4602,7 +4821,9 @@ def generate_mtpk(
             "verify_eval_joint",
             float(verify_eval_timings["verify_joint_eval_time_s"]),
         )
-        _add_timing(event, "verify_target_distribution", elapsed_target_distribution_eval)
+        _add_timing(
+            event, "verify_target_distribution", elapsed_target_distribution_eval
+        )
         _add_timing(event, "verify_eval_unattributed", elapsed_verify_eval_unattributed)
         elapsed_verify = elapsed_verify_forward + elapsed_verify_eval
         verify_time += elapsed_verify
@@ -4638,7 +4859,9 @@ def generate_mtpk(
             target_logits_for_draft = verify_logits[:, depth_index, :]
             target_p_for_cache = None
             if sampler.temperature <= 0:
-                target_token = int(mx.argmax(target_logits_for_draft[0], axis=-1).item())
+                target_token = int(
+                    mx.argmax(target_logits_for_draft[0], axis=-1).item()
+                )
                 accepted_now = draft_token == target_token
                 accept_prob = 1.0 if accepted_now else 0.0
                 correction = target_token
@@ -4652,7 +4875,9 @@ def generate_mtpk(
                     if isinstance(draft_q, SparseDistribution)
                     else float(draft_q[draft_token])
                 )
-                accept_prob = 1.0 if q <= 0 and p > 0 else (0.0 if q <= 0 else min(1.0, p / q))
+                accept_prob = (
+                    1.0 if q <= 0 and p > 0 else (0.0 if q <= 0 else min(1.0, p / q))
+                )
                 accepted_now = float(rng.random()) <= accept_prob
                 target_p_for_cache = (
                     target_distribution_batch.to_distribution(depth_index)
@@ -4677,18 +4902,24 @@ def generate_mtpk(
                 target_p = (
                     target_distributions[depth_index]
                     if target_distributions is not None
-                    else _distribution_from_mlx_logits(target_logits_for_draft[0], sampler)
+                    else _distribution_from_mlx_logits(
+                        target_logits_for_draft[0], sampler
+                    )
                 )
                 draft_q = draft_probs[depth_index]
                 if draft_q is None:
                     raise RuntimeError("non-greedy MTP requires draft distributions")
-                accept_prob = compute_acceptance_probability(target_p, draft_q, draft_token)
+                accept_prob = compute_acceptance_probability(
+                    target_p, draft_q, draft_token
+                )
                 accepted_now = float(rng.random()) <= accept_prob
                 target_p_for_cache = target_p
                 correction = (
                     draft_token
                     if accepted_now
-                    else sample_from_distribution(residual_distribution(target_p, draft_q), rng)
+                    else sample_from_distribution(
+                        residual_distribution(target_p, draft_q), rng
+                    )
                 )
 
             event["drafts"][depth_index]["accepted"] = accepted_now
@@ -4723,7 +4954,9 @@ def generate_mtpk(
                 correction_cache[draft_cache_keys[depth_index]] = cached_target
                 prompt_seeded_cache_keys.discard(draft_cache_keys[depth_index])
                 correction_cache_stores += 1
-                event["drafts"][depth_index]["online_correction_cache"]["stored_token"] = cached_target
+                event["drafts"][depth_index]["online_correction_cache"][
+                    "stored_token"
+                ] = cached_target
             if sampler.temperature > 0:
                 rejection_correction = int(correction)
             break
@@ -4741,7 +4974,9 @@ def generate_mtpk(
         if online_hidden_enabled and draft_hidden_for_update:
             started_online = time.perf_counter()
             update_events = []
-            for feed_depth, predicted_hidden in enumerate(draft_hidden_for_update, start=1):
+            for feed_depth, predicted_hidden in enumerate(
+                draft_hidden_for_update, start=1
+            ):
                 if feed_depth > online_hidden_max_feed_depth:
                     continue
                 if feed_depth > int(verify_hidden.shape[1]):
@@ -4749,7 +4984,9 @@ def generate_mtpk(
                 if accepted_count < feed_depth - 1:
                     continue
                 online_key = draft_hidden_update_keys[feed_depth - 1]
-                target_hidden = verify_hidden[:, feed_depth - 1 : feed_depth, :].astype(mx.float32)
+                target_hidden = verify_hidden[:, feed_depth - 1 : feed_depth, :].astype(
+                    mx.float32
+                )
                 residual = target_hidden - predicted_hidden.astype(mx.float32)
                 previous = online_hidden_deltas.get(online_key)
                 if previous is None:
@@ -4815,7 +5052,9 @@ def generate_mtpk(
                 started_bonus = time.perf_counter()
                 if target_distribution_batch is not None:
                     bonus = target_distribution_batch.sample(len(draft_tokens), rng)
-                elif target_distributions is not None and len(target_distributions) > len(draft_tokens):
+                elif target_distributions is not None and len(
+                    target_distributions
+                ) > len(draft_tokens):
                     bonus = sample_from_distribution(
                         target_distributions[len(draft_tokens)],
                         rng,
@@ -4854,7 +5093,10 @@ def generate_mtpk(
         capture_commit_detach_components = capture_commit_detach_due(
             cache_committed_token_count
         )
-        if verify_strategy in {"capture_commit", "graphbank_capture_commit"} and captures is not None:
+        if (
+            verify_strategy in {"capture_commit", "graphbank_capture_commit"}
+            and captures is not None
+        ):
             from .gdn_capture import commit_captured_prefix
 
             started_commit = time.perf_counter()
@@ -4881,13 +5123,21 @@ def generate_mtpk(
             event["capture_repair"] = "captured_prefix_commit"
             if rejection_correction is None:
                 repair_logits, repair_hidden = own_live_logits_hidden(
-                    verify_logits[:, committed_prefix_len - 1 : committed_prefix_len, :],
-                    verify_hidden[:, committed_prefix_len - 1 : committed_prefix_len, :],
+                    verify_logits[
+                        :, committed_prefix_len - 1 : committed_prefix_len, :
+                    ],
+                    verify_hidden[
+                        :, committed_prefix_len - 1 : committed_prefix_len, :
+                    ],
                 )
             else:
                 repair_logits, repair_hidden = own_live_logits_hidden(
-                    verify_logits[:, committed_prefix_len - 1 : committed_prefix_len, :],
-                    verify_hidden[:, committed_prefix_len - 1 : committed_prefix_len, :],
+                    verify_logits[
+                        :, committed_prefix_len - 1 : committed_prefix_len, :
+                    ],
+                    verify_hidden[
+                        :, committed_prefix_len - 1 : committed_prefix_len, :
+                    ],
                 )
                 pending_primary = int(rejection_correction)
                 deferred_correction_repairs += 1
@@ -4898,9 +5148,13 @@ def generate_mtpk(
                 raise RuntimeError(
                     "capture commit failed after MTPLX_SKIP_VERIFY_SNAPSHOT=1"
                 )
-            event["capture_repair"] = "standard_reforward" if verify_strategy == "capture_commit" else None
+            event["capture_repair"] = (
+                "standard_reforward" if verify_strategy == "capture_commit" else None
+            )
             started_rollback = time.perf_counter()
-            rollback_after_verify(cache, before_verify, verified_tokens=len(verify_input))
+            rollback_after_verify(
+                cache, before_verify, verified_tokens=len(verify_input)
+            )
             elapsed_rollback = time.perf_counter() - started_rollback
             rollback_time += elapsed_rollback
             _add_timing(event, "rollback", elapsed_rollback)
@@ -4943,7 +5197,9 @@ def generate_mtpk(
         append_event(event)
 
         if any(_is_stop(token, stop_token_ids) for token in committed):
-            stop_index = next(i for i, token in enumerate(tokens) if _is_stop(token, stop_token_ids))
+            stop_index = next(
+                i for i, token in enumerate(tokens) if _is_stop(token, stop_token_ids)
+            )
             tokens = tokens[: stop_index + 1]
             emit_new_tokens()
             emit_trace()
@@ -4990,9 +5246,7 @@ def generate_mtpk(
     emit_trace(force=True, final=True)
     elapsed = time.perf_counter() - started_all
     finish_reason = (
-        "stop"
-        if any(_is_stop(token, stop_token_ids) for token in tokens)
-        else "length"
+        "stop" if any(_is_stop(token, stop_token_ids) for token in tokens) else "length"
     )
     if capture_final_state:
         final_state = GenerationFinalState(
@@ -5012,7 +5266,11 @@ def generate_mtpk(
         mode="mtpk",
         generated_tokens=len(tokens),
         elapsed_s=elapsed,
-        tok_s=len(tokens) / elapsed if elapsed else 0.0,
+        **_generation_rate_fields(
+            generated_tokens=len(tokens),
+            elapsed_s=elapsed,
+            prompt_eval_time_s=prompt_eval_time,
+        ),
         accepted_drafts=accepted,
         rejected_drafts=rejected,
         drafted_tokens=drafted,
@@ -5157,11 +5415,7 @@ def generate_mtpk(
                 if topk_reranker_calls
                 else None
             ),
-            **(
-                mtp_topk_reranker.to_dict()
-                if mtp_topk_reranker is not None
-                else {}
-            ),
+            **(mtp_topk_reranker.to_dict() if mtp_topk_reranker is not None else {}),
         },
         draft_core={
             "requested": draft_core,
@@ -5217,9 +5471,12 @@ def generate_mtpa(
         increase_after=increase_after,
         decrease_after=decrease_after,
     )
-    stop_token_ids = _default_stop_tokens(rt.tokenizer) if stop_token_ids is None else stop_token_ids
+    stop_token_ids = (
+        _default_stop_tokens(rt.tokenizer) if stop_token_ids is None else stop_token_ids
+    )
     started_all = time.perf_counter()
     cache, logits, hidden, target_time = _prefill(rt, prompt_ids, return_hidden=True)
+    prompt_eval_time = target_time
     tokens: list[int] = []
     events: list[dict] = []
     accepted = rejected = drafted = 0
@@ -5256,7 +5513,9 @@ def generate_mtpa(
         next_token = primary
 
         for depth_index in range(cycle_depth):
-            step_mtp_cache = mtp_cache if mtp_cache_policy == "persistent" else rt.make_mtp_cache()
+            step_mtp_cache = (
+                mtp_cache if mtp_cache_policy == "persistent" else rt.make_mtp_cache()
+            )
             started = time.perf_counter()
             draft_logits, draft_hidden_next = rt.draft_mtp(
                 draft_hidden,
@@ -5311,21 +5570,29 @@ def generate_mtpa(
         for depth_index, draft_token in enumerate(draft_tokens):
             target_logits_for_draft = verify_logits[:, depth_index, :]
             if sampler.temperature <= 0:
-                target_token = int(mx.argmax(target_logits_for_draft[0], axis=-1).item())
+                target_token = int(
+                    mx.argmax(target_logits_for_draft[0], axis=-1).item()
+                )
                 accepted_now = draft_token == target_token
                 accept_prob = 1.0 if accepted_now else 0.0
                 correction = target_token
             else:
-                target_p = _distribution_from_mlx_logits(target_logits_for_draft[0], sampler)
+                target_p = _distribution_from_mlx_logits(
+                    target_logits_for_draft[0], sampler
+                )
                 draft_q = draft_probs[depth_index]
                 if draft_q is None:
                     raise RuntimeError("non-greedy MTP requires draft distributions")
-                accept_prob = compute_acceptance_probability(target_p, draft_q, draft_token)
+                accept_prob = compute_acceptance_probability(
+                    target_p, draft_q, draft_token
+                )
                 accepted_now = float(rng.random()) <= accept_prob
                 correction = (
                     draft_token
                     if accepted_now
-                    else sample_from_distribution(residual_distribution(target_p, draft_q), rng)
+                    else sample_from_distribution(
+                        residual_distribution(target_p, draft_q), rng
+                    )
                 )
 
             event["drafts"][depth_index]["accepted"] = accepted_now
@@ -5393,7 +5660,9 @@ def generate_mtpa(
         events.append(event)
 
         if any(_is_stop(token, stop_token_ids) for token in committed):
-            stop_index = next(i for i, token in enumerate(tokens) if _is_stop(token, stop_token_ids))
+            stop_index = next(
+                i for i, token in enumerate(tokens) if _is_stop(token, stop_token_ids)
+            )
             tokens = tokens[: stop_index + 1]
             break
 
@@ -5402,13 +5671,25 @@ def generate_mtpa(
         mode="mtpa",
         generated_tokens=len(tokens),
         elapsed_s=elapsed,
-        tok_s=len(tokens) / elapsed if elapsed else 0.0,
+        **_generation_rate_fields(
+            generated_tokens=len(tokens),
+            elapsed_s=elapsed,
+            prompt_eval_time_s=prompt_eval_time,
+        ),
         accepted_drafts=accepted,
         rejected_drafts=rejected,
         drafted_tokens=drafted,
         verify_time_s=verify_time,
         draft_time_s=draft_time,
         target_forward_time_s=target_time,
+        prompt_eval_time_s=prompt_eval_time,
+        prompt_tps=(
+            len(prompt_ids) / prompt_eval_time if prompt_eval_time > 0 else 0.0
+        ),
+        prompt_target_prefill_time_s=prompt_eval_time,
+        prompt_target_prefill_tok_s=(
+            len(prompt_ids) / prompt_eval_time if prompt_eval_time > 0 else 0.0
+        ),
         snapshot_time_s=snapshot_time,
         accept_time_s=accept_time,
         rollback_time_s=rollback_time,

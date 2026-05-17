@@ -208,13 +208,17 @@ def test_auto_sustained_prefill_policy_keeps_dense_decode_through_128k(monkeypat
     assert _clear_cache_every() == 0
 
 
-def test_non_sustained_long_context_prefill_is_blocked_before_full_hidden_eval(monkeypatch):
+def test_non_sustained_long_context_prefill_is_blocked_before_full_hidden_eval(
+    monkeypatch,
+):
     monkeypatch.delenv("MTPLX_SUSTAINED_PREFILL", raising=False)
     monkeypatch.delenv("MTPLX_ALLOW_UNSAFE_LONG_CONTEXT_PREFILL", raising=False)
     monkeypatch.setenv("MTPLX_UNSAFE_LONG_CONTEXT_PREFILL_GUARD_TOKENS", "8")
     model = TinyModel()
 
-    with pytest.raises(RuntimeError, match="Blocked unsafe long-context MTP prefill path"):
+    with pytest.raises(
+        RuntimeError, match="Blocked unsafe long-context MTP prefill path"
+    ):
         restore_or_prefill_prompt_state(
             _runtime(model, mtp_enabled=True),
             list(range(8)),
@@ -224,7 +228,9 @@ def test_non_sustained_long_context_prefill_is_blocked_before_full_hidden_eval(m
     assert model.calls == []
 
 
-def test_non_sustained_long_context_prefill_guard_has_explicit_escape_hatch(monkeypatch):
+def test_non_sustained_long_context_prefill_guard_has_explicit_escape_hatch(
+    monkeypatch,
+):
     monkeypatch.delenv("MTPLX_SUSTAINED_PREFILL", raising=False)
     monkeypatch.setenv("MTPLX_ALLOW_UNSAFE_LONG_CONTEXT_PREFILL", "1")
     monkeypatch.setenv("MTPLX_UNSAFE_LONG_CONTEXT_PREFILL_GUARD_TOKENS", "8")
@@ -258,6 +264,11 @@ def test_generate_ar_does_not_request_hidden_by_default(monkeypatch):
     assert out.stats.prompt_target_prefill_time_s == out.stats.prompt_eval_time_s
     assert out.stats.prompt_mtp_history_time_s == 0.0
     assert out.stats.prompt_target_prefill_tok_s > 0.0
+    assert out.stats.tok_s == out.stats.decode_tok_s
+    assert out.stats.decode_elapsed_s == pytest.approx(
+        out.stats.elapsed_s - out.stats.prompt_eval_time_s
+    )
+    assert out.stats.end_to_end_tok_s <= out.stats.decode_tok_s
     assert all(call["return_hidden"] is False for call in model.calls)
 
 
@@ -340,7 +351,9 @@ def test_sustained_prefill_chunk_cache_cleanup_is_explicit(monkeypatch):
     monkeypatch.setenv("MTPLX_PREFILL_CHUNK_CACHE_CLEANUP", "1")
     calls: list[str] = []
     monkeypatch.setattr("mtplx.generation.mx.synchronize", lambda: calls.append("sync"))
-    monkeypatch.setattr("mtplx.generation.mx.clear_cache", lambda: calls.append("clear"))
+    monkeypatch.setattr(
+        "mtplx.generation.mx.clear_cache", lambda: calls.append("clear")
+    )
     model = TinyModel()
     rt = _runtime(model, mtp_enabled=True)
 
@@ -402,7 +415,9 @@ def test_sustained_prefill_omlx_external_is_safe_profile_path(monkeypatch):
     assert rt.diagnostic_counters.get("prefill_stock_cache_only_calls", 0) == 0
 
 
-def test_sustained_prefill_forwards_logits_controls_through_patched_kwargs_wrapper(monkeypatch):
+def test_sustained_prefill_forwards_logits_controls_through_patched_kwargs_wrapper(
+    monkeypatch,
+):
     monkeypatch.setenv("MTPLX_SUSTAINED_PREFILL", "1")
     monkeypatch.setenv("MTPLX_PREFILL_CHUNK_SIZE", "2")
     monkeypatch.setenv("MTPLX_TARGET_EMIT_FULL_PREFILL_LOGITS", "0")
@@ -470,7 +485,7 @@ def test_32k_prefill_peak_memory_bounded():
     from mtplx.runtime import load
 
     rt = load(model_path, mtp=True)
-    text = ("def f(x): return x + 1\n" * 4096)
+    text = "def f(x): return x + 1\n" * 4096
     prompt_ids = rt.tokenizer.encode(text)[:32768]
     if len(prompt_ids) < 32000:
         pytest.skip("QA prompt did not tokenize to 32K tokens")

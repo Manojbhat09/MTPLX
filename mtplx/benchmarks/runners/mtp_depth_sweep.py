@@ -30,10 +30,7 @@ def _parse_depths(depths: str | list[int] | tuple[int, ...]) -> list[int]:
 
 
 def _rate_by_depth(accepted: list[int], drafted: list[int]) -> list[float | None]:
-    return [
-        (a / d if d else None)
-        for a, d in zip(accepted, drafted)
-    ]
+    return [(a / d if d else None) for a, d in zip(accepted, drafted)]
 
 
 def run_mtp_depth_sweep(
@@ -175,7 +172,12 @@ def run_mtp_depth_sweep(
                     "generation_ended_at": generation_ended_at,
                     "generation_window_s": generation_ended_at - generation_started_at,
                     "generated_tokens": ar.stats.generated_tokens,
+                    "elapsed_s": ar.stats.elapsed_s,
                     "tok_s": ar.stats.tok_s,
+                    "decode_tok_s": ar.stats.decode_tok_s,
+                    "decode_elapsed_s": ar.stats.decode_elapsed_s,
+                    "end_to_end_tok_s": ar.stats.end_to_end_tok_s,
+                    "prompt_eval_time_s": ar.stats.prompt_eval_time_s,
                     "tokens": ar.tokens,
                     "text": ar.text,
                 }
@@ -239,7 +241,17 @@ def run_mtp_depth_sweep(
                     "generated_tokens": out.stats.generated_tokens,
                     "elapsed_s": out.stats.elapsed_s,
                     "tok_s": out.stats.tok_s,
+                    "decode_tok_s": out.stats.decode_tok_s,
+                    "decode_elapsed_s": out.stats.decode_elapsed_s,
+                    "end_to_end_tok_s": out.stats.end_to_end_tok_s,
+                    "prompt_eval_time_s": out.stats.prompt_eval_time_s,
                     "ar_tok_s": ar_row["tok_s"] if ar_row is not None else None,
+                    "ar_decode_tok_s": ar_row["decode_tok_s"]
+                    if ar_row is not None
+                    else None,
+                    "ar_end_to_end_tok_s": ar_row["end_to_end_tok_s"]
+                    if ar_row is not None
+                    else None,
                     "exact_match": (
                         out.tokens == ar_row["tokens"]
                         if ar_row is not None and temperature <= 0
@@ -249,6 +261,11 @@ def run_mtp_depth_sweep(
                     "speedup_vs_ar": (
                         out.stats.tok_s / ar_row["tok_s"]
                         if ar_row is not None and ar_row["tok_s"]
+                        else None
+                    ),
+                    "end_to_end_speedup_vs_ar": (
+                        out.stats.end_to_end_tok_s / ar_row["end_to_end_tok_s"]
+                        if ar_row is not None and ar_row.get("end_to_end_tok_s")
                         else None
                     ),
                     "accepted_drafts": out.stats.accepted_drafts,
@@ -305,7 +322,9 @@ def run_mtp_depth_sweep(
             )
 
         validations = [v for row in rows for v in row["validations"]]
-        accepted_by_depth = _sum_lists([row["accepted_by_depth"] for row in rows], depth)
+        accepted_by_depth = _sum_lists(
+            [row["accepted_by_depth"] for row in rows], depth
+        )
         drafted_by_depth = _sum_lists([row["drafted_by_depth"] for row in rows], depth)
         accept_probability_sum_by_depth = _sum_float_lists(
             [row["accept_probability_sum_by_depth"] for row in rows],
@@ -329,36 +348,94 @@ def run_mtp_depth_sweep(
                         accept_probability_sum_by_depth,
                         drafted_by_depth,
                     ),
-                    "acceptance_by_depth": _rate_by_depth(accepted_by_depth, drafted_by_depth),
-                    "mean_tok_s": statistics.mean([row["tok_s"] for row in rows]) if rows else 0.0,
+                    "acceptance_by_depth": _rate_by_depth(
+                        accepted_by_depth, drafted_by_depth
+                    ),
+                    "mean_tok_s": statistics.mean([row["tok_s"] for row in rows])
+                    if rows
+                    else 0.0,
+                    "mean_decode_tok_s": statistics.mean(
+                        [row["decode_tok_s"] for row in rows]
+                    )
+                    if rows
+                    else 0.0,
+                    "mean_end_to_end_tok_s": (
+                        statistics.mean([row["end_to_end_tok_s"] for row in rows])
+                        if rows
+                        else 0.0
+                    ),
                     "mean_ar_tok_s": (
-                        statistics.mean([row["ar_tok_s"] for row in rows if row["ar_tok_s"] is not None])
+                        statistics.mean(
+                            [
+                                row["ar_tok_s"]
+                                for row in rows
+                                if row["ar_tok_s"] is not None
+                            ]
+                        )
+                        if compare_ar and rows
+                        else None
+                    ),
+                    "mean_ar_decode_tok_s": (
+                        statistics.mean(
+                            [
+                                row["ar_decode_tok_s"]
+                                for row in rows
+                                if row["ar_decode_tok_s"] is not None
+                            ]
+                        )
+                        if compare_ar and rows
+                        else None
+                    ),
+                    "mean_ar_end_to_end_tok_s": (
+                        statistics.mean(
+                            [
+                                row["ar_end_to_end_tok_s"]
+                                for row in rows
+                                if row["ar_end_to_end_tok_s"] is not None
+                            ]
+                        )
                         if compare_ar and rows
                         else None
                     ),
                     "mean_speedup_vs_ar": (
                         statistics.mean(
-                            [row["speedup_vs_ar"] for row in rows if row["speedup_vs_ar"] is not None]
+                            [
+                                row["speedup_vs_ar"]
+                                for row in rows
+                                if row["speedup_vs_ar"] is not None
+                            ]
                         )
                         if compare_ar and rows
                         else None
                     ),
                     "verify_time_s": sum(row["verify_time_s"] for row in rows),
-                    "verify_forward_time_s": sum(row["verify_forward_time_s"] for row in rows),
-                    "verify_eval_time_s": sum(row["verify_eval_time_s"] for row in rows),
-                    "verify_hidden_eval_time_s": sum(row["verify_hidden_eval_time_s"] for row in rows),
-                    "verify_joint_eval_time_s": sum(row["verify_joint_eval_time_s"] for row in rows),
+                    "verify_forward_time_s": sum(
+                        row["verify_forward_time_s"] for row in rows
+                    ),
+                    "verify_eval_time_s": sum(
+                        row["verify_eval_time_s"] for row in rows
+                    ),
+                    "verify_hidden_eval_time_s": sum(
+                        row["verify_hidden_eval_time_s"] for row in rows
+                    ),
+                    "verify_joint_eval_time_s": sum(
+                        row["verify_joint_eval_time_s"] for row in rows
+                    ),
                     "verify_target_distribution_time_s": sum(
                         row["verify_target_distribution_time_s"] for row in rows
                     ),
                     "draft_time_s": sum(row["draft_time_s"] for row in rows),
-                    "target_forward_time_s": sum(row["target_forward_time_s"] for row in rows),
+                    "target_forward_time_s": sum(
+                        row["target_forward_time_s"] for row in rows
+                    ),
                     "snapshot_time_s": sum(row["snapshot_time_s"] for row in rows),
                     "accept_time_s": sum(row["accept_time_s"] for row in rows),
                     "rollback_time_s": sum(row["rollback_time_s"] for row in rows),
                     "repair_time_s": sum(row["repair_time_s"] for row in rows),
                     "commit_time_s": sum(row["commit_time_s"] for row in rows),
-                    "capture_commit_time_s": sum(row["capture_commit_time_s"] for row in rows),
+                    "capture_commit_time_s": sum(
+                        row["capture_commit_time_s"] for row in rows
+                    ),
                     "bonus_time_s": sum(row["bonus_time_s"] for row in rows),
                     "online_hidden_corrector_time_s": sum(
                         row["online_hidden_corrector_time_s"] for row in rows
@@ -372,9 +449,7 @@ def run_mtp_depth_sweep(
                     "mtp_topk_reranker": _sum_topk_reranker(
                         [row["mtp_topk_reranker"] for row in rows]
                     ),
-                    "draft_core": _sum_draft_core(
-                        [row["draft_core"] for row in rows]
-                    ),
+                    "draft_core": _sum_draft_core([row["draft_core"] for row in rows]),
                     "bonus_tokens": sum(row["bonus_tokens"] for row in rows),
                     "correction_tokens": sum(row["correction_tokens"] for row in rows),
                     "deferred_correction_repairs": sum(
@@ -395,11 +470,11 @@ def run_mtp_depth_sweep(
                         else None
                     ),
                     "exact_total": (
-                        len(rows)
-                        if compare_ar and temperature <= 0
-                        else None
+                        len(rows) if compare_ar and temperature <= 0 else None
                     ),
-                    "peak_memory_bytes": max([row["peak_memory_bytes"] for row in rows] or [0]),
+                    "peak_memory_bytes": max(
+                        [row["peak_memory_bytes"] for row in rows] or [0]
+                    ),
                     "speed_model": _speed_model_summary(rows),
                 },
             }
@@ -428,15 +503,21 @@ def run_mtp_depth_sweep(
         "mtp_quant_group_size": rt.contract.mtp_quant_group_size,
         "mtp_quant_mode": rt.contract.mtp_quant_mode,
         "mtp_quant_policy": rt.contract.mtp_quant_policy,
-        "mtp_adapter_path": str(mtp_adapter_path) if mtp_adapter_path is not None else None,
+        "mtp_adapter_path": str(mtp_adapter_path)
+        if mtp_adapter_path is not None
+        else None,
         "mtp_adapter_kind": (
             rt.mtp_adapter_metadata.get("kind")
             if rt.mtp_adapter_metadata is not None
             else None
         ),
-        "mtp_corrector_path": str(mtp_corrector_path) if mtp_corrector_path is not None else None,
+        "mtp_corrector_path": str(mtp_corrector_path)
+        if mtp_corrector_path is not None
+        else None,
         "mtp_corrector_blend": mtp_corrector_blend,
-        "mtp_corrector_kind": getattr(mtp_corrector, "kind", None) if mtp_corrector is not None else None,
+        "mtp_corrector_kind": getattr(mtp_corrector, "kind", None)
+        if mtp_corrector is not None
+        else None,
         "online_hidden_corrector": {
             "alpha": online_hidden_corrector_alpha,
             "decay": online_hidden_corrector_decay,
@@ -505,10 +586,18 @@ def _sum_correction_cache(values: list[dict[str, object]]) -> dict[str, int | bo
         "entries": sum(int(value.get("entries", 0) or 0) for value in values),
         "prompt_enabled": any(bool(value.get("prompt_enabled")) for value in values),
         "prompt_hits": sum(int(value.get("prompt_hits", 0) or 0) for value in values),
-        "prompt_stores": sum(int(value.get("prompt_stores", 0) or 0) for value in values),
-        "prompt_collisions": sum(int(value.get("prompt_collisions", 0) or 0) for value in values),
-        "prompt_skipped": sum(int(value.get("prompt_skipped", 0) or 0) for value in values),
-        "key_policy": key_policies[0] if len(key_policies) == 1 else ",".join(key_policies),
+        "prompt_stores": sum(
+            int(value.get("prompt_stores", 0) or 0) for value in values
+        ),
+        "prompt_collisions": sum(
+            int(value.get("prompt_collisions", 0) or 0) for value in values
+        ),
+        "prompt_skipped": sum(
+            int(value.get("prompt_skipped", 0) or 0) for value in values
+        ),
+        "key_policy": key_policies[0]
+        if len(key_policies) == 1
+        else ",".join(key_policies),
     }
 
 
@@ -533,9 +622,15 @@ def _sum_adapter_ensemble_q(values: list[dict[str, object]]) -> dict[str, object
         "min_depth": min_depths[0] if len(min_depths) == 1 else ",".join(min_depths),
         "calls": sum(int(value.get("calls", 0) or 0) for value in values),
         "changed": sum(int(value.get("changed", 0) or 0) for value in values),
-        "base_selected": sum(int(value.get("base_selected", 0) or 0) for value in values),
-        "adapter_selected": sum(int(value.get("adapter_selected", 0) or 0) for value in values),
-        "shared_selected": sum(int(value.get("shared_selected", 0) or 0) for value in values),
+        "base_selected": sum(
+            int(value.get("base_selected", 0) or 0) for value in values
+        ),
+        "adapter_selected": sum(
+            int(value.get("adapter_selected", 0) or 0) for value in values
+        ),
+        "shared_selected": sum(
+            int(value.get("shared_selected", 0) or 0) for value in values
+        ),
         "fallbacks": sum(int(value.get("fallbacks", 0) or 0) for value in values),
     }
 
@@ -553,11 +648,7 @@ def _sum_topk_reranker(values: list[dict[str, object]]) -> dict[str, object]:
         }
     )
     topks = sorted(
-        {
-            str(value.get("topk"))
-            for value in values
-            if value.get("topk") is not None
-        }
+        {str(value.get("topk")) for value in values if value.get("topk") is not None}
     )
     return {
         "enabled": any(bool(value.get("enabled")) for value in values),
@@ -581,13 +672,14 @@ def _sum_draft_core(values: list[dict[str, object]]) -> dict[str, object]:
     )
     return {
         "requested": requested[0] if len(requested) == 1 else ",".join(requested),
-        "device_d2_calls": sum(int(value.get("device_d2_calls", 0) or 0) for value in values),
+        "device_d2_calls": sum(
+            int(value.get("device_d2_calls", 0) or 0) for value in values
+        ),
         "device_d2_fallbacks": sum(
             int(value.get("device_d2_fallbacks", 0) or 0) for value in values
         ),
         "device_d2_compile_time_s": sum(
-            float(value.get("device_d2_compile_time_s", 0.0) or 0.0)
-            for value in values
+            float(value.get("device_d2_compile_time_s", 0.0) or 0.0) for value in values
         ),
     }
 
@@ -598,7 +690,9 @@ def _speed_model_summary(rows: list[dict[str, Any]]) -> dict[str, float | None]:
     repair = sum(float(row["repair_time_s"]) for row in rows)
     verify = sum(float(row["verify_time_s"]) for row in rows)
     draft = sum(float(row["draft_time_s"]) for row in rows)
-    online_hidden = sum(float(row.get("online_hidden_corrector_time_s", 0.0)) for row in rows)
+    online_hidden = sum(
+        float(row.get("online_hidden_corrector_time_s", 0.0)) for row in rows
+    )
     if generated <= 0 or elapsed <= 0:
         return {
             "observed_tok_s": None,

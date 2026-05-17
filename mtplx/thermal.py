@@ -470,9 +470,11 @@ def set_thermal_profile_verified(
                 f"stderr: {(set_result.get('attempts') or [{}])[-1].get('stderr', '')}"
             ),
             "actionable": (
-                "open /Applications/ThermalForge.app once and enable "
-                "'Launch at Login', or run `sudo thermalforge install` to "
-                "(re)install the daemon."
+                "Do not run `sudo mtplx tune`; it changes the MTPLX user/cache "
+                "context. Run `mtplx max --grant-sudo` once, or open "
+                "/Applications/ThermalForge.app once and enable 'Launch at Login', "
+                "or run `sudo thermalforge install` to (re)install the daemon. "
+                "Then re-run `mtplx tune` as your normal user."
             ),
         }
 

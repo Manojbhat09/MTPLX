@@ -2029,7 +2029,11 @@ def _json_schema_value_matches(value: Any, schema: dict[str, Any]) -> bool:
             return True
         if schema_type == "boolean" and isinstance(value, bool):
             return True
-        if schema_type == "integer" and isinstance(value, int) and not isinstance(value, bool):
+        if (
+            schema_type == "integer"
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+        ):
             return True
         if (
             schema_type == "number"
@@ -2476,7 +2480,10 @@ def _tool_like_marker_present(text: str, marker_pairs: list[tuple[str, str]]) ->
         return True
     if any(prefix.lower() in lowered for prefix in _BRACKET_TOOL_PREFIXES):
         return True
-    return any(start.lower() in lowered or end.lower() in lowered for start, end in marker_pairs)
+    return any(
+        start.lower() in lowered or end.lower() in lowered
+        for start, end in marker_pairs
+    )
 
 
 def _parse_tool_call_payload(
@@ -4218,10 +4225,20 @@ def _repair_streamed_generation_stats(
     repaired = dict(stats)
     raw_generated = int(repaired.get("generated_tokens") or 0)
     if completion_tokens > raw_generated:
+        prompt_eval_time_s = float(repaired.get("prompt_eval_time_s") or 0.0)
+        decode_elapsed_s = max(0.0, elapsed_s - prompt_eval_time_s)
+        decode_tok_s = (
+            float(completion_tokens) / decode_elapsed_s
+            if decode_elapsed_s > 0.0
+            else 0.0
+        )
         repaired["generated_tokens_raw"] = raw_generated
         repaired["generated_tokens_recovered_from_stream"] = True
         repaired["generated_tokens"] = int(completion_tokens)
-        repaired["tok_s"] = (
+        repaired["tok_s"] = decode_tok_s
+        repaired["decode_tok_s"] = decode_tok_s
+        repaired["decode_elapsed_s"] = decode_elapsed_s
+        repaired["end_to_end_tok_s"] = (
             float(completion_tokens) / elapsed_s if elapsed_s > 0 else 0.0
         )
     return repaired
@@ -4548,6 +4565,7 @@ PUBLIC_MTPLX_STATS_KEYS = (
     "completion_tokens",
     "elapsed_s",
     "tok_s",
+    "end_to_end_tok_s",
     "prompt_eval_time_s",
     "prompt_target_prefill_time_s",
     "prompt_mtp_history_time_s",
@@ -5794,7 +5812,7 @@ def _run_generation(
             generated_tokens=list(out.tokens),
             streamed_token_times=token_times,
         )
-        tok_s = completion_tokens / elapsed_s if elapsed_s > 0 else 0.0
+        server_tok_s = completion_tokens / elapsed_s if elapsed_s > 0 else 0.0
         stats = _repair_streamed_generation_stats(
             out.stats.to_dict(),
             completion_tokens=completion_tokens,
@@ -5907,7 +5925,7 @@ def _run_generation(
             stats["mean_accept_probability_by_depth"] = []
             stats["draft_time_s"] = 0.0
         stats["server_elapsed_s"] = elapsed_s
-        stats["server_tok_s"] = tok_s
+        stats["server_tok_s"] = server_tok_s
         stats["server_seed"] = generation_seed
         stats["server_attempts"] = attempt + 1
         stats["server_blank_retries"] = attempt
@@ -5925,7 +5943,8 @@ def _run_generation(
             "prompt_tokens": len(prompt_ids),
             "completion_tokens": completion_tokens,
             "elapsed_s": elapsed_s,
-            "tok_s": tok_s,
+            "tok_s": stats.get("decode_tok_s") or server_tok_s,
+            "end_to_end_tok_s": server_tok_s,
             "_final_state": final_state,
             "finish_reason": (
                 out.final_state.finish_reason if out.final_state is not None else "stop"
@@ -5945,6 +5964,7 @@ def _run_generation(
                     "completion_tokens": last["completion_tokens"],
                     "elapsed_s": round(float(last["elapsed_s"]), 6),
                     "tok_s": round(float(last["tok_s"]), 6),
+                    "end_to_end_tok_s": round(float(last["end_to_end_tok_s"]), 6),
                     "seed": last["stats"].get("server_seed"),
                     "attempts": last["stats"].get("server_attempts"),
                     "blank_retries": last["stats"].get("server_blank_retries"),
