@@ -4,6 +4,8 @@ All notable user-facing changes are recorded here.
 
 ## Unreleased
 
+## v0.3.7 - 2026-05-17
+
 ### Added
 
 - Added full Claude Code client-tool support on the Anthropic Messages surface:

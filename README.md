@@ -12,7 +12,7 @@
 [![PyPI](https://img.shields.io/pypi/v/mtplx?label=PyPI)](https://pypi.org/project/mtplx/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-black?logo=apple)](https://developer.apple.com/metal/)
-[![Status](https://img.shields.io/badge/status-v0.3.6-blue)](CHANGELOG.md)
+[![Status](https://img.shields.io/badge/status-v0.3.7-blue)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
 </div>
@@ -73,7 +73,7 @@ otherwise it is reported as broader candidate-process telemetry.
 - **Per-Mac Tune.** `mtplx tune`, `mtplx-tune`, and `mtplx bench tune` compare AR/D1/D2/D3 in isolated subprocesses and persist the winning depth per model, hardware, software, and settings. If no MTP depth beats AR, nothing worse is saved. `mtplx bench tune` also records MX Power Gadget-style power, frequency, temperature, utilization, fan, and thermal-pressure telemetry per candidate for chip-level diagnosis, with generation-window scope when available.
 - **Four-tier model compatibility contract.** `mtplx inspect <model>` reports: verified / arch-compatible-unverified / incompatible-architecture / no-MTP. No silent garbage runs.
 - **Lazy imports.** `mtplx --help`, `doctor`, `inspect`, `init`, `setup` work on a fresh venv *without MLX installed*. Generation and serving pull in MLX only when needed.
-- **v0.3.6 memory, Tune, and OpenCode fixes.** Large `max_tokens` one-off requests no longer reserve the full decode KV window up front, anonymous no-reuse sessions do not retain full-capacity live cache refs, OpenCode tool-result turns reuse the stable cached prefix instead of cold-prefilling the full history, and Tune is available from the packaged CLI.
+- **v0.3.7 default-model, Tune, and Claude Code fixes.** The verified default now resolves cleanly from `start`, `quickstart`, and Tune paths; Tune reports decode speed honestly and surfaces child failures clearly; Claude Code can run real client tools through the Anthropic Messages API.
 
 > **Release honesty.** Burst is the old fan-backed headline lane and is capped in the UI at short contexts only. Sustained is the explicit long-context memory-safety lane; it is not an AR downgrade. Long no-fan decode decay remains a future runtime track; see [Roadmap](#roadmap).
 

@@ -1,5 +1,24 @@
 # MTPLX Release Log
 
+## 2026-05-17 05:58 BST - v0.3.7 Release Prep
+
+Scope:
+
+```text
+worktree=/Users/youssof/Documents/MTPLX-release/mtplx
+branch=main
+target_version=0.3.7
+release_reason=ship fixes and evidence for issues #67, #68, #70, and #71
+```
+
+Validation:
+
+```text
+no_mlx_ci_local=/Users/youssof/Documents/MTPLX-release/mtplx/.venv/bin/python -m pytest tests/test_no_mlx_imports.py tests/test_public_cli.py tests/test_runtime_kpis.py tests/test_server_openai.py tests/test_openai_bridge.py tests/test_thermal.py tests/test_cache_state.py -q -> pass
+build=/Users/youssof/Documents/MTPLX-release/mtplx/.venv/bin/python -m build -> built dist/mtplx-0.3.7.tar.gz and dist/mtplx-0.3.7-py3-none-any.whl
+twine_check=/Users/youssof/Documents/MTPLX-release/mtplx/.venv/bin/python -m twine check dist/* -> pass
+```
+
 ## 2026-05-17 05:21 BST - Release Readiness Evidence For Issues #67/#68/#70/#71
 
 Scope:
