@@ -764,6 +764,26 @@ def _mtp_pattern_from_config(config: dict[str, Any]) -> str | None:
 def _inspect_hf_model(repo_id: str) -> ModelInspection:
     files, files_error = _hf_list_repo_files(repo_id)
     config, config_path, config_error = _hf_download_json(repo_id, "config.json")
+    if config is None and "mtplx_pair.json" in files:
+        # Assistant-pair bundles (Gemma 4) have no root config.json by
+        # design: weights and configs live under target/ and assistant/
+        # with mtplx_pair.json at the bundle root. The local loader and
+        # the app already understand this layout; classify the remote
+        # repo from the pair manifest plus the target config so the HF
+        # preflight reaches the same verdict instead of refusing what
+        # the engine can run.
+        pair_manifest, _pair_path, _pair_error = _hf_download_json(
+            repo_id, "mtplx_pair.json"
+        )
+        target_config, target_path, _target_error = _hf_download_json(
+            repo_id, "target/config.json"
+        )
+        if pair_manifest is not None and target_config is not None:
+            config = dict(target_config)
+            config["assistant_pair_bundle"] = pair_manifest
+            config["mtplx_pair.json"] = True
+            config_path = target_path
+            config_error = None
     if config is None:
         raise RuntimeError(
             f"Could not inspect HF model {repo_id}: "

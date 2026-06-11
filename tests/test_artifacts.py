@@ -1878,3 +1878,61 @@ def test_hf_llama_without_mtp_is_no_mtp(monkeypatch):
     assert result.source == "hf"
     assert result.compatibility["tier"] == "no-MTP"
     assert result.compatibility["exit_code"] == 2
+
+
+def test_gemma4_pair_bundle_root_is_runnable_from_remote_file_listing():
+    """Issue #16: the HF preflight refused the official Gemma 4 repos.
+
+    A complete assistant-pair bundle has no MTP tensors of its own and
+    no root config.json; the bundle root is recognizable by weights
+    under both target/ and assistant/. The compatibility gate must
+    treat that as the runnable artifact, exactly like the app does.
+    """
+    from mtplx.artifacts import ModelInspection
+    from mtplx.backends.registry import compatibility_for_inspection
+
+    inspection = ModelInspection(
+        model_dir="hf://Youssofal/Gemma4-MTPLX-Optimized-Speed",
+        config_exists=True,
+        architecture="Gemma4ForConditionalGeneration",
+        model_type="gemma4",
+        mtp_num_hidden_layers=0,
+        hidden_size=None,
+        num_hidden_layers=None,
+        vocab_size=None,
+        source="huggingface",
+        model_files=(
+            "assistant/model.safetensors",
+            "target/model-00001-of-00004.safetensors",
+        ),
+    )
+
+    verdict = compatibility_for_inspection(inspection)
+
+    assert verdict.can_run is True
+    assert verdict.exit_code == 0
+    assert verdict.arch_id == "gemma4-assistant-mtp"
+    assert verdict.runtime_compatibility == "assistant-pair-native"
+
+
+def test_gemma4_target_subfolder_alone_still_refuses():
+    from mtplx.artifacts import ModelInspection
+    from mtplx.backends.registry import compatibility_for_inspection
+
+    inspection = ModelInspection(
+        model_dir="hf://someone/gemma4-target-only",
+        config_exists=True,
+        architecture="Gemma4ForConditionalGeneration",
+        model_type="gemma4",
+        mtp_num_hidden_layers=0,
+        hidden_size=None,
+        num_hidden_layers=None,
+        vocab_size=None,
+        source="huggingface",
+        model_files=("model-00001-of-00004.safetensors",),
+    )
+
+    verdict = compatibility_for_inspection(inspection)
+
+    assert verdict.can_run is False
+    assert verdict.runtime_compatibility == "incomplete-assistant-pair"

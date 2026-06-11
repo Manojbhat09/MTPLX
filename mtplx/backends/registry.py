@@ -1277,6 +1277,42 @@ def compatibility_for_inspection(inspection: Any) -> CompatibilityVerdict:
         or model_type_text == "gemma4_assistant"
     )
     if not has_mtp and is_gemma4_pair_subfolder:
+        # A complete assistant-pair bundle has no MTP tensors of its
+        # own: drafting comes from the paired assistant model. The
+        # bundle root is recognizable by mtplx_pair.json (recorded as a
+        # sidecar by local inspection) or, for remote repos, by weights
+        # under both target/ and assistant/. Without this, the Hugging
+        # Face preflight rejected the official Gemma 4 repos that the
+        # app runs fine (issue #16).
+        pair_model_files = tuple(getattr(inspection, "model_files", ()) or ())
+        pair_sidecars = getattr(inspection, "sidecars", {}) or {}
+        has_pair_root = bool(pair_sidecars.get("mtplx_pair.json")) or (
+            any(str(name).startswith("target/") for name in pair_model_files)
+            and any(str(name).startswith("assistant/") for name in pair_model_files)
+        )
+        if has_pair_root:
+            return CompatibilityVerdict(
+                tier=TIER_VERIFIED,
+                arch_id="gemma4-assistant-mtp",
+                supported=True,
+                recognized=True,
+                can_run=True,
+                exit_code=EXIT_VERIFIED,
+                message=(
+                    "Gemma 4 assistant-pair bundle: mtplx_pair.json with "
+                    "target/ and assistant/ weights. Runs on the "
+                    "gemma4_assistant backend."
+                ),
+                recommended_backend="gemma4_assistant",
+                recommended_profile=DEFAULT_PROFILE_NAME,
+                mtp_supported="yes",
+                runtime_compatibility="assistant-pair-native",
+                support_level="gemma4-pair-bundle",
+                support_notes=(
+                    "Drafting comes from the paired assistant model; the "
+                    "bundle root is the runnable artifact."
+                ),
+            )
         is_assistant = (
             "assistant" in compact_architecture
             or model_type_text == "gemma4_assistant"
