@@ -2754,15 +2754,31 @@ def _cmd_tune(
         )
         _emit("[tune] fans may get loud during tuning and will be restored afterward")
     max_session = MaxSession(log=_emit)
-    if not max_session.start():
+    fans_pinned = bool(max_session.start())
+    if not fans_pinned:
         verified = max_session.thermal.get("verified") or {}
-        return _tune_error(
-            "verified max-fan mode did not start; refusing to run a model tune",
-            detail=verified.get("message"),
-            actionable=verified.get("actionable"),
-            thermal=max_session.thermal,
-            json_output=json_output,
-        )
+        if bool(getattr(args, "require_max_fans", False)):
+            return _tune_error(
+                "verified max-fan mode did not start and --require-max-fans is set",
+                detail=verified.get("message"),
+                actionable=verified.get("actionable"),
+                thermal=max_session.thermal,
+                json_output=json_output,
+            )
+        # Onboarding has to finish on every Mac. Pinned fans give the
+        # cleanest timing, but a depth measured on auto fans still beats
+        # a dead setup wizard (a real M5 Max user hit exactly this when
+        # the helper could not verify a ramp). Continue unpinned and
+        # record the honesty flag in the summary; --require-max-fans
+        # keeps the strict behavior for benchmarking.
+        if not json_output:
+            _emit("[tune] fan pinning unavailable; tuning with fans on auto")
+            reason = verified.get("message")
+            if reason:
+                _emit(f"[tune]   reason: {reason}")
+            actionable = verified.get("actionable")
+            if actionable:
+                _emit(f"[tune]   to enable pinned-fan tuning later: {actionable}")
 
     try:
         if not json_output:
@@ -2805,8 +2821,15 @@ def _cmd_tune(
             "telemetry_enabled": collect_telemetry,
             "telemetry_env": TUNE_TELEMETRY_ENV,
             "model_source_notes": model_source_notes,
+            "fans_pinned": fans_pinned,
         },
     )
+    payload["fans_pinned"] = fans_pinned
+    if not fans_pinned:
+        payload["fans_note"] = (
+            "Tuned with fans on auto; pinned-fan timing was unavailable. "
+            "Results are valid for how this Mac actually runs."
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_json(output_path, payload)
 

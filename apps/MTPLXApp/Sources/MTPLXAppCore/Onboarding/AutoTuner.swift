@@ -262,13 +262,15 @@ public struct AutoTuner: Sendable {
                     continuation.finish()
                     return
                 }
-                guard fanControl.ok else {
-                    continuation.yield(.failed(
-                        exitCode: fanControl.exitCode,
-                        stderrTail: fanControl.message
+                if !fanControl.ok {
+                    // Fan pinning is a timing nicety, not a tune
+                    // prerequisite: a real M5 Max user had onboarding
+                    // die here when the helper could not verify a
+                    // ramp. The CLI tune now degrades to auto fans on
+                    // its own; surface the state and keep going.
+                    continuation.yield(.installingFanControl(
+                        "Fan control unavailable; tuning with fans on auto"
                     ))
-                    continuation.finish()
-                    return
                 }
 
                 let process = Process()
