@@ -17,6 +17,9 @@ struct AttachmentCard: View {
     let fileExtension: String
     let sizeBytes: Int
     var fileURL: URL? = nil
+    /// Encoded image bytes for vision attachments; renders the actual
+    /// picture as the badge thumbnail.
+    var imageData: Data? = nil
     var errorMessage: String? = nil
     var onTap: (() -> Void)? = nil
     var onRemove: (() -> Void)? = nil
@@ -92,7 +95,17 @@ struct AttachmentCard: View {
 
     @ViewBuilder
     private var badge: some View {
-        if errorMessage != nil {
+        if let imageData, let thumb = NSImage(data: imageData) {
+            Image(nsImage: thumb)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 32, height: 32)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(Brand.separator, lineWidth: 0.5)
+                )
+        } else if errorMessage != nil {
             ZStack {
                 Circle()
                     .fill(Color.white.opacity(0.06))

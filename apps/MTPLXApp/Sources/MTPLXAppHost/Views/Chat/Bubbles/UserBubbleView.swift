@@ -72,7 +72,8 @@ struct MessageAttachmentStrip: View {
             AttachmentCard(
                 filename: attachment.filename,
                 fileExtension: Self.fileExtension(filename: attachment.filename),
-                sizeBytes: attachment.sizeBytes
+                sizeBytes: attachment.sizeBytes,
+                imageData: attachment.imageData
             )
         } else {
             FlowRow(horizontalSpacing: 8, verticalSpacing: 8, alignment: .trailing) {
@@ -80,7 +81,8 @@ struct MessageAttachmentStrip: View {
                     AttachmentCard(
                         filename: attachment.filename,
                         fileExtension: Self.fileExtension(filename: attachment.filename),
-                        sizeBytes: attachment.sizeBytes
+                        sizeBytes: attachment.sizeBytes,
+                        imageData: attachment.imageData
                     )
                 }
             }

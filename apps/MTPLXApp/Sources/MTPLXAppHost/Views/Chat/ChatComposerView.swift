@@ -79,7 +79,11 @@ struct ChatComposerView: View {
                         filename: attachment.filename,
                         fileExtension: extensionOf(attachment.filename),
                         sizeBytes: attachment.sizeBytes,
-                        errorMessage: attachment.extractedText.isEmpty ? "Could not read" : nil,
+                        imageData: attachment.imageData,
+                        errorMessage:
+                            (attachment.imageData == nil
+                                && attachment.extractedText.isEmpty)
+                            ? "Could not read" : nil,
                         onRemove: { viewModel.removeAttachment(attachment) }
                     )
                 }
