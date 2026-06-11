@@ -13,6 +13,7 @@ thread so coding-agent bursts do not require parallel model loops.
 from __future__ import annotations
 
 import argparse
+import base64
 import asyncio
 import builtins
 import errno
@@ -2691,6 +2692,168 @@ def _content_to_text(content: Any) -> str:
                 parts.append(str(item))
         return "".join(parts)
     return str(content)
+
+
+_VISION_IMAGE_FETCH_TIMEOUT_S = 10.0
+_VISION_IMAGE_MAX_BYTES = 50 * 1024 * 1024
+# The Qwen VL families tokenize this literal into
+# vision_start + image_pad + vision_end; the single pad is expanded to
+# the per-image grid count after templating.
+_VISION_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
+
+
+def _server_vision_spec(state: Any) -> Any | None:
+    cached = getattr(state, "_vision_spec_cache", "unset")
+    if cached != "unset":
+        return cached
+    spec = None
+    try:
+        from mtplx.vision import vision_spec_for_model_dir
+
+        spec = vision_spec_for_model_dir(str(state.args.model))
+    except Exception:
+        spec = None
+    state._vision_spec_cache = spec
+    return spec
+
+
+def _image_bytes_from_url(url: str) -> bytes:
+    if url.startswith("data:"):
+        header, _, payload = url.partition(",")
+        if not payload or ";base64" not in header:
+            raise ValueError("image data URL must be base64 encoded")
+        raw = base64.b64decode(payload, validate=False)
+    else:
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("image_url must be a data: URL or an http(s) URL")
+        import urllib.request as _urllib_request
+
+        with _urllib_request.urlopen(
+            url, timeout=_VISION_IMAGE_FETCH_TIMEOUT_S
+        ) as response:
+            raw = response.read(_VISION_IMAGE_MAX_BYTES + 1)
+    if len(raw) > _VISION_IMAGE_MAX_BYTES:
+        raise ValueError("image exceeds the 50MB limit")
+    return raw
+
+
+def _vision_extract_and_flatten(
+    messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[bytes]]:
+    """Replace image content parts with the vision placeholder text.
+
+    Returns the flattened messages plus the raw image payloads in prompt
+    order. Messages without image parts pass through untouched so the
+    text-only path stays byte-identical.
+    """
+
+    images: list[bytes] = []
+    flattened: list[Any] = []
+    for message in messages:
+        is_mapping = isinstance(message, dict)
+        content = (
+            message.get("content")
+            if is_mapping
+            else getattr(message, "content", None)
+        )
+        if not isinstance(content, list):
+            flattened.append(message)
+            continue
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                parts.append(str(item))
+                continue
+            item_type = str(item.get("type") or "")
+            if item_type == "image_url" or "image_url" in item:
+                image_url = item.get("image_url")
+                url = (
+                    image_url.get("url")
+                    if isinstance(image_url, dict)
+                    else image_url
+                )
+                images.append(_image_bytes_from_url(str(url or "")))
+                parts.append(_VISION_PLACEHOLDER)
+            elif item_type == "text" or "text" in item:
+                parts.append(str(item.get("text", "")))
+        text = "".join(parts)
+        if is_mapping:
+            updated = dict(message)
+            updated["content"] = text
+        else:
+            updated = message.model_copy(update={"content": text})
+        flattened.append(updated)
+    return flattened, images
+
+
+def _expand_image_pads(
+    prompt_ids: list[int], *, image_pad_id: int, pad_counts: list[int]
+) -> list[int]:
+    expanded: list[int] = []
+    image_index = 0
+    for token in prompt_ids:
+        if token == image_pad_id:
+            if image_index >= len(pad_counts):
+                raise ValueError(
+                    "prompt contains more image placeholders than images"
+                )
+            expanded.extend([token] * pad_counts[image_index])
+            image_index += 1
+        else:
+            expanded.append(token)
+    if image_index != len(pad_counts):
+        raise ValueError(
+            "chat template dropped image placeholders: "
+            f"expected {len(pad_counts)}, found {image_index}"
+        )
+    return expanded
+
+
+def _materialize_vision_splice(
+    state: Any, images: list[bytes], prompt_ids: list[int]
+) -> tuple[list[int], Any]:
+    """Run the tower and return (expanded prompt ids, VisionSplice)."""
+
+    import json as _json
+    from pathlib import Path as _Path
+
+    from mtplx.vision import load_vision_tower
+    from mtplx.vision.processing import (
+        decode_image,
+        image_pad_token_count,
+        preprocess_images,
+    )
+    from mtplx.vision.splice import VisionSplice
+
+    spec = _server_vision_spec(state)
+    if spec is None:
+        raise ValueError("model has no vision tower")
+    model_dir = _Path(str(state.args.model))
+    preprocessor_config = _json.loads(
+        (model_dir / "preprocessor_config.json").read_text(encoding="utf-8")
+    )
+    decoded = [decode_image(raw) for raw in images]
+    pixel_values, grids = preprocess_images(decoded, preprocessor_config)
+    pad_counts = [image_pad_token_count(grid) for grid in grids]
+    expanded_ids = _expand_image_pads(
+        prompt_ids,
+        image_pad_id=int(spec.image_token_id),
+        pad_counts=pad_counts,
+    )
+    tower = load_vision_tower(str(model_dir))
+    embeddings, _deepstack = tower(pixel_values, grids)
+    # Materialize before handing off: the generation worker runs on a
+    # different thread, and a pending lazy graph must not cross it.
+    import mlx.core as _mx
+
+    _mx.eval(embeddings)
+    return expanded_ids, VisionSplice(
+        image_pad_token_id=int(spec.image_token_id),
+        embeddings=embeddings,
+    )
 
 
 def _anthropic_content_to_text(content: Any) -> str:
@@ -13922,6 +14085,7 @@ def _run_generation(
     prefill_callback: Callable[[dict[str, Any]], None] | None = None,
     cancel_event: Event | None = None,
     streaming_response: bool | None = None,
+    vision_splice: Any | None = None,
 ) -> dict[str, Any]:
     response_max, sampler, generation_limits = _generation_params(
         state,
@@ -14048,9 +14212,14 @@ def _run_generation(
                     adaptive_policy = _make_adaptive_policy(
                         state.args, max_depth=effective_depth
                     )
+                    if vision_splice is not None and vision_splice.cursor:
+                        # Retries and tool-loop redispatches replay the
+                        # full prompt, so the image rows must rewind.
+                        vision_splice.reset()
                     out = generate_mtpk(
                         state.runtime,
                         prompt_ids,
+                        vision_splice=vision_splice,
                         max_tokens=response_max,
                         sampler=sampler,
                         draft_sampler=effective_draft_sampler,
@@ -14312,6 +14481,7 @@ def _run_generation(
                             request_observability.get("request_session_source") or ""
                         ),
                         session_keep_live_ref=session_keep_live_ref,
+                        vision_splice=vision_splice,
                     )
                 )
         cleanup = _auto_clear_mlx_cache_after_completed_request(
@@ -17173,6 +17343,10 @@ def create_app(state: ServerState) -> FastAPI:
                 getattr(runtime, "model_path", None)
                 or getattr(state.args, "model", "")
             ),
+            "vision": {
+                "enabled": _server_vision_spec(state) is not None,
+                "formats": ["png", "jpeg", "webp"],
+            },
             "generation_mode": state.args.generation_mode,
             "default_generation_mode": state.args.generation_mode,
             "runtime_mode": runtime_mode,
@@ -18551,6 +18725,27 @@ def create_app(state: ServerState) -> FastAPI:
             generation_mode=request_generation_mode,
             allow_client_controls=client_controls_allowed,
         )
+        try:
+            messages_for_generation, vision_images = _vision_extract_and_flatten(
+                messages_for_generation
+            )
+        except ValueError as vision_error:
+            raise HTTPException(status_code=400, detail=str(vision_error))
+        vision_splice = None
+        if vision_images:
+            if _server_vision_spec(state) is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "this model has no vision tower; image content is "
+                        "not supported for it"
+                    ),
+                )
+            if str(request_generation_mode or "") == "ar":
+                raise HTTPException(
+                    status_code=400,
+                    detail="image content requires MTP generation mode",
+                )
         template_observability: dict[str, Any] = {}
         prompt_ids = _encode_messages(
             state.runtime.tokenizer,
@@ -18563,6 +18758,13 @@ def create_app(state: ServerState) -> FastAPI:
             tool_prompt_mode=template_tool_prompt_mode,
             template_observability=template_observability,
         )
+        if vision_images:
+            try:
+                prompt_ids, vision_splice = _materialize_vision_splice(
+                    state, vision_images, prompt_ids
+                )
+            except ValueError as vision_error:
+                raise HTTPException(status_code=400, detail=str(vision_error))
         if aime_visible_working:
             prompt_ids = [
                 *prompt_ids,
@@ -18651,6 +18853,9 @@ def create_app(state: ServerState) -> FastAPI:
             request_generation_mode=request_generation_mode,
             request_depth=request_depth,
         )
+        if vision_splice is not None:
+            request_observability["request_vision_images"] = len(vision_images)
+            request_observability["request_vision_rows"] = vision_splice.total_rows
         if read_only_force_answer_contract_active:
             request_observability["request_session_restore_policy"] = (
                 "stable_without_transient_force_answer"
@@ -18681,7 +18886,14 @@ def create_app(state: ServerState) -> FastAPI:
         opencode_tool_history_force_clone_restore = bool(
             opencode_tool_history_policy["force_clone_restore"]
         )
-        if not background and not cache_bypass:
+        if vision_splice is not None:
+            # Image content is invisible to token-id keyed caches, so a
+            # vision request never joins a session or the bank: a later
+            # request with the same ids but different pixels must not
+            # restore this KV.
+            cache_miss_reason = "vision_request_cache_bypass"
+            session_restore_mode = "vision_bypass"
+        if not background and not cache_bypass and vision_splice is None:
             requested_restore_mode = headers.get(
                 "x-mtplx-restore-mode", "reference_lease"
             )
@@ -18914,7 +19126,10 @@ def create_app(state: ServerState) -> FastAPI:
             )
         session_bank_for_generation = (
             None
-            if background or cache_bypass or opencode_tool_history_cache_bypass
+            if background
+            or cache_bypass
+            or opencode_tool_history_cache_bypass
+            or vision_splice is not None
             else state.sessions.bank
         )
         request_observability["request_session_bank_bypass"] = (
@@ -19108,6 +19323,7 @@ def create_app(state: ServerState) -> FastAPI:
                         background_request=background,
                         commit_prompt_prefix_to_bank=commit_prompt_prefix,
                         session_keep_live_ref=session_keep_live_ref,
+                        vision_splice=vision_splice,
                         request_observability=request_observability,
                         token_callback=_nonstream_on_tokens,
                         prefill_callback=_nonstream_on_prefill,
@@ -19142,6 +19358,7 @@ def create_app(state: ServerState) -> FastAPI:
                     session_policy_fingerprint=session_restore_policy_fingerprint,
                     commit_prompt_prefix_to_bank=commit_prompt_prefix,
                     session_keep_live_ref=session_keep_live_ref,
+                    vision_splice=vision_splice,
                     request_observability=request_observability,
                     token_callback=_nonstream_on_tokens,
                     prefill_callback=_nonstream_on_prefill,
@@ -19483,6 +19700,7 @@ def create_app(state: ServerState) -> FastAPI:
                         commit_final_state_to_bank=False,
                         commit_prompt_prefix_to_bank=commit_prompt_prefix,
                         session_keep_live_ref=session_keep_live_ref,
+                        vision_splice=vision_splice,
                         request_observability=retry_observability,
                         prefill_callback=on_prefill,
                         cancel_event=cancel_event,
@@ -19601,6 +19819,7 @@ def create_app(state: ServerState) -> FastAPI:
                         commit_final_state_to_bank=False,
                         commit_prompt_prefix_to_bank=commit_prompt_prefix,
                         session_keep_live_ref=session_keep_live_ref,
+                        vision_splice=vision_splice,
                         request_observability=retry_observability,
                         prefill_callback=on_prefill,
                         cancel_event=cancel_event,
@@ -19738,6 +19957,7 @@ def create_app(state: ServerState) -> FastAPI:
                         commit_final_state_to_bank=False,
                         commit_prompt_prefix_to_bank=False,
                         session_keep_live_ref=session_keep_live_ref,
+                        vision_splice=vision_splice,
                         request_observability=retry_observability,
                         prefill_callback=on_prefill,
                         cancel_event=cancel_event,
@@ -19907,6 +20127,7 @@ def create_app(state: ServerState) -> FastAPI:
                         commit_final_state_to_bank=False,
                         commit_prompt_prefix_to_bank=commit_prompt_prefix,
                         session_keep_live_ref=session_keep_live_ref,
+                        vision_splice=vision_splice,
                         request_observability=retry_observability,
                         prefill_callback=on_prefill,
                         cancel_event=cancel_event,
@@ -20061,6 +20282,7 @@ def create_app(state: ServerState) -> FastAPI:
                         commit_final_state_to_bank=False,
                         commit_prompt_prefix_to_bank=commit_prompt_prefix,
                         session_keep_live_ref=session_keep_live_ref,
+                        vision_splice=vision_splice,
                         request_observability=retry_observability,
                         prefill_callback=on_prefill,
                         cancel_event=cancel_event,
@@ -20136,6 +20358,7 @@ def create_app(state: ServerState) -> FastAPI:
                                 background_request=background,
                                 commit_prompt_prefix_to_bank=commit_prompt_prefix,
                                 session_keep_live_ref=session_keep_live_ref,
+                                vision_splice=vision_splice,
                                 request_observability=request_observability,
                                 prefill_callback=on_prefill,
                                 cancel_event=cancel_event,
@@ -20183,6 +20406,7 @@ def create_app(state: ServerState) -> FastAPI:
                                     commit_final_state_to_bank=False,
                                     commit_prompt_prefix_to_bank=commit_prompt_prefix,
                                     session_keep_live_ref=session_keep_live_ref,
+                                    vision_splice=vision_splice,
                                     request_observability=request_observability,
                                     prefill_callback=on_prefill,
                                     cancel_event=cancel_event,

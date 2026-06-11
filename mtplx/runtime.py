@@ -71,6 +71,12 @@ class MTPLXRuntime:
             bool(self._forward_ar_supports_logits_keep),
         )
 
+    def embed_tokens(self, input_ids):
+        """Embed token ids with the text model's embedding table."""
+
+        text_model = getattr(self.model, "language_model", self.model)
+        return text_model.model.embed_tokens(input_ids)
+
     def forward_ar(
         self,
         input_ids,
@@ -79,13 +85,20 @@ class MTPLXRuntime:
         hidden_variant: str | None = None,
         emit_logits: bool = True,
         logits_keep: int | None = None,
+        input_embeddings=None,
     ):
         self._count("forward_ar_hidden_calls" if return_hidden else "forward_ar_plain_calls")
         if not self.mtp_enabled and return_hidden:
             raise RuntimeError("return_hidden requires an MTP-patched runtime")
+        if input_embeddings is not None and not self.mtp_enabled:
+            raise RuntimeError("vision splice requires the MTP-patched runtime")
         kwargs = {}
         if hidden_variant is not None:
             kwargs["hidden_variant"] = hidden_variant
+        if input_embeddings is not None:
+            # Vision splice path: the patched text model takes the rows
+            # directly; ids still travel for mask construction.
+            kwargs["input_embeddings"] = input_embeddings
         supports_emit_logits, supports_logits_keep = self._forward_ar_capabilities()
         if supports_emit_logits:
             kwargs["emit_logits"] = bool(emit_logits)

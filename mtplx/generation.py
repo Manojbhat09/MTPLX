@@ -514,7 +514,12 @@ def _batched_token_array(token_ids: Any) -> mx.array:
     return mx.array([token_ids])
 
 
-def _prefill_cache_only_forward(rt: MTPLXRuntime, token_ids: Any, cache: Any) -> Any:
+def _prefill_cache_only_forward(
+    rt: MTPLXRuntime,
+    token_ids: Any,
+    cache: Any,
+    input_embeddings: Any | None = None,
+) -> Any:
     token_array = _batched_token_array(token_ids)
     if not _prefill_external_cache_only_enabled():
         return rt.forward_ar(
@@ -522,6 +527,7 @@ def _prefill_cache_only_forward(rt: MTPLXRuntime, token_ids: Any, cache: Any) ->
             cache=cache,
             return_hidden=False,
             emit_logits=not _final_logits_prefill_enabled(),
+            input_embeddings=input_embeddings,
         )
     _runtime_count(rt, "prefill_external_cache_only_calls")
     if _prefill_stock_cache_only_enabled():
@@ -534,8 +540,14 @@ def _prefill_cache_only_forward(rt: MTPLXRuntime, token_ids: Any, cache: Any) ->
             cache=cache,
             return_hidden=False,
             emit_logits=False,
+            input_embeddings=input_embeddings,
         )
-    unused_logits = rt.model(token_array, cache=cache)
+    if input_embeddings is not None:
+        unused_logits = rt.model(
+            token_array, cache=cache, input_embeddings=input_embeddings
+        )
+    else:
+        unused_logits = rt.model(token_array, cache=cache)
     del unused_logits
     return None
 
@@ -2307,6 +2319,7 @@ def restore_or_prefill_prompt_state(
     policy_fingerprint: str | None = None,
     abort_check: Callable[[], bool] | None = None,
     prefill_callback: Callable[[dict[str, Any]], None] | None = None,
+    vision_splice: Any | None = None,
 ) -> PromptState:
     """Build the initial prompt state used by MTP-k decode.
 
@@ -2314,6 +2327,11 @@ def restore_or_prefill_prompt_state(
     today's cold path behavior intact while giving EngineSession a concrete
     target for future warm SessionBank restores.
     """
+    if vision_splice is not None and session_bank is not None:
+        # Image content is not represented in token ids, so prefix reuse
+        # would alias different images. The server disables the bank for
+        # vision requests; enforce it here as well.
+        raise ValueError("vision requests must not use the session bank")
     base_hidden_variant = _resolve_runtime_base_hidden_variant(rt, base_hidden_variant)
     mtp_hidden_variant = _resolve_runtime_mtp_hidden_variant(rt, mtp_hidden_variant)
     mtp_position_mode = _resolve_runtime_mtp_position_mode(rt)
@@ -2600,6 +2618,7 @@ def restore_or_prefill_prompt_state(
                 chunk_callback=prefill_callback,
                 cached_tokens=0,
                 chunk_started_s=prefill_started_s,
+                vision_splice=vision_splice,
             )
             prompt_eval_time = target_time + prompt_history_time
         else:
@@ -2610,6 +2629,7 @@ def restore_or_prefill_prompt_state(
                     rt,
                     prompt_ids,
                     hidden_variant=base_hidden_variant,
+                    vision_splice=vision_splice,
                 )
             )
             _check_postcommit_abort(abort_check)
@@ -2646,6 +2666,7 @@ def restore_or_prefill_prompt_state(
             return_hidden=True,
             hidden_variant=base_hidden_variant,
             abort_check=abort_check,
+            vision_splice=vision_splice,
         )
         prompt_eval_time = target_time
     return _emit_prefill_complete(PromptState(
@@ -3000,6 +3021,7 @@ def _prefill(
     return_hidden: bool,
     hidden_variant: str | None = None,
     abort_check: Callable[[], bool] | None = None,
+    vision_splice: Any | None = None,
 ):
     if not prompt_ids:
         raise ValueError("prompt_ids must not be empty")
@@ -3015,9 +3037,18 @@ def _prefill(
         for start, end in _iter_prefill_chunk_spans(len(body)):
             _check_postcommit_abort(abort_check)
             chunk_array = body_array[:, start:end]
+            chunk_embeddings = None
+            if vision_splice is not None:
+                from mtplx.vision.splice import spliced_chunk_embeddings
+
+                chunk_embeddings = spliced_chunk_embeddings(
+                    rt.embed_tokens, chunk_array, vision_splice
+                )
             started = time.perf_counter()
             with attention_phase("prefill"):
-                prefill = _prefill_cache_only_forward(rt, chunk_array, cache)
+                prefill = _prefill_cache_only_forward(
+                    rt, chunk_array, cache, input_embeddings=chunk_embeddings
+                )
             if prefill is None:
                 _eval_cache_roots(cache)
             else:
@@ -3026,6 +3057,11 @@ def _prefill(
             target_forward_time += time.perf_counter() - started
             target_forward_time += _prefill_chunk_cache_cleanup(rt)
             _check_postcommit_abort(abort_check)
+        if vision_splice is not None and vision_splice.remaining() > 0:
+            raise ValueError(
+                "vision splice overflow: request supplied more vision rows "
+                f"({vision_splice.total_rows}) than image pad tokens in the prompt"
+            )
 
     started = time.perf_counter()
     _check_postcommit_abort(abort_check)
@@ -3064,6 +3100,7 @@ def _prefill_committed_mtp_history_streaming(
     chunk_callback: Callable[[dict[str, Any]], None] | None = None,
     cached_tokens: int = 0,
     chunk_started_s: float | None = None,
+    vision_splice: Any | None = None,
 ):
     if not prompt_ids:
         raise ValueError("prompt_ids must not be empty")
@@ -3096,6 +3133,13 @@ def _prefill_committed_mtp_history_streaming(
         needs_history_hidden = (
             history_window_tokens is None or token_end_index > history_start_token_index
         )
+        chunk_embeddings = None
+        if vision_splice is not None:
+            from mtplx.vision.splice import spliced_chunk_embeddings
+
+            chunk_embeddings = spliced_chunk_embeddings(
+                rt.embed_tokens, chunk_array, vision_splice
+            )
         started = time.perf_counter()
         with attention_phase("prefill"):
             if needs_history_hidden:
@@ -3105,10 +3149,13 @@ def _prefill_committed_mtp_history_streaming(
                     return_hidden=True,
                     hidden_variant=base_hidden_variant,
                     emit_logits=not final_logits_only,
+                    input_embeddings=chunk_embeddings,
                 )
             else:
                 hidden_chunk = None
-                logits_chunk = _prefill_cache_only_forward(rt, chunk_array, cache)
+                logits_chunk = _prefill_cache_only_forward(
+                    rt, chunk_array, cache, input_embeddings=chunk_embeddings
+                )
         if hidden_chunk is None:
             if logits_chunk is None:
                 _eval_cache_roots(cache)
@@ -3222,20 +3269,30 @@ def _prefill_with_hidden_sequence(
     prompt_ids: list[int],
     *,
     hidden_variant: str,
+    vision_splice: Any | None = None,
 ):
     if not prompt_ids:
         raise ValueError("prompt_ids must not be empty")
 
     cache = _make_target_prefill_cache(rt)
+    prompt_array = mx.array([prompt_ids])
+    prompt_embeddings = None
+    if vision_splice is not None:
+        from mtplx.vision.splice import spliced_chunk_embeddings
+
+        prompt_embeddings = spliced_chunk_embeddings(
+            rt.embed_tokens, prompt_array, vision_splice
+        )
     started = time.perf_counter()
     with attention_phase("prefill"):
         logits, hidden = rt.forward_ar(
-            mx.array([prompt_ids]),
+            prompt_array,
             cache=cache,
             return_hidden=True,
             hidden_variant=hidden_variant,
             emit_logits=True,
             logits_keep=1 if _final_logits_prefill_enabled() else None,
+            input_embeddings=prompt_embeddings,
         )
     _eval(logits, hidden)
     target_forward_time = time.perf_counter() - started
@@ -4368,6 +4425,7 @@ def generate_mtpk(
     trace_metadata: dict[str, Any] | None = None,
     prefill_callback: Callable[[dict[str, Any]], None] | None = None,
     repetition_stop: bool = False,
+    vision_splice: Any | None = None,
 ) -> GenerationOutput:
     """Generate with a fixed native-MTP depth.
 
@@ -4513,6 +4571,7 @@ def generate_mtpk(
     prompt_state = restore_or_prefill_prompt_state(
         rt,
         prompt_ids,
+        vision_splice=vision_splice,
         base_hidden_variant=base_hidden_variant,
         mtp_hidden_variant=mtp_hidden_variant,
         mtp_history_policy=mtp_history_policy,
@@ -5004,9 +5063,14 @@ def generate_mtpk(
             int(token) for token in tokens[:current_tokens]
         ]
         started_rebase = time.perf_counter()
+        if vision_splice is not None:
+            # The rebase replays the full prompt, so the splice queue
+            # must rewind to serve the image rows again.
+            vision_splice.reset()
         rebased = restore_or_prefill_prompt_state(
             rt,
             prefix_tokens,
+            vision_splice=vision_splice,
             base_hidden_variant=base_hidden_variant,
             mtp_hidden_variant=mtp_hidden_variant,
             mtp_history_policy=mtp_history_policy,
