@@ -1093,6 +1093,12 @@ public struct HealthPayload: Codable, Equatable, Sendable {
     public var ssdSessionCache: SessionBankColdTier?
     public var startup: Startup?
     public var thermal: Thermal?
+    public var vision: VisionCapability?
+
+    public struct VisionCapability: Codable, Equatable, Sendable {
+        public var enabled: Bool
+        public var formats: [String]?
+    }
 
     enum CodingKeys: String, CodingKey {
         case ok
@@ -1120,6 +1126,7 @@ public struct HealthPayload: Codable, Equatable, Sendable {
         case ssdSessionCache = "ssd_session_cache"
         case startup
         case thermal
+        case vision
     }
 }
 

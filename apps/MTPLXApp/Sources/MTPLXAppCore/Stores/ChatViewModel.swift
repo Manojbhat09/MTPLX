@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import ImageIO
 import SwiftData
 
 // MARK: - StreamingPhase
@@ -238,9 +239,23 @@ public final class ChatViewModel: ObservableObject {
 
     // MARK: - Attachments
 
+    private static let imageAttachmentExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "webp",
+    ]
+    private static let imageAttachmentMaxBytes = 20 * 1024 * 1024
+    private static let imageAttachmentMaxDimension = 2048
+
     public func attach(_ urls: [URL]) async {
         var added: [ChatAttachment] = []
         for url in urls {
+            if Self.imageAttachmentExtensions.contains(url.pathExtension.lowercased()) {
+                do {
+                    added.append(try Self.imageAttachment(from: url))
+                } catch {
+                    lastError = .unknown(error.localizedDescription)
+                }
+                continue
+            }
             do {
                 let extracted = try FileExtractor.extract(from: url)
                 let attachment = ChatAttachment(
@@ -1077,7 +1092,72 @@ public final class ChatViewModel: ObservableObject {
     }
 
     private static func isSendableAttachment(_ attachment: ChatAttachment) -> Bool {
-        !attachment.extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        attachment.imageData != nil
+            || !attachment.extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func imageAttachment(from url: URL) throws -> ChatAttachment {
+        let data = try Data(contentsOf: url)
+        guard data.count <= imageAttachmentMaxBytes else {
+            throw FileExtractorError.unreadable(
+                filename: url.lastPathComponent,
+                reason: "image exceeds the 20MB attachment limit"
+            )
+        }
+        let downscaled = downscaledImageData(data)
+        return ChatAttachment(
+            filename: url.lastPathComponent,
+            mimeType: downscaled != nil
+                ? "image/png"
+                : FileExtractor.mimeType(for: url.pathExtension),
+            sizeBytes: (downscaled ?? data).count,
+            extractedText: "",
+            imageData: downscaled ?? data
+        )
+    }
+
+    /// Returns PNG bytes capped at the max dimension, or nil when the
+    /// original already fits (keep the original bytes and format).
+    private static func downscaledImageData(_ data: Data) -> Data? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                as? [CFString: Any]
+        else {
+            return nil
+        }
+        let width = (properties[kCGImagePropertyPixelWidth] as? Int) ?? 0
+        let height = (properties[kCGImagePropertyPixelHeight] as? Int) ?? 0
+        guard max(width, height) > imageAttachmentMaxDimension else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: imageAttachmentMaxDimension,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ]
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(
+            source, 0, options as CFDictionary
+        ) else {
+            return nil
+        }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            output, "public.png" as CFString, 1, nil
+        ) else {
+            return nil
+        }
+        CGImageDestinationAddImage(destination, thumbnail, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return output as Data
+    }
+
+    private static func imageDataURLs(for message: ChatMessage) -> [String]? {
+        let urls = message.attachments
+            .filter { $0.imageData != nil }
+            .sorted { $0.createdAt < $1.createdAt }
+            .compactMap { attachment -> String? in
+                guard let data = attachment.imageData else { return nil }
+                return "data:\(attachment.mimeType);base64,\(data.base64EncodedString())"
+            }
+        return urls.isEmpty ? nil : urls
     }
 
     private static func firstNWords(_ text: String, n: Int) -> String {
@@ -1103,7 +1183,13 @@ public final class ChatViewModel: ObservableObject {
                     (isLast && overrideLastUserContent != nil)
                     ? overrideLastUserContent
                     : message.visibleContent
-                output.append(ChatRequestMessage(role: "user", content: content))
+                output.append(
+                    ChatRequestMessage(
+                        role: "user",
+                        content: content,
+                        imageDataURLs: Self.imageDataURLs(for: message)
+                    )
+                )
             case .assistant:
                 output.append(assistantRequestMessage(from: message))
             case .tool:

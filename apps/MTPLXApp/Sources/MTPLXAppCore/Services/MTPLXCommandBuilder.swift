@@ -367,18 +367,25 @@ public struct MTPLXCommandBuilder: Sendable {
     /// directories before searching, so the daemon launches from a
     /// Homebrew install without the user having to set anything.
     private static func searchPaths(environment: [String: String]) -> [String] {
+        let disableStandardPaths = environment["MTPLX_APP_DISABLE_STANDARD_PATHS"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let standardPathsDisabled =
+            disableStandardPaths == "1"
+            || disableStandardPaths == "true"
+            || disableStandardPaths == "yes"
         var paths: [String] = []
-        let appRuntimeBin = appRuntimeBinDirectory(environment: environment)
-        paths.append(appRuntimeBin)
+        if !standardPathsDisabled {
+            // The app-managed venv is a standard location too: tests pin
+            // PATH to fakes and must not leak the machine's real runtime.
+            paths.append(appRuntimeBinDirectory(environment: environment))
+        }
         if let envPath = environment["PATH"], !envPath.isEmpty {
             for path in envPath.split(separator: ":").map(String.init) where !paths.contains(path) {
                 paths.append(path)
             }
         }
-        let disableStandardPaths = environment["MTPLX_APP_DISABLE_STANDARD_PATHS"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        if disableStandardPaths == "1" || disableStandardPaths == "true" || disableStandardPaths == "yes" {
+        if standardPathsDisabled {
             return paths
         }
         let home = environment["HOME"] ?? NSHomeDirectory()

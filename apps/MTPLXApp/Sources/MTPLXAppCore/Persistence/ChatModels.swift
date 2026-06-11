@@ -149,8 +149,13 @@ public final class ChatAttachment {
     /// present (failed extractions are not persisted — the user gets a
     /// red-dot composer chip and can send without the attachment).
     public var extractedText: String
+    /// Raw encoded image bytes for vision attachments (PNG/JPEG/WebP,
+    /// already downscaled client-side). Nil for text attachments.
+    public var imageData: Data?
     public var createdAt: Date
     public var message: ChatMessage?
+
+    public var isImage: Bool { imageData != nil }
 
     public init(
         id: UUID = UUID(),
@@ -158,6 +163,7 @@ public final class ChatAttachment {
         mimeType: String,
         sizeBytes: Int,
         extractedText: String,
+        imageData: Data? = nil,
         createdAt: Date = Date(),
         message: ChatMessage? = nil
     ) {
@@ -166,6 +172,7 @@ public final class ChatAttachment {
         self.mimeType = mimeType
         self.sizeBytes = sizeBytes
         self.extractedText = extractedText
+        self.imageData = imageData
         self.createdAt = createdAt
         self.message = message
     }

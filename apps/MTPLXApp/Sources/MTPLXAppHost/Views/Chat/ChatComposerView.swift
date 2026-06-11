@@ -226,21 +226,29 @@ struct ChatComposerView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = Self.allowedContentTypes()
+        let visionEnabled = backend.health?.vision?.enabled == true
+        panel.allowedContentTypes = Self.allowedContentTypes(
+            includeImages: visionEnabled
+        )
         panel.prompt = "Attach"
-        panel.message = "Attach files (PDF, docx, md, txt) to include their text in your message."
+        panel.message = visionEnabled
+            ? "Attach documents (PDF, docx, md, txt) or images (PNG, JPEG, WebP)."
+            : "Attach files (PDF, docx, md, txt) to include their text in your message."
         if panel.runModal() == .OK {
             let urls = panel.urls
             Task { await viewModel.attach(urls) }
         }
     }
 
-    private static func allowedContentTypes() -> [UTType] {
+    private static func allowedContentTypes(includeImages: Bool) -> [UTType] {
         var types: [UTType] = []
         if let pdf = UTType(filenameExtension: "pdf") { types.append(pdf) }
         if let docx = UTType(filenameExtension: "docx") { types.append(docx) }
         if let md = UTType(filenameExtension: "md") { types.append(md) }
         if let txt = UTType(filenameExtension: "txt") { types.append(txt) }
+        if includeImages {
+            types.append(contentsOf: [.png, .jpeg, .webP])
+        }
         return types
     }
 

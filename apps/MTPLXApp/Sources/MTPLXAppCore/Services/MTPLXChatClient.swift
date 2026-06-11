@@ -28,25 +28,78 @@ public struct ChatRequestMessage: Codable, Hashable, Sendable {
     /// calls in the previous turn. The viewmodel echoes these back so
     /// the daemon's SessionBank prefix-match stays tight.
     public var toolCalls: [ChatRequestToolCall]?
+    /// data: URLs for attached images. When non-empty the message
+    /// encodes as OpenAI content parts (images first, then the text)
+    /// instead of a plain string.
+    public var imageDataURLs: [String]?
 
     public init(
         role: String,
         content: String? = nil,
         name: String? = nil,
         toolCallId: String? = nil,
-        toolCalls: [ChatRequestToolCall]? = nil
+        toolCalls: [ChatRequestToolCall]? = nil,
+        imageDataURLs: [String]? = nil
     ) {
         self.role = role
         self.content = content
         self.name = name
         self.toolCallId = toolCallId
         self.toolCalls = toolCalls
+        self.imageDataURLs = imageDataURLs
     }
 
     private enum CodingKeys: String, CodingKey {
         case role, content, name
         case toolCallId = "tool_call_id"
         case toolCalls = "tool_calls"
+    }
+
+    private struct ContentPart: Codable {
+        struct ImageURL: Codable {
+            var url: String
+        }
+
+        var type: String
+        var text: String?
+        var imageURL: ImageURL?
+
+        enum CodingKeys: String, CodingKey {
+            case type, text
+            case imageURL = "image_url"
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        role = try container.decode(String.self, forKey: .role)
+        content = try? container.decodeIfPresent(String.self, forKey: .content)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        toolCallId = try container.decodeIfPresent(String.self, forKey: .toolCallId)
+        toolCalls = try container.decodeIfPresent(
+            [ChatRequestToolCall].self, forKey: .toolCalls
+        )
+        imageDataURLs = nil
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(role, forKey: .role)
+        try container.encodeIfPresent(name, forKey: .name)
+        try container.encodeIfPresent(toolCallId, forKey: .toolCallId)
+        try container.encodeIfPresent(toolCalls, forKey: .toolCalls)
+        if let imageDataURLs, !imageDataURLs.isEmpty {
+            var parts: [ContentPart] = imageDataURLs.map {
+                ContentPart(type: "image_url", text: nil, imageURL: .init(url: $0))
+            }
+            let text = content ?? ""
+            if !text.isEmpty {
+                parts.append(ContentPart(type: "text", text: text, imageURL: nil))
+            }
+            try container.encode(parts, forKey: .content)
+        } else {
+            try container.encodeIfPresent(content, forKey: .content)
+        }
     }
 }
 
