@@ -17,14 +17,15 @@ working as one product. Full notes:
   depth, verify waterfall, activity), native chat with attachments and
   web search, Forge, the AIME benchmark, and agent launchers for
   OpenCode, Pi, Hermes, and Open WebUI.
-- New model families: Step 3.5 and Step 3.7 Flash (with trained MTP
-  adapters and selectable reasoning effort), Gemma 4 (assistant-pair
-  drafting tuned by draft block size), and Qwen 3.6 MoE 35B-A3B
-  (prequantized expert sidecars, normalized expert layouts, hard blocks
-  on unrunnable layouts), alongside Qwen 3.5 4B and 9B.
-- SSD session cache: a session's KV state persists to disk with enforced
-  size caps and restores near-instantly across server restarts, with
-  admin endpoints for inspection and archiving.
+- New models: Gemma 4 (assistant-pair drafting tuned by draft block
+  size) and Qwen 3.6 MoE 35B-A3B (prequantized expert sidecars,
+  normalized expert layouts, hard blocks on unrunnable layouts),
+  alongside Qwen 3.5 4B and 9B for smaller machines.
+- KV cache reuse on two layers: warm-prefix reuse in RAM across turns
+  and requests (multi-turn chats and agents like OpenCode hit the cache
+  instead of re-processing the conversation), and an SSD session cache
+  that persists KV state to disk with enforced size caps and restores
+  near-instantly across server restarts.
 - Concurrency: continuous batching with presets, a scheduler mode, and
   explicit caps (`--max-active-requests`, `--decode-batch-max`,
   `--batch-wait-ms`).
@@ -70,21 +71,5 @@ working as one product. Full notes:
 - The OpenAI-compatible server honors `stop` sequences (chat,
   completions, and Anthropic `stop_sequences`) and `/v1/completions`
   streams tokens as they are generated with real finish reasons.
-- AIME benchmark prompts now carry only the answer-format contract, with
-  no solution-strategy or style coaching, and every run records the
-  exact prompts and rescue policy in its summary for reproducibility.
-- The daemon watchdog flags a server that is alive but not serving
-  within about 35 seconds instead of letting it sit healthy-looking.
-
-### Fixed
-
-- Forced final-answer agent turns no longer leak internal rehearsal text
-  or drop tools mid-conversation.
-- The Qwen 3.6 35B speed preset applies its measured draft sampler unless
-  explicitly overridden.
-- Skipping the tuning step during onboarding no longer skips runtime
-  installation.
-- A previously tuned depth from one model no longer leaks into another
-  model's launch settings.
 
 [1.0.0]: https://github.com/youssofal/mtplx/releases/tag/v1.0.0
