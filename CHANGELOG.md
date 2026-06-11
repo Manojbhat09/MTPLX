@@ -4,6 +4,37 @@ All notable user-facing changes to MTPLX. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.3] - 2026-06-12
+
+The app can see. Vision lands across the Qwen models, and the
+compatibility gate stops blocking models that run fine.
+
+### Added
+
+- Vision support in chat and the API. Attach PNG, JPEG, or WebP images
+  in the app composer, or send OpenAI image_url content parts to
+  /v1/chat/completions, and the model describes what it sees with MTP
+  speculative decoding still running on top. Works on Qwen 3.6 27B
+  (Speed and Quality), Qwen 3.6 35B, and Qwen 3.5 9B. The 9B repo on
+  Hugging Face regained its vision weights; an explicit mtplx pull now
+  syncs such repo updates into existing local copies automatically.
+- /health reports whether the loaded model supports vision, and the
+  composer adapts to it.
+
+### Fixed
+
+- Models that run fine are no longer refused for paperwork. The
+  compatibility gate treated unverified runtime contracts (including
+  the official Optimized Quality build) and even "slower than AR"
+  speed evidence as reasons not to load. Verification is now a label:
+  unverified models load with an honest note, and refusals are
+  reserved for models that genuinely cannot execute (#98).
+- The gate's explanation message crashed with a traceback instead of
+  printing since 1.0.0. It prints again, including the hint that was
+  supposed to unblock you (#98).
+- Image attachments preview their actual pixels in the composer and
+  the transcript instead of a "Could not read" placeholder.
+
 ## [1.0.2] - 2026-06-11
 
 Bug-fix release with one small feature.
