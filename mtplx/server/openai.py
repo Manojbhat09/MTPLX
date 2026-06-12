@@ -11529,6 +11529,56 @@ def _live_frontier_miss_reason_from_counts(
     return f"miss_{reason}" if reason else "miss_unknown"
 
 
+def _live_frontier_envelope_fields(
+    *,
+    request_observability: dict[str, Any],
+    session_cache_hit: bool,
+    session_restore_mode: Any,
+    cache_miss_reason: str | None,
+    session_keep_live_ref: bool,
+) -> dict[str, Any]:
+    """Frontier hit/miss envelope fields for agent result turns.
+
+    Returns an empty dict for non-result turns so callers can
+    unconditionally ``envelope.update(...)``.
+    """
+
+    if not request_observability.get("live_frontier_result_turn"):
+        return {}
+    frontier_hit = bool(session_cache_hit)
+    return {
+        "live_frontier_hit": frontier_hit,
+        "live_frontier_restore_mode": session_restore_mode,
+        "live_frontier_miss_reason": (
+            None
+            if frontier_hit
+            else _live_frontier_miss_reason_from_counts(
+                assistant_tool_call_count=int(
+                    request_observability.get(
+                        "live_frontier_assistant_tool_call_count"
+                    )
+                    or 0
+                ),
+                tool_result_count=int(
+                    request_observability.get("live_frontier_tool_result_count")
+                    or 0
+                ),
+                unknown_tool_result_count=int(
+                    request_observability.get(
+                        "live_frontier_unknown_tool_result_count"
+                    )
+                    or 0
+                ),
+                cache_miss_reason=cache_miss_reason,
+                session_source=str(
+                    request_observability.get("request_session_source") or ""
+                ),
+                session_keep_live_ref=session_keep_live_ref,
+            )
+        ),
+    }
+
+
 def _clear_mlx_cache_after_request(
     state: Any,
     *,
@@ -14452,38 +14502,15 @@ def _run_generation(
             envelope["draft_time_s"] = 0.0
         if request_observability:
             envelope.update(request_observability)
-            if request_observability.get("live_frontier_result_turn"):
-                frontier_hit = bool(session_cache_hit)
-                envelope["live_frontier_hit"] = frontier_hit
-                envelope["live_frontier_restore_mode"] = session_restore_mode
-                envelope["live_frontier_miss_reason"] = (
-                    None
-                    if frontier_hit
-                    else _live_frontier_miss_reason_from_counts(
-                        assistant_tool_call_count=int(
-                            request_observability.get(
-                                "live_frontier_assistant_tool_call_count"
-                            )
-                            or 0
-                        ),
-                        tool_result_count=int(
-                            request_observability.get("live_frontier_tool_result_count")
-                            or 0
-                        ),
-                        unknown_tool_result_count=int(
-                            request_observability.get(
-                                "live_frontier_unknown_tool_result_count"
-                            )
-                            or 0
-                        ),
-                        cache_miss_reason=cache_miss_reason,
-                        session_source=str(
-                            request_observability.get("request_session_source") or ""
-                        ),
-                        session_keep_live_ref=session_keep_live_ref,
-                        vision_splice=vision_splice,
-                    )
+            envelope.update(
+                _live_frontier_envelope_fields(
+                    request_observability=request_observability,
+                    session_cache_hit=bool(session_cache_hit),
+                    session_restore_mode=session_restore_mode,
+                    cache_miss_reason=cache_miss_reason,
+                    session_keep_live_ref=session_keep_live_ref,
                 )
+            )
         cleanup = _auto_clear_mlx_cache_after_completed_request(
             state,
             session_id=session_id,

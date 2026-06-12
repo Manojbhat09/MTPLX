@@ -775,6 +775,122 @@ def test_live_frontier_miss_reason_maps_agent_cache_causes():
     )
 
 
+def test_live_frontier_envelope_fields_reports_miss_reason_on_result_turn():
+    # Regression for #100/#99: 1.0.3 raised a TypeError while assembling
+    # exactly this envelope on every agent tool-result turn whose live
+    # frontier missed, killing Pi/Hermes/OpenCode sessions.
+    observability = {
+        "live_frontier_result_turn": True,
+        "live_frontier_assistant_tool_call_count": 2,
+        "live_frontier_tool_result_count": 1,
+        "live_frontier_unknown_tool_result_count": 0,
+        "request_session_source": "metadata.chat_id",
+    }
+
+    fields = openai._live_frontier_envelope_fields(
+        request_observability=observability,
+        session_cache_hit=False,
+        session_restore_mode=None,
+        cache_miss_reason="new_session",
+        session_keep_live_ref=True,
+    )
+
+    assert fields == {
+        "live_frontier_hit": False,
+        "live_frontier_restore_mode": None,
+        "live_frontier_miss_reason": "miss_wrong_session_or_no_prior_frontier",
+    }
+
+
+def test_live_frontier_envelope_fields_hit_carries_no_miss_reason():
+    fields = openai._live_frontier_envelope_fields(
+        request_observability={
+            "live_frontier_result_turn": True,
+            "live_frontier_assistant_tool_call_count": 1,
+            "live_frontier_tool_result_count": 1,
+            "live_frontier_unknown_tool_result_count": 0,
+        },
+        session_cache_hit=True,
+        session_restore_mode="reference_lease",
+        cache_miss_reason=None,
+        session_keep_live_ref=True,
+    )
+
+    assert fields == {
+        "live_frontier_hit": True,
+        "live_frontier_restore_mode": "reference_lease",
+        "live_frontier_miss_reason": None,
+    }
+
+
+def test_live_frontier_envelope_fields_empty_for_non_result_turns():
+    assert (
+        openai._live_frontier_envelope_fields(
+            request_observability={},
+            session_cache_hit=False,
+            session_restore_mode=None,
+            cache_miss_reason=None,
+            session_keep_live_ref=False,
+        )
+        == {}
+    )
+
+
+def test_vision_splice_kwargs_always_match_callee_signatures():
+    # Guard for the bug class behind #100: a ``vision_splice=`` kwarg
+    # mechanically threaded into a call whose target never declared it.
+    # Every call passing vision_splice must target a function that
+    # declares the parameter (or **kwargs), resolved by real signatures.
+    import ast
+
+    import mtplx.generation
+    import mtplx.runtime
+    import mtplx.vision.splice
+
+    sources = [
+        Path(openai.__file__),
+        Path(mtplx.generation.__file__),
+        Path(mtplx.runtime.__file__),
+        Path(mtplx.vision.splice.__file__),
+    ]
+
+    defs: dict[str, tuple[bool, bool]] = {}
+    calls: list[tuple[str, int, ast.expr]] = []
+    for source in sources:
+        tree = ast.parse(source.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                params = [
+                    arg.arg
+                    for arg in (
+                        node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+                    )
+                ]
+                defs[node.name] = (
+                    "vision_splice" in params,
+                    node.args.kwarg is not None,
+                )
+            elif isinstance(node, ast.Call) and any(
+                keyword.arg == "vision_splice" for keyword in node.keywords
+            ):
+                calls.append((source.name, node.lineno, node.func))
+
+    assert len(calls) >= 10, "vision_splice call sites disappeared; audit is stale"
+
+    problems = []
+    for filename, lineno, func in calls:
+        if not isinstance(func, ast.Name):
+            problems.append(f"{filename}:{lineno} passes vision_splice to a non-plain callee")
+            continue
+        declared, has_kwargs = defs.get(func.id, (False, False))
+        if not (declared or has_kwargs):
+            problems.append(
+                f"{filename}:{lineno} passes vision_splice to {func.id}() which does not accept it"
+            )
+
+    assert not problems, "\n".join(problems)
+
+
 class FakeExecutor:
     def submit(self, fn, *args, **kwargs):
         future: Future = Future()
